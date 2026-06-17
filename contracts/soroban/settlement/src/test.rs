@@ -25,18 +25,32 @@ impl MockEndpoint {
         _refund_address: Address,
         _native_fee: i128,
     ) -> BytesN<32> {
-        let count: u32 = env.storage().instance().get(&symbol_short!("count")).unwrap_or(0);
-        env.storage().instance().set(&symbol_short!("count"), &(count + 1));
-        env.storage().instance().set(&symbol_short!("last"), &params);
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("count"))
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("count"), &(count + 1));
+        env.storage()
+            .instance()
+            .set(&symbol_short!("last"), &params);
         BytesN::from_array(&env, &[0u8; 32])
     }
 
     pub fn sent(env: Env) -> u32 {
-        env.storage().instance().get(&symbol_short!("count")).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&symbol_short!("count"))
+            .unwrap_or(0)
     }
 
     pub fn last(env: Env) -> MessagingParams {
-        env.storage().instance().get(&symbol_short!("last")).unwrap()
+        env.storage()
+            .instance()
+            .get(&symbol_short!("last"))
+            .unwrap()
     }
 }
 
@@ -77,7 +91,15 @@ fn setup() -> Setup {
     let asset = sac.address();
     let asset_admin = token::StellarAssetClient::new(&env, &asset);
 
-    Setup { env, client, mock, asset, asset_admin, src_eid, peer }
+    Setup {
+        env,
+        client,
+        mock,
+        asset,
+        asset_admin,
+        src_eid,
+        peer,
+    }
 }
 
 fn hash(env: &Env, b: u8) -> BytesN<32> {
@@ -103,9 +125,14 @@ fn register_intent(
         deadline,
         preferred_solver: preferred,
     };
-    let origin = Origin { src_eid: s.src_eid, sender: s.peer.clone(), nonce };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce,
+    };
     let guid = BytesN::from_array(&s.env, &[0u8; 32]);
-    s.client.lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+    s.client
+        .lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
 }
 
 // --- Happy path ---------------------------------------------------------------
@@ -129,7 +156,10 @@ fn registers_and_fills() {
     assert_eq!(tok.balance(&solver), 750_000);
     assert!(s.client.is_settled(&h));
     assert_eq!(s.mock.sent(), 1); // FillConfirmed dispatched
-    assert_eq!(s.client.get_intent(&h).unwrap().status, IntentStatus::ConfirmationSent);
+    assert_eq!(
+        s.client.get_intent(&h).unwrap().status,
+        IntentStatus::ConfirmationSent
+    );
 }
 
 #[test]
@@ -145,7 +175,10 @@ fn cancel_after_deadline_notifies_source() {
 
     assert!(s.client.is_cancelled(&h));
     assert_eq!(s.mock.sent(), 1); // CancelIntent dispatched
-    assert_eq!(s.client.get_intent(&h).unwrap().status, IntentStatus::Cancelled);
+    assert_eq!(
+        s.client.get_intent(&h).unwrap().status,
+        IntentStatus::Cancelled
+    );
 }
 
 // --- Invariant guards ---------------------------------------------------------
@@ -208,7 +241,8 @@ fn rejects_fill_of_unknown_intent() {
     let s = setup();
     let solver = Address::generate(&s.env);
     let evm = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.fill_intent(&solver, &evm, &hash(&s.env, 99), &100, &0);
+    s.client
+        .fill_intent(&solver, &evm, &hash(&s.env, 99), &100, &0);
 }
 
 #[test]
@@ -240,9 +274,14 @@ fn rejects_message_from_untrusted_peer() {
         preferred_solver: None,
     };
     let bad_sender = BytesN::from_array(&s.env, &[0xAB; 32]);
-    let origin = Origin { src_eid: s.src_eid, sender: bad_sender, nonce: 1 };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: bad_sender,
+        nonce: 1,
+    };
     let guid = BytesN::from_array(&s.env, &[0u8; 32]);
-    s.client.lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+    s.client
+        .lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
 }
 
 #[test]
@@ -271,7 +310,8 @@ fn rejects_fill_while_paused() {
     s.client.set_paused(&true);
     let solver = Address::generate(&s.env);
     let evm = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.fill_intent(&solver, &evm, &hash(&s.env, 11), &100, &0);
+    s.client
+        .fill_intent(&solver, &evm, &hash(&s.env, 11), &100, &0);
 }
 
 // --- Outbound codec -----------------------------------------------------------

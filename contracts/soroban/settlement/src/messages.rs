@@ -28,7 +28,10 @@ pub fn encode_fill_confirmed(
     b.append(&Bytes::from_array(env, &intent_hash.to_array()));
     b.append(&Bytes::from_array(env, &solver_evm.to_array()));
     // Amount is validated non-negative before encoding; widen to u128 wire form.
-    b.append(&Bytes::from_array(env, &(fill_amount as u128).to_be_bytes()));
+    b.append(&Bytes::from_array(
+        env,
+        &(fill_amount as u128).to_be_bytes(),
+    ));
     b.append(&Bytes::from_array(env, &(fill_ledger as u64).to_be_bytes()));
     b
 }

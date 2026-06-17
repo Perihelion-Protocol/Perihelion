@@ -63,7 +63,9 @@ impl Perihelion {
     /// Rotate the trusted endpoint. Admin-only.
     pub fn set_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
-        env.storage().instance().set(&DataKey::Endpoint, &new_endpoint);
+        env.storage()
+            .instance()
+            .set(&DataKey::Endpoint, &new_endpoint);
         Ok(())
     }
 
@@ -180,7 +182,11 @@ impl Perihelion {
             .set(&DataKey::Settled(intent_hash.clone()), &true);
 
         // Interaction: deliver the destination asset from the solver to the user.
-        token::TokenClient::new(&env, &rec.dest_asset).transfer(&solver, &rec.recipient, &fill_amount);
+        token::TokenClient::new(&env, &rec.dest_asset).transfer(
+            &solver,
+            &rec.recipient,
+            &fill_amount,
+        );
 
         // Refresh TTLs touched by this call.
         let bump = Self::ttl_for_deadline(&env, rec.deadline);
@@ -379,7 +385,11 @@ impl Perihelion {
             return Ok(());
         }
         let key = DataKey::Intent(ci.intent_hash.clone());
-        if let Some(mut rec) = env.storage().persistent().get::<DataKey, IntentRecord>(&key) {
+        if let Some(mut rec) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, IntentRecord>(&key)
+        {
             if rec.status == IntentStatus::Locked {
                 rec.status = IntentStatus::Cancelled;
                 env.storage().persistent().set(&key, &rec);
@@ -403,8 +413,13 @@ impl Perihelion {
         solver_evm: &BytesN<32>,
         lz_fee: i128,
     ) -> Result<(), PerihelionError> {
-        let message =
-            encode_fill_confirmed(env, &rec.intent_hash, solver_evm, rec.fill_amount, rec.fill_ledger);
+        let message = encode_fill_confirmed(
+            env,
+            &rec.intent_hash,
+            solver_evm,
+            rec.fill_amount,
+            rec.fill_ledger,
+        );
         Self::dispatch(env, payer, rec.src_eid, message, lz_fee)
     }
 
