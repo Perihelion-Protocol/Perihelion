@@ -1,0 +1,35 @@
+name: EVM
+
+on:
+  push:
+    branches: [main]
+    paths: ["contracts/evm/**", ".github/workflows/evm.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["contracts/evm/**", ".github/workflows/evm.yml"]
+
+concurrency:
+  group: evm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evm:
+    name: EVM (Solidity)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/evm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install forge-std
+        run: forge install foundry-rs/forge-std --no-git
+
+      - name: Build
+        run: forge build
+
+      - name: Tests
+        run: forge test -vvv

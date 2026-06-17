@@ -1,15 +1,15 @@
-name: Contracts
+name: Soroban
 
 on:
   push:
     branches: [main]
-    paths: ["contracts/**", ".github/workflows/contracts.yml"]
+    paths: ["contracts/soroban/**", ".github/workflows/soroban.yml"]
   pull_request:
     branches: [main]
-    paths: ["contracts/**", ".github/workflows/contracts.yml"]
+    paths: ["contracts/soroban/**", ".github/workflows/soroban.yml"]
 
 concurrency:
-  group: contracts-${{ github.workflow }}-${{ github.ref }}
+  group: soroban-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,6 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: rustfmt
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -44,24 +45,3 @@ jobs:
 
       - name: Build wasm (release)
         run: cargo build --target wasm32-unknown-unknown --release
-
-  evm:
-    name: EVM (Solidity)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: contracts/evm
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-
-      - name: Install forge-std
-        run: forge install foundry-rs/forge-std --no-git
-
-      - name: Build
-        run: forge build
-
-      - name: Tests
-        run: forge test -vvv
