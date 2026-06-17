@@ -19,6 +19,7 @@ Cargo.lock
 contracts/evm/out/
 contracts/evm/cache/
 contracts/evm/broadcast/
+contracts/evm/lib/
 
 # Editor / OS
 .DS_Store
