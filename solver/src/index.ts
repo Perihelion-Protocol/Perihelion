@@ -7,27 +7,15 @@
  */
 
 import { loadConfig } from "./config.js";
-import { Solver, type Executor } from "./solver.js";
-import type { SignedIntent } from "@perihelion/sdk";
-
-/**
- * Placeholder executor. Wire this to:
- *  1. the EVM escrow contract (lock source funds against `signed.hash`), and
- *  2. the Soroban settlement contract (release dest assets after LayerZero
- *     confirms the message).
- */
-class StubExecutor implements Executor {
-  async fill(signed: SignedIntent): Promise<{ settlementTx: string }> {
-    throw new Error(
-      `executor not configured — cannot fill ${signed.hash}. ` +
-        "Implement Executor against the EVM escrow and Soroban settlement contracts.",
-    );
-  }
-}
+import { loadExecutorConfig } from "./executor-config.js";
+import { Solver } from "./solver.js";
+import { Executor } from "./executor.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const solver = new Solver(config, new StubExecutor());
+  const executorConfig = loadExecutorConfig();
+  const executor = new Executor(executorConfig);
+  const solver = new Solver(config, executor);
 
   const shutdown = () => {
     console.info("shutting down solver");
