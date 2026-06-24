@@ -41,15 +41,45 @@ export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
   Partial<Pick<Intent, "nonce" | "preferredSolver">>;
 
 /**
- * Build a fully-formed {@link Intent}, filling in an open solver and a random
- * nonce when not provided.
+ * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
+ * messaging fee makes the intent unprofitable to fill. Override via {@link BuildOptions.minNotional}.
+ * Default: $10 USD equivalent.
  */
-export function buildIntent(params: IntentParams): Intent {
-  return {
+export const DEFAULT_V_MIN = "10000000"; // 10 USD in 6-decimal units
+
+/** Options for {@link buildIntent}. */
+export interface BuildOptions {
+  /** Minimum notional (in source-asset smallest units) below which a warning is emitted. */
+  vMin?: string;
+  /** If true, suppress the warning even if below vMin. */
+  suppressWarning?: boolean;
+}
+
+/**
+ * Build a fully-formed {@link Intent}, filling in an open solver and a random
+ * nonce when not provided. Emits a non-fatal warning if the intent's source amount
+ * is below the economical threshold (V_min).
+ */
+export function buildIntent(params: IntentParams, options?: BuildOptions): Intent {
+  const vMin = options?.vMin ?? DEFAULT_V_MIN;
+  const suppressWarning = options?.suppressWarning ?? false;
+
+  const intent: Intent = {
     ...params,
     preferredSolver: params.preferredSolver ?? zeroAddress,
     nonce: params.nonce ?? randomNonce(),
   };
+
+  // Warn if below minimum economical size
+  if (!suppressWarning && BigInt(intent.sourceAmount) < BigInt(vMin)) {
+    console.warn(
+      `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
+        `economical minimum V_min (${vMin}). The fixed LayerZero messaging fee may ` +
+        `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
+    );
+  }
+
+  return intent;
 }
 
 /** Compute the EIP-712 hash that uniquely identifies an intent. */
