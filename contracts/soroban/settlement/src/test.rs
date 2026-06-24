@@ -503,3 +503,93 @@ fn solver_reputation_returns_none_for_unfilled_solver() {
     let rep = s.client.get_solver_reputation(&solver);
     assert!(rep.is_none());
 }
+
+// --- Split delivery and dispatch (Issue #12) --------------------------------
+
+#[test]
+fn deliver_intent_records_filled_without_dispatch() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &500_000);
+
+    let h = hash(&s.env, 20);
+    register_intent(&s, &h, &recipient, 100_000, 50_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xDD; 32]);
+
+    // Deliver without dispatch
+    s.client
+        .deliver_intent(&solver, &solver_evm, &h, &250_000);
+
+    // Intent should be in Filled status
+    let rec = s.client.get_intent(&h).unwrap();
+    assert_eq!(rec.status, IntentStatus::Filled);
+
+    // No confirmation dispatch should have occurred (mock endpoint sent count unchanged)
+    let count_after = s.mock.sent();
+    assert_eq!(count_after, 0, "deliver_intent should not dispatch");
+}
+
+#[test]
+fn dispatch_confirmation_sends_message_and_advances_status() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &500_000);
+
+    let h = hash(&s.env, 21);
+    register_intent(&s, &h, &recipient, 100_000, 50_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xEE; 32]);
+
+    // Deliver first
+    s.client
+        .deliver_intent(&solver, &solver_evm, &h, &250_000);
+
+    // Then dispatch confirmation (permissionless caller)
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h, &0);
+
+    // Intent should now be ConfirmationSent
+    let rec = s.client.get_intent(&h).unwrap();
+    assert_eq!(rec.status, IntentStatus::ConfirmationSent);
+
+    // FillConfirmed should have been dispatched
+    let count_after = s.mock.sent();
+    assert_eq!(count_after, 1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #141)")] // IntentFinalized
+fn dispatch_confirmation_rejects_double_dispatch() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &500_000);
+
+    let h = hash(&s.env, 22);
+    register_intent(&s, &h, &recipient, 100_000, 50_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xFF; 32]);
+
+    // Deliver and dispatch
+    s.client
+        .deliver_intent(&solver, &solver_evm, &h, &250_000);
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h, &0);
+
+    // Second dispatch should fail
+    s.client.dispatch_confirmation(&caller, &h, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #146)")] // AlreadyFilled (not Filled status)
+fn dispatch_confirmation_rejects_non_filled_intent() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+
+    let h = hash(&s.env, 23);
+    register_intent(&s, &h, &recipient, 100_000, 50_000, 1, None);
+
+    // Try to dispatch before delivering
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h, &0);
+}

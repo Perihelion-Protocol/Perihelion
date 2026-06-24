@@ -127,8 +127,149 @@ impl Perihelion {
 
     // --- Solver fill -----------------------------------------------------------
 
-    /// Solver delivers `dest_asset` to the intent recipient from its own
-    /// inventory and dispatches a FillConfirmed so the source escrow repays it.
+    /// Solver delivers `dest_asset` to the intent recipient from its own inventory,
+    /// records the fill, and durably marks the intent `Filled`. Does NOT dispatch the
+    /// cross-chain FillConfirmed message; call `dispatch_confirmation` separately.
+    /// This separation makes the messaging leg independently retriable (Issue #12).
+    pub fn deliver_intent(
+        env: Env,
+        solver: Address,
+        solver_evm: BytesN<32>,
+        intent_hash: BytesN<32>,
+        fill_amount: i128,
+    ) -> Result<(), PerihelionError> {
+        solver.require_auth();
+        Self::require_not_paused(&env)?;
+
+        // Terminal-state guard via cheap markers (survives record archival).
+        if Self::is_finalized(&env, &intent_hash) {
+            return Err(PerihelionError::IntentFinalized);
+        }
+
+        let key = DataKey::Intent(intent_hash.clone());
+        let mut rec: IntentRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(PerihelionError::IntentNotFound)?;
+
+        if rec.status != IntentStatus::Locked {
+            return Err(PerihelionError::AlreadyFilled);
+        }
+        if env.ledger().timestamp() >= rec.deadline {
+            return Err(PerihelionError::IntentExpired);
+        }
+        if let Some(ref pref) = rec.preferred_solver {
+            if pref != &solver {
+                return Err(PerihelionError::ReservedForSolver);
+            }
+        }
+        if fill_amount <= 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        if fill_amount < rec.min_dest_amount {
+            return Err(PerihelionError::InsufficientFillAmount);
+        }
+
+        // Effects before interactions: flip status, write the settled marker.
+        rec.status = IntentStatus::Filled;
+        rec.solver = Some(solver.clone());
+        rec.solver_evm = Some(solver_evm.clone());
+        rec.fill_amount = fill_amount;
+        rec.fill_ledger = env.ledger().sequence();
+        env.storage().persistent().set(&key, &rec);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Settled(intent_hash.clone()), &true);
+
+        // Interaction: deliver the destination asset from the solver to the user.
+        token::TokenClient::new(&env, &rec.dest_asset).transfer(
+            &solver,
+            &rec.recipient,
+            &fill_amount,
+        );
+
+        // Refresh TTLs touched by this call.
+        let bump = Self::ttl_for_deadline(&env, rec.deadline);
+        env.storage().persistent().extend_ttl(&key, bump / 2, bump);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Settled(intent_hash.clone()),
+            MAX_TTL / 2,
+            MAX_TTL,
+        );
+        env.storage().instance().extend_ttl(17_280, 1_209_600);
+
+        env.events().publish(
+            (Symbol::new(&env, "filled"), intent_hash),
+            (solver, rec.dest_asset, fill_amount, rec.src_eid),
+        );
+        Ok(())
+    }
+
+    /// Dispatch the FillConfirmed message for an already-filled intent.
+    /// Permissionless: any party can pay to push a stuck confirmation through.
+    /// Guarded against double-dispatch by a marker. Advances intent to `ConfirmationSent`.
+    /// Returns error if the intent is not in `Filled` status or confirmation already sent.
+    pub fn dispatch_confirmation(
+        env: Env,
+        caller: Address,
+        intent_hash: BytesN<32>,
+        lz_fee: i128,
+    ) -> Result<(), PerihelionError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        // Guard against double-dispatch
+        if env.storage().persistent().has(&DataKey::ConfirmationSent(intent_hash.clone())) {
+            return Err(PerihelionError::IntentFinalized);
+        }
+
+        let key = DataKey::Intent(intent_hash.clone());
+        let mut rec: IntentRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(PerihelionError::IntentNotFound)?;
+
+        if rec.status != IntentStatus::Filled {
+            return Err(PerihelionError::AlreadyFilled);
+        }
+
+        let solver = rec
+            .solver
+            .clone()
+            .ok_or(PerihelionError::IntentNotFound)?;
+        let solver_evm = rec
+            .solver_evm
+            .clone()
+            .ok_or(PerihelionError::IntentNotFound)?;
+
+        // Dispatch FillConfirmed so the source escrow repays the solver.
+        Self::send_fill_confirmed(&env, &solver, &rec, &solver_evm, lz_fee)?;
+
+        // Mark dispatch as sent to prevent double-dispatch
+        env.storage()
+            .persistent()
+            .set(&DataKey::ConfirmationSent(intent_hash.clone()), &true);
+
+        rec.status = IntentStatus::ConfirmationSent;
+        env.storage().persistent().set(&key, &rec);
+
+        // Update solver reputation (PROPOSED Phase 3)
+        let fill_latency = env.ledger().sequence() - rec.fill_ledger;
+        Self::update_solver_reputation(&env, &solver, fill_latency)?;
+
+        env.events().publish(
+            (Symbol::new(&env, "confirmation_sent"), intent_hash),
+            (solver,),
+        );
+        Ok(())
+    }
+
+    /// Solver delivers `dest_asset` to the intent recipient and dispatches FillConfirmed
+    /// in a single transaction. Convenience wrapper that calls deliver_intent internally
+    /// and then dispatch_confirmation. For new code, consider calling deliver_intent and
+    /// dispatch_confirmation separately to allow retry of the messaging layer (Issue #12).
     pub fn fill_intent(
         env: Env,
         solver: Address,
@@ -200,6 +341,12 @@ impl Perihelion {
 
         // Dispatch FillConfirmed so the source escrow repays the solver.
         Self::send_fill_confirmed(&env, &solver, &rec, &solver_evm, lz_fee)?;
+
+        // Mark dispatch as sent to prevent double-dispatch
+        env.storage()
+            .persistent()
+            .set(&DataKey::ConfirmationSent(intent_hash.clone()), &true);
+
         rec.status = IntentStatus::ConfirmationSent;
         env.storage().persistent().set(&key, &rec);
 

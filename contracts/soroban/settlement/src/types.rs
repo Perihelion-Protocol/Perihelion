@@ -39,6 +39,10 @@ pub enum DataKey {
     // Persistent tier (solver reputation — PROPOSED Phase 3).
     /// Aggregate reputation record for a solver. Keyed by solver address.
     SolverReputation(Address),
+
+    // Persistent tier (confirmation dispatch guard — Issue #12).
+    /// Marker set when FillConfirmed dispatch is initiated to prevent double-dispatch.
+    ConfirmationSent(BytesN<32>),
 }
 
 /// Lifecycle state of a registered intent.
