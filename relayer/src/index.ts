@@ -8,41 +8,38 @@
 
 import { loadConfig } from "./config.js";
 import { Relayer } from "./relayer.js";
-import type {
-  DestinationDelivery,
-  SourceWatcher,
-} from "./relayer.js";
-import type { PendingMessage } from "./types.js";
+import { EVMSourceWatcher } from "./evm-watcher.js";
+import { SorobanDestinationDelivery } from "./soroban-delivery.js";
 
-/**
- * Placeholder source watcher. Wire this to the EVM escrow contract: subscribe
- * to the `MessageSent` event and decode each into a {@link PendingMessage}.
- */
-class StubWatcher implements SourceWatcher {
-  async poll(fromBlock: number) {
-    return { messages: [] as PendingMessage[], head: fromBlock };
-  }
-}
-
-/**
- * Placeholder destination delivery. Wire this to the Soroban settlement
- * contract's `lz_receive` entrypoint and an `isDelivered` view.
- */
-class StubDelivery implements DestinationDelivery {
-  async deliver(pending: PendingMessage): Promise<string> {
-    throw new Error(
-      `delivery not configured — cannot relay ${pending.message.intentHash}. ` +
-        "Implement DestinationDelivery against the Soroban settlement contract.",
-    );
-  }
-  async isDelivered(): Promise<boolean> {
-    return false;
-  }
-}
+export { EVMSourceWatcher } from "./evm-watcher.js";
+export { SorobanDestinationDelivery } from "./soroban-delivery.js";
+export { Relayer } from "./relayer.js";
+export type { SourceWatcher, DestinationDelivery, Logger } from "./relayer.js";
+export type { PendingMessage, BridgeMessage, RelayResult, EndpointId } from "./types.js";
+export type { RelayerConfig } from "./config.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const relayer = new Relayer(config, new StubWatcher(), new StubDelivery());
+
+  // Initialize concrete implementations
+  // NOTE: These are skeleton implementations. Wire them to actual EVM/Soroban
+  // when the contract interfaces are finalized (architecture spec §3).
+  const watcher = new EVMSourceWatcher({
+    rpcUrl: process.env.EVM_RPC_URL || "http://localhost:8545",
+    escrowAddress: config.escrowAddress,
+    sourceEid: 30101, // Placeholder; configure from environment
+  });
+
+  const delivery = new SorobanDestinationDelivery({
+    rpcUrl: process.env.SOROBAN_RPC_URL || "http://localhost:8000",
+    networkPassphrase:
+      process.env.STELLAR_NETWORK ||
+      "Test SDF Network ; September 2015",
+    settlementContractId: config.settlementContractId,
+    signerSecret: process.env.SIGNER_SECRET || "",
+  });
+
+  const relayer = new Relayer(config, watcher, delivery);
 
   const shutdown = () => {
     console.info("shutting down relayer");
