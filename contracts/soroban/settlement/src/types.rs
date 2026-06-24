@@ -35,6 +35,10 @@ pub enum DataKey {
     // Persistent tier (transport bookkeeping).
     /// Highest inbound LayerZero nonce processed for a source endpoint id.
     InboundNonce(u32),
+
+    // Persistent tier (solver reputation — PROPOSED Phase 3).
+    /// Aggregate reputation record for a solver. Keyed by solver address.
+    SolverReputation(Address),
 }
 
 /// Lifecycle state of a registered intent.
@@ -67,6 +71,21 @@ pub struct IntentRecord {
     pub solver_evm: Option<BytesN<32>>,
     pub fill_amount: i128,
     pub fill_ledger: u32,
+}
+
+/// PROPOSED Phase 3: Aggregate reputation metrics for a solver.
+/// Keyed by solver address in SolverReputation storage.
+#[contracttype]
+#[derive(Clone)]
+pub struct SolverReputationRecord {
+    /// Total number of intents filled by this solver.
+    pub fill_count: u64,
+    /// Number of fills that completed successfully (reached ConfirmationSent).
+    pub success_count: u64,
+    /// Exponential weighted moving average (EWMA) of fill latency in ledgers.
+    /// Computed as: ewma = 0.9 * ewma + 0.1 * latency (legacy smooth factor).
+    /// Stored as i128 fixed-point or direct ledger count.
+    pub ewma_latency: i128,
 }
 
 /// LayerZero message origin (the subset Perihelion authenticates against).

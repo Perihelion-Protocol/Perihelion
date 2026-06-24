@@ -203,6 +203,10 @@ impl Perihelion {
         rec.status = IntentStatus::ConfirmationSent;
         env.storage().persistent().set(&key, &rec);
 
+        // Update solver reputation (PROPOSED Phase 3)
+        let fill_latency = env.ledger().sequence() - rec.fill_ledger;
+        Self::update_solver_reputation(&env, &solver, fill_latency)?;
+
         env.events().publish(
             (Symbol::new(&env, "filled"), intent_hash),
             (solver, rec.dest_asset, fill_amount, rec.src_eid),
@@ -295,6 +299,14 @@ impl Perihelion {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
+    }
+
+    /// PROPOSED Phase 3: Fetch aggregate reputation metrics for a solver.
+    /// Returns None if the solver has never filled an intent.
+    pub fn get_solver_reputation(env: Env, solver: Address) -> Option<SolverReputationRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SolverReputation(solver))
     }
 }
 
@@ -432,6 +444,39 @@ impl Perihelion {
     ) -> Result<(), PerihelionError> {
         let message = encode_cancel_intent(env, &rec.intent_hash, reason);
         Self::dispatch(env, payer, rec.src_eid, message, lz_fee)
+    }
+
+    /// PROPOSED Phase 3: Update solver reputation metrics after a successful fill.
+    /// Called when a fill transitions to ConfirmationSent state.
+    /// Updates fill_count, success_count, and EWMA latency (0.9 * old + 0.1 * new).
+    fn update_solver_reputation(
+        env: &Env,
+        solver: &Address,
+        fill_latency_ledgers: u32,
+    ) -> Result<(), PerihelionError> {
+        let key = DataKey::SolverReputation(solver.clone());
+        let mut rep: SolverReputationRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(SolverReputationRecord {
+                fill_count: 0,
+                success_count: 0,
+                ewma_latency: 0,
+            });
+
+        rep.fill_count = rep.fill_count.saturating_add(1);
+        rep.success_count = rep.success_count.saturating_add(1);
+
+        let latency_i128 = fill_latency_ledgers as i128;
+        if rep.ewma_latency == 0 {
+            rep.ewma_latency = latency_i128;
+        } else {
+            rep.ewma_latency = (rep.ewma_latency * 9 + latency_i128) / 10;
+        }
+
+        env.storage().persistent().set(&key, &rep);
+        Ok(())
     }
 
     fn dispatch(

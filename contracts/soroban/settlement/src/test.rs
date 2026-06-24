@@ -461,3 +461,45 @@ fn cancel_dispatches_evm_decodable_cancel() {
     }
     assert_eq!(msg.get(34).unwrap(), CANCEL_REASON_EXPIRED);
 }
+
+// --- Solver Reputation (PROPOSED Phase 3) ------------------------------------
+
+#[test]
+fn solver_reputation_updates_on_fill() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &500_000);
+
+    let h1 = hash(&s.env, 10);
+    register_intent(&s, &h1, &recipient, 100_000, 50_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xCC; 32]);
+    s.client.fill_intent(&solver, &solver_evm, &h1, &250_000, &0);
+
+    // Check reputation was created
+    let rep = s.client.get_solver_reputation(&solver);
+    assert!(rep.is_some());
+    let rep_rec = rep.unwrap();
+    assert_eq!(rep_rec.fill_count, 1);
+    assert_eq!(rep_rec.success_count, 1);
+    // First fill has ewma_latency of 0
+
+    // Fill a second intent
+    let h2 = hash(&s.env, 11);
+    register_intent(&s, &h2, &recipient, 100_000, 50_000, 2, None);
+    s.client.fill_intent(&solver, &solver_evm, &h2, &250_000, &0);
+
+    let rep2 = s.client.get_solver_reputation(&solver);
+    assert!(rep2.is_some());
+    let rep2_rec = rep2.unwrap();
+    assert_eq!(rep2_rec.fill_count, 2);
+    assert_eq!(rep2_rec.success_count, 2);
+}
+
+#[test]
+fn solver_reputation_returns_none_for_unfilled_solver() {
+    let s = setup();
+    let solver = Address::generate(&s.env);
+    let rep = s.client.get_solver_reputation(&solver);
+    assert!(rep.is_none());
+}
