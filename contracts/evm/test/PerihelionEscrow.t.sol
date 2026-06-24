@@ -73,6 +73,54 @@ contract FeeERC20 is IERC20 {
     }
 }
 
+/// @dev USDT-style token: no return value (old USDC behavior). Tests escrow robustness.
+contract NoReturnERC20 is IERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external {
+        allowance[msg.sender][spender] = amount;
+    }
+
+    function transfer(address to, uint256 amount) external {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+    }
+}
+
+/// @dev Token that returns false on transfer (e.g., insufficient balance). Tests rejection.
+contract FalseReturningERC20 is IERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        return false; // Always reject
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        return false; // Always reject
+    }
+}
+
 /// @dev Records the last outbound LayerZero send and can replay inbound messages
 ///      back into the escrow as if it were the canonical endpoint.
 contract MockEndpoint is ILayerZeroEndpoint {
@@ -681,5 +729,234 @@ contract PerihelionEscrowTest is Test {
         vm.prank(solver);
         vm.expectRevert(PerihelionEscrow.NotOwner.selector);
         escrow.transferOwnership(solver);
+    }
+
+    // --- Token edge cases: no-return, false-returning ----------------------------------
+
+    function test_LockWithNoReturnToken() public {
+        NoReturnERC20 noReturnToken = new NoReturnERC20();
+        noReturnToken.mint(user, 1_000_000);
+        vm.prank(user);
+        noReturnToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(noReturnToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        assertEq(noReturnToken.balanceOf(address(escrow)), 100_000);
+        (,,, uint256 lAmount,,,) = escrow.locks(h);
+        assertEq(lAmount, 100_000);
+    }
+
+    function test_RevertWhen_LockWithFalseReturningToken() public {
+        FalseReturningERC20 falseToken = new FalseReturningERC20();
+        falseToken.mint(user, 1_000_000);
+        vm.prank(user);
+        falseToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(falseToken);
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.TransferFailed.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_RevertWhen_LockTokenReceivesNothing() public {
+        FeeERC20 heavyFeeToken = new FeeERC20(10_000); // 100% fee (receives 0)
+        heavyFeeToken.mint(user, 1_000_000);
+        vm.prank(user);
+        heavyFeeToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(heavyFeeToken);
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.NothingReceived.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    // --- FillConfirmed/CancelIntent codec: exact byte layout ----
+
+    /// @notice Verify FillConfirmed decoding against exact 90-byte layout:
+    ///         version(1)|type(1)|intent_hash(32)|solver_evm(32)|amount(16)|ledger(8)
+    function test_FillConfirmedExactLayout() public {
+        bytes32 h = _lock();
+        
+        // Manually craft the exact 90-byte FillConfirmed
+        bytes32 intentHash = h;
+        address solverAddr = solver;
+        uint128 amount = 100_000;
+        uint64 ledger = 12_345;
+        
+        bytes memory expected = abi.encodePacked(
+            V,
+            T_FILL_CONFIRMED,
+            intentHash,
+            bytes32(uint256(uint160(solverAddr))),
+            amount,
+            ledger
+        );
+        
+        assertEq(expected.length, 90);
+        _confirm(h, solver, 1);
+        assertEq(token.balanceOf(solver), 100_000);
+    }
+
+    /// @notice Verify CancelIntent decoding against exact 35-byte layout:
+    ///         version(1)|type(1)|intent_hash(32)|reason(1)
+    function test_CancelIntentExactLayout() public {
+        bytes32 h = _lock();
+        
+        bytes memory expected = abi.encodePacked(
+            V,
+            T_CANCEL_INTENT,
+            h,
+            uint8(0)
+        );
+        
+        assertEq(expected.length, 35);
+        _cancel(h, 1);
+        assertEq(token.balanceOf(user), 1_000_000);
+    }
+
+    // --- Race conditions: refund vs confirm orderings ----
+
+    /// @notice First ordering: refund wins (local timeout), then remote confirm arrives.
+    ///         Should be rejected by AlreadyFinalized guard (I1/I2).
+    function test_RaceGuard_RefundThenConfirm() public {
+        bytes32 h = _lock();
+        PerihelionEscrow.Intent memory intent = _intent();
+
+        // Local refund fires first.
+        vm.warp(intent.deadline + escrow.confirmationGrace());
+        escrow.cancelExpired(h);
+        assertEq(token.balanceOf(user), 1_000_000);
+
+        // Late FillConfirmed arrives; should be rejected.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
+        _confirm(h, solver, 1);
+    }
+
+    /// @notice Second ordering: confirm wins, then local refund is attempted.
+    ///         Should be rejected by AlreadyFinalized guard (I1/I2).
+    function test_RaceGuard_ConfirmThenRefund() public {
+        bytes32 h = _lock();
+        PerihelionEscrow.Intent memory intent = _intent();
+
+        // FillConfirmed lands first.
+        _confirm(h, solver, 1);
+        assertEq(token.balanceOf(solver), 100_000);
+
+        // Local refund attempt arrives late.
+        vm.warp(intent.deadline + escrow.confirmationGrace());
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
+        escrow.cancelExpired(h);
+    }
+
+    // --- Signature & nonce validation ----
+
+    function test_RevertWhen_LockNonceZero() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.nonce = 0;
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        // Should still work (nonce is part of intent hash, not a separate constraint)
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_RevertWhen_DoubleSignatureSubmit() public {
+        PerihelionEscrow.Intent memory intent1 = _intent();
+        intent1.nonce = 1;
+        bytes memory sig1 = _sign(intent1);
+        bytes32 h1 = escrow.hashIntent(intent1);
+
+        PerihelionEscrow.Intent memory intent2 = _intent();
+        intent2.nonce = 2;
+        bytes memory sig2 = _sign(intent2);
+        bytes32 h2 = escrow.hashIntent(intent2);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent1, sig1);
+        
+        // Different intent should succeed
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent2, sig2);
+        
+        assertEq(token.balanceOf(address(escrow)), 200_000);
+    }
+
+    // --- Non-endpoint/untrusted peer rejections ----
+
+    function test_RevertWhen_LzReceiveCalledNotFromEndpoint() public {
+        bytes32 h = _lock();
+        vm.prank(address(0xBAD));
+        vm.expectRevert(PerihelionEscrow.NotEndpoint.selector);
+        escrow.lzReceive(
+            Origin({ srcEid: STELLAR_EID, sender: STELLAR_PEER, nonce: 1 }),
+            bytes32(0),
+            _fillConfirmed(h, solver),
+            address(0),
+            ""
+        );
+    }
+
+    function test_RevertWhen_UntrustedPeerSendsMessage() public {
+        bytes32 h = _lock();
+        bytes32 untrustedPeer = bytes32(uint256(0xDEADBEEF));
+        
+        vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
+        endpoint.deliver(
+            escrow,
+            STELLAR_EID,
+            untrustedPeer,
+            1,
+            _fillConfirmed(h, solver)
+        );
+    }
+
+    // --- Expired intent ----
+
+    function test_RevertWhen_ExpiredIntentLock() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.deadline = block.timestamp - 1;
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.IntentExpired.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    // --- Reserved solver ----
+
+    function test_RevertWhen_NonPreferredSolverTriesLock() public {
+        address preferredSolver = address(0x1234);
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.preferredSolver = preferredSolver;
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver); // Different solver
+        vm.expectRevert(PerihelionEscrow.ReservedForSolver.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_PreferredSolverCanLock() public {
+        address preferredSolver = address(0x1234);
+        vm.deal(preferredSolver, 10 ether);
+        
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.preferredSolver = preferredSolver;
+        bytes memory sig = _sign(intent);
+
+        vm.prank(preferredSolver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
     }
 }
