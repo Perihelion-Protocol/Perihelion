@@ -6,6 +6,7 @@
 | [architecture.md](./architecture.md)                    | High-level settlement flow and trust model (orientation)       |
 | [intent-spec.md](./intent-spec.md)                      | The signable intent format and EIP-712 encoding                |
 | [CONTRIBUTING.md](./CONTRIBUTING.md)                    | How to contribute, and where the work lives                    |
+| [SECURITY.md](../SECURITY.md)                           | Responsible disclosure scope, reporting channels, SLAs, and safe harbor |
 
 ## Component map
 
