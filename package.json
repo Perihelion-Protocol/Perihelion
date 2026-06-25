@@ -11,7 +11,8 @@
   "workspaces": [
     "sdk",
     "relayer",
-    "solver"
+    "solver",
+    "mempool"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
