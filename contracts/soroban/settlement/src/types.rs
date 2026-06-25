@@ -73,6 +73,21 @@ pub struct IntentRecord {
     pub fill_ledger: u32,
 }
 
+/// PROPOSED Phase 3: Aggregate reputation metrics for a solver.
+/// Keyed by solver address in SolverReputation storage.
+#[contracttype]
+#[derive(Clone)]
+pub struct SolverReputationRecord {
+    /// Total number of intents filled by this solver.
+    pub fill_count: u64,
+    /// Number of fills that completed successfully (reached ConfirmationSent).
+    pub success_count: u64,
+    /// Exponential weighted moving average (EWMA) of fill latency in ledgers.
+    /// Computed as: ewma = 0.9 * ewma + 0.1 * latency (legacy smooth factor).
+    /// Stored as i128 fixed-point or direct ledger count.
+    pub ewma_latency: i128,
+}
+
 /// LayerZero message origin (the subset Perihelion authenticates against).
 #[contracttype]
 #[derive(Clone)]
