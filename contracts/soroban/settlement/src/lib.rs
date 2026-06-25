@@ -570,6 +570,12 @@ impl Perihelion {
 
     fn on_cancel_inbound(env: &Env, ci: CancelInstruction) -> Result<(), PerihelionError> {
         if Self::is_finalized(env, &ci.intent_hash) {
+            // Emit cancel_ignored event to record the race: cancel arrived after intent was finalized.
+            // This enables auditing and reconciliation to distinguish "never arrived" from "lost race".
+            env.events().publish(
+                (Symbol::new(env, "cancel_ignored"), ci.intent_hash.clone()),
+                (IntentStatus::ConfirmationSent as u32,),
+            );
             return Ok(());
         }
         let key = DataKey::Intent(ci.intent_hash.clone());
@@ -588,6 +594,17 @@ impl Perihelion {
                     &DataKey::Cancelled(ci.intent_hash.clone()),
                     MAX_TTL / 2,
                     MAX_TTL,
+                );
+                env.events().publish(
+                    (Symbol::new(env, "cancelled_inbound"), ci.intent_hash.clone()),
+                    (rec.src_eid,),
+                );
+            } else {
+                // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
+                // Emit cancel_ignored event to record the race.
+                env.events().publish(
+                    (Symbol::new(env, "cancel_ignored"), ci.intent_hash.clone()),
+                    (rec.status as u32,),
                 );
             }
         }
