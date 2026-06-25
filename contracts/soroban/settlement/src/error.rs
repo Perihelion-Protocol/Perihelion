@@ -23,6 +23,10 @@ pub enum PerihelionError {
     NotAdmin = 131,
     /// Intent reserved for a different preferred solver.
     ReservedForSolver = 132,
+    /// Caller is not the pending admin nominee (accept_admin guard).
+    NotPendingAdmin = 133,
+    /// Admin and endpoint addresses must be distinct (initialize guard, issue #18).
+    AdminEndpointCollision = 134,
 
     // --- Intent preconditions ---
     /// No registered intent for the given hash.

@@ -1751,3 +1751,138 @@ and adherence to the invariants is part of the bar.
    verifier (§8.3).
 
 
+
+---
+
+## 9. Security Model — Admin Key Management and Initialization
+
+### 9.1 `initialize` role separation (closes #18)
+
+`initialize(admin, endpoint)` is called exactly once (re-init is rejected with
+`AlreadyInitialized`). It accepts two addresses that serve distinct, non-overlapping
+roles:
+
+| Parameter | Expected kind | Role |
+|-----------|---------------|------|
+| `admin` | Account (keypair) or multisig/timelock contract | Governance authority: rotates config, pauses/unpauses, nominates a new admin. |
+| `endpoint` | Contract | Trusted LayerZero endpoint: sole permitted caller of `lz_receive`. |
+
+**Collision guard.** `initialize` rejects `admin == endpoint`
+(`AdminEndpointCollision`, error 134). Conflating the two collapses the
+authorization model: the endpoint would then be able to rotate its own address
+and unpause the contract, while the admin could inject arbitrary LayerZero
+messages. The EVM escrow rejects a zero endpoint; the Soroban side extends
+this principle to also reject role collision.
+
+**Initialization event.** `initialize` emits an `initialized(admin, endpoint)`
+event so deployment tooling and off-chain monitors can confirm the configured
+roles without polling storage. Because misconfiguration at init is unrecoverable,
+the event is the primary on-chain audit record.
+
+### 9.2 Two-step admin handover (closes #17)
+
+Admin transfer uses a two-step handshake that mirrors the EVM
+`transferOwnership` / `acceptOwnership` pattern:
+
+1. **`set_admin(new_admin)`** — callable only by the current admin. Stores
+   `new_admin` as `PendingAdmin` and emits `admin_transfer_started(old, new)`.
+   The current admin remains in control until step 2 completes.
+2. **`accept_admin()`** — callable only by the `PendingAdmin` address.
+   Promotes the nominee to `Admin`, clears `PendingAdmin`, and emits
+   `admin_transfer_completed(old, new)`.
+
+**Why two-step?** A single-step overwrite means one fat-fingered `set_admin`
+permanently bricks governance (the old admin is atomically replaced; if the new
+address is unspendable, all admin operations are locked forever). The two-step
+pattern ensures the nominee proves control before the old admin loses access.
+
+**Cancellation.** The current admin can cancel a pending handover at any time by
+calling `set_admin` again (e.g. with their own address or any other nominee).
+This overwrites `PendingAdmin` without completing the handover.
+
+**EVM parity.** The EVM escrow (`PerihelionEscrow.sol`) uses the identical
+`transferOwnership` / `acceptOwnership` pattern. The Soroban side now matches.
+
+### 9.3 Off-chain config indexing — event model (closes #16)
+
+Every admin/config setter emits a structured event. The table below documents
+each event alongside its EVM analogue so a unified off-chain consumer can
+normalize events from both chains:
+
+| Soroban event | EVM analogue | Payload |
+|---------------|--------------|---------|
+| `initialized(admin, endpoint)` | *(constructor — no explicit event)* | `(admin: Address, endpoint: Address)` |
+| `endpoint_set(old, new)` | *(no EVM equivalent — endpoint is immutable)* | `(old: Option<Address>, new: Address)` |
+| `peer_set(eid, old, new)` | `PeerSet(peer: bytes32)` | `(eid: u32, old: Option<BytesN<32>>, new: BytesN<32>)` |
+| `admin_transfer_started(old, new)` | `OwnershipTransferStarted(previousOwner, newOwner)` | `(old: Address, new: Address)` |
+| `admin_transfer_completed(old, new)` | `OwnershipTransferred(previousOwner, newOwner)` | `(old: Address, new: Address)` |
+| `paused_set(value)` | `PausedSet(paused: bool)` | `(paused: bool)` |
+
+**Why events matter for bridge security.** Peer and endpoint rotations are the
+highest-sensitivity config changes: a malicious peer rotation redirects trust
+for an entire endpoint id, allowing spoofed fills and cancellations. Without
+events, an off-chain monitor must poll instance storage and diff it — this
+cannot reconstruct history once an entry is overwritten. Events make these
+changes observable in real time by any indexer, security watcher, or monitoring
+dashboard.
+
+---
+
+## 10. Peer Symmetry and `src_eid` Disambiguation (closes #15)
+
+### 10.1 The peer symmetry assumption
+
+`DataKey::Peer(eid)` is used for **both** inbound validation and outbound dispatch:
+
+- **Inbound (`lz_receive`):** `origin.sender` is checked against
+  `Peer(origin.src_eid)` to authenticate the message source.
+- **Outbound (`dispatch` / `send_fill_confirmed` / `send_cancel`):**
+  `Peer(rec.src_eid)` is looked up to find the EVM escrow address to send
+  `FillConfirmed` / `CancelIntent` to.
+
+This is intentional and correct: the trusted counterparty for a given endpoint
+id is **symmetric** — the same EVM escrow we receive from is the one we repay.
+On LayerZero V2, a "peer" is the remote OApp address. For the Perihelion
+single-counterparty design (one Soroban settlement contract ↔ one EVM escrow
+per source chain), the send and receive peer are always identical.
+
+**Invariant.** `set_peer(eid, addr)` must always be called with the *deployed*
+EVM escrow's 32-byte address for that `eid`. An operator who sets a peer for
+an eid they only receive from (or only send to) will get an asymmetric
+configuration that is logically incorrect, even though the two maps are one
+and the same data structure.
+
+### 10.2 Two distinct meanings of `src_eid`
+
+There are two values in the system that are both called "src_eid" but refer to
+different things:
+
+| Name | Where it appears | Meaning |
+|------|-----------------|---------|
+| `origin.src_eid` | `lz_receive` parameter | LayerZero transport source — the endpoint id of the chain that **sent this LayerZero message**. Authenticated by the endpoint before delivery. |
+| `fi.src_eid` | Inside `FillInstruction` payload | Intent source eid — the chain that holds the **locked funds** and to which `FillConfirmed`/`CancelIntent` must be sent. |
+
+For well-formed messages from a compliant EVM escrow these two values are always
+equal: the escrow sends `FillInstruction` from its own chain and embeds its own
+`src_eid` in the payload. In all known deployments they are the same. However,
+`dispatch` uses `fi.src_eid` (from the record), not `origin.src_eid` (from
+delivery), so it is `fi.src_eid` that matters for settlement routing.
+
+### 10.3 Registration-time peer guard (anti-stranding)
+
+Prior to this fix, an intent could be registered with a `src_eid` that had no
+configured peer. The intent would fill successfully on Stellar, but
+`dispatch_confirmation` (or `fill_intent`) would then fail with `UntrustedPeer`
+when trying to look up `Peer(rec.src_eid)` for the outbound send — permanently
+stranding the filled intent with no way to repay the solver.
+
+**The fix.** `on_fill_instruction` now checks `Peer(fi.src_eid)` exists before
+writing the `IntentRecord`. If no peer is configured for the intent's source
+eid, registration fails with `UntrustedPeer` (error 163). The LayerZero message
+is rejected and can be replayed after the operator calls `set_peer` for the
+missing eid.
+
+**Chosen behavior (not silently accepted).** The intent is rejected at
+registration, not silently accepted with a deferred failure at fill time. This
+surfaces operator misconfiguration as early as possible and prevents solvers
+from filling intents that can never be confirmed.
