@@ -31,6 +31,10 @@ pub enum DataKey {
     Settled(BytesN<32>),
     /// Terminal idempotency marker: set iff the intent was cancelled.
     Cancelled(BytesN<32>),
+    /// Idempotency marker: set iff a FillConfirmed message was dispatched.
+    ConfirmationSent(BytesN<32>),
+    /// PROPOSED Phase 3: Aggregate reputation metrics keyed by solver address.
+    SolverReputation(Address),
 
     // Persistent tier (transport bookkeeping).
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
@@ -66,6 +70,9 @@ pub struct IntentRecord {
     pub min_dest_amount: i128,
     pub deadline: u64,
     pub preferred_solver: Option<Address>,
+    /// Unix timestamp at which the preferred-solver reservation lapses.
+    /// Zero means the reservation lasts until the deadline.
+    pub reservation_expires: u64,
     pub status: IntentStatus,
     pub solver: Option<Address>,
     pub solver_evm: Option<BytesN<32>>,
@@ -114,6 +121,9 @@ pub struct FillInstruction {
     pub min_dest_amount: i128,
     pub deadline: u64,
     pub preferred_solver: Option<Address>,
+    /// Seconds from registration during which only the preferred solver may fill.
+    /// After this window lapses, any solver may fill. Zero means no reservation.
+    pub reservation_window: u64,
 }
 
 /// A cancellation instruction delivered inbound.

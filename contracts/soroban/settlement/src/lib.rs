@@ -160,7 +160,7 @@ impl Perihelion {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
-            if pref != &solver {
+            if pref != &solver && env.ledger().timestamp() < rec.reservation_expires {
                 return Err(PerihelionError::ReservedForSolver);
             }
         }
@@ -300,7 +300,7 @@ impl Perihelion {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
-            if pref != &solver {
+            if pref != &solver && env.ledger().timestamp() < rec.reservation_expires {
                 return Err(PerihelionError::ReservedForSolver);
             }
         }
@@ -370,8 +370,23 @@ impl Perihelion {
         caller.require_auth();
         Self::require_not_paused(&env)?;
 
-        if Self::is_finalized(&env, &intent_hash) {
+        // Cancelled marker: already cancelled — terminal, return IntentFinalized.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Cancelled(intent_hash.clone()))
+        {
             return Err(PerihelionError::IntentFinalized);
+        }
+
+        // Settled marker: intent was filled — return AlreadyFilled so callers can
+        // distinguish "nothing to cancel" from "already cancelled".
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Settled(intent_hash.clone()))
+        {
+            return Err(PerihelionError::AlreadyFilled);
         }
 
         let key = DataKey::Intent(intent_hash.clone());
@@ -381,8 +396,14 @@ impl Perihelion {
             .get(&key)
             .ok_or(PerihelionError::IntentNotFound)?;
 
+        // Belt-and-suspenders: status check covers edge cases where markers lag.
         if rec.status != IntentStatus::Locked {
-            return Err(PerihelionError::IntentFinalized);
+            return Err(match rec.status {
+                IntentStatus::Filled | IntentStatus::ConfirmationSent => {
+                    PerihelionError::AlreadyFilled
+                }
+                _ => PerihelionError::IntentFinalized,
+            });
         }
         if env.ledger().timestamp() < rec.deadline {
             return Err(PerihelionError::DeadlineNotPassed);
@@ -551,6 +572,11 @@ impl Perihelion {
             min_dest_amount: fi.min_dest_amount,
             deadline: fi.deadline,
             preferred_solver: fi.preferred_solver,
+            reservation_expires: if fi.reservation_window > 0 {
+                env.ledger().timestamp().saturating_add(fi.reservation_window)
+            } else {
+                fi.deadline
+            },
             status: IntentStatus::Locked,
             solver: None,
             solver_evm: None,

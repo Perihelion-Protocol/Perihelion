@@ -116,6 +116,20 @@ fn register_intent(
     nonce: u64,
     preferred: Option<Address>,
 ) {
+    register_intent_with_window(s, h, recipient, min, deadline, nonce, preferred, 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_intent_with_window(
+    s: &Setup,
+    h: &BytesN<32>,
+    recipient: &Address,
+    min: i128,
+    deadline: u64,
+    nonce: u64,
+    preferred: Option<Address>,
+    reservation_window: u64,
+) {
     let fi = FillInstruction {
         intent_hash: h.clone(),
         src_eid: s.src_eid,
@@ -124,6 +138,7 @@ fn register_intent(
         min_dest_amount: min,
         deadline,
         preferred_solver: preferred,
+        reservation_window,
     };
     let origin = Origin {
         src_eid: s.src_eid,
@@ -272,6 +287,7 @@ fn rejects_message_from_untrusted_peer() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
+        reservation_window: 0,
     };
     let bad_sender = BytesN::from_array(&s.env, &[0xAB; 32]);
     let origin = Origin {
@@ -488,4 +504,98 @@ fn nonce_out_of_order_delivery_accepted() {
     assert!(s.client.get_intent(&h5).is_some());
     assert!(s.client.get_intent(&h6).is_some());
     assert!(s.client.get_intent(&h7).is_some());
+}
+
+// --- Issue #21: cancel_expired_intent error taxonomy -------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #146)")] // AlreadyFilled
+fn cancel_filled_intent_returns_already_filled() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let h = hash(&s.env, 20);
+    // deadline far in future so fill succeeds
+    register_intent(&s, &h, &recipient, 1, 9_000, 1, None);
+    // Deliver (fill) without dispatching confirmation, leaving status = Filled.
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.deliver_intent(&solver, &evm, &h, &100);
+    assert_eq!(
+        s.client.get_intent(&h).unwrap().status,
+        IntentStatus::Filled
+    );
+    // Now advance past deadline and try to cancel — must get AlreadyFilled (#146).
+    s.env.ledger().with_mut(|li| li.timestamp = 10_000);
+    let caller = Address::generate(&s.env);
+    s.client.cancel_expired_intent(&caller, &h, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #146)")] // AlreadyFilled
+fn cancel_confirmation_sent_intent_returns_already_filled() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let h = hash(&s.env, 21);
+    register_intent(&s, &h, &recipient, 1, 9_000, 1, None);
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &100, &0);
+    assert_eq!(
+        s.client.get_intent(&h).unwrap().status,
+        IntentStatus::ConfirmationSent
+    );
+    s.env.ledger().with_mut(|li| li.timestamp = 10_000);
+    let caller = Address::generate(&s.env);
+    s.client.cancel_expired_intent(&caller, &h, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #141)")] // IntentFinalized
+fn cancel_already_cancelled_intent_returns_intent_finalized() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let caller = Address::generate(&s.env);
+    let h = hash(&s.env, 22);
+    register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
+    s.env.ledger().with_mut(|li| li.timestamp = 6_000);
+    s.client.cancel_expired_intent(&caller, &h, &0);
+    assert!(s.client.is_cancelled(&h));
+    // Second cancel attempt — must get IntentFinalized (#141) from the marker check.
+    s.client.cancel_expired_intent(&caller, &h, &0);
+}
+
+// --- Issue #22: preferred_solver reservation window --------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #132)")] // ReservedForSolver
+fn non_preferred_solver_blocked_within_reservation_window() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let preferred = Address::generate(&s.env);
+    let other = Address::generate(&s.env);
+    s.asset_admin.mint(&other, &1_000_000);
+    let h = hash(&s.env, 30);
+    // window of 1000 seconds; ledger starts at 1_000 so window expires at 2_000
+    register_intent_with_window(&s, &h, &recipient, 1, 9_000, 1, Some(preferred), 1_000);
+    s.env.ledger().with_mut(|li| li.timestamp = 1_500); // inside window
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&other, &evm, &h, &100, &0);
+}
+
+#[test]
+fn non_preferred_solver_allowed_after_reservation_window() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let preferred = Address::generate(&s.env);
+    let other = Address::generate(&s.env);
+    s.asset_admin.mint(&other, &1_000_000);
+    let h = hash(&s.env, 31);
+    // window of 1000 seconds; ledger starts at 1_000 so window expires at 2_000
+    register_intent_with_window(&s, &h, &recipient, 1, 9_000, 1, Some(preferred), 1_000);
+    s.env.ledger().with_mut(|li| li.timestamp = 2_001); // past window, before deadline
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&other, &evm, &h, &100, &0);
+    assert!(s.client.is_settled(&h));
 }
