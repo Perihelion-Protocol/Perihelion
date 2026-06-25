@@ -31,6 +31,8 @@ pub enum DataKey {
     Settled(BytesN<32>),
     /// Terminal idempotency marker: set iff the intent was cancelled.
     Cancelled(BytesN<32>),
+    /// Marker: set once a FillConfirmed message has been dispatched for this intent.
+    ConfirmationSent(BytesN<32>),
 
     // Persistent tier (transport bookkeeping).
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
@@ -39,6 +41,10 @@ pub enum DataKey {
     InboundNonceBitmap(u32),
     /// Base nonce for the bitmap (nonce 0 before first message).
     InboundNonceBase(u32),
+
+    // Persistent tier (solver reputation — PROPOSED Phase 3).
+    /// Aggregate reputation metrics for a solver address.
+    SolverReputation(Address),
 }
 
 /// Lifecycle state of a registered intent.

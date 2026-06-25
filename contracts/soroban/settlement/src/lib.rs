@@ -36,9 +36,21 @@ const MAX_TTL: u32 = 3_110_400;
 /// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
 /// absorb late confirmations and the refund window.
 const GRACE_LEDGERS: u32 = 120_960;
-/// Approximate ledger close time, in seconds, used to convert a unix deadline
-/// into a TTL bump target.
-const SECS_PER_LEDGER: u64 = 5;
+/// Minimum ledger close time, in seconds, used to convert a unix deadline into
+/// a TTL bump target. Using the *minimum* close time (4 s) means
+/// `secs / MIN_SECS_PER_LEDGER` always over-estimates the ledger count, so the
+/// TTL is over-provisioned relative to the actual close rate. This is the safe
+/// direction: a too-generous TTL wastes a small amount of rent but an
+/// under-estimate can allow the entry to be archived while still live.
+/// Safety invariant: always round TTL *up*, never down.
+const MIN_SECS_PER_LEDGER: u64 = 4;
+
+/// Maximum deadline horizon, in seconds from the current ledger timestamp.
+/// FillInstructions with `deadline > now + MAX_DEADLINE_HORIZON` are rejected
+/// to prevent trivially pinning an entry at MAX_TTL with a far-future deadline.
+/// 7 days = 604_800 s is aligned with the SDK's intent builder maximum and
+/// covers any realistic cross-chain settlement window.
+pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 
 #[contract]
 pub struct Perihelion;
@@ -542,6 +554,13 @@ impl Perihelion {
         if fi.min_dest_amount <= 0 {
             return Err(PerihelionError::InvalidAmount);
         }
+        // Reject deadlines that are unreasonably far in the future. This bounds
+        // per-intent TTL to a realistic settlement window and prevents cheap
+        // state-bloat attacks that pin MAX_TTL entries via far-future deadlines.
+        let now = env.ledger().timestamp();
+        if fi.deadline > now.saturating_add(MAX_DEADLINE_HORIZON) {
+            return Err(PerihelionError::DeadlineTooFar);
+        }
 
         let rec = IntentRecord {
             intent_hash: fi.intent_hash.clone(),
@@ -678,10 +697,15 @@ impl Perihelion {
     }
 
     /// TTL bump target covering `deadline + GRACE`, clamped to `MAX_TTL`.
+    ///
+    /// Divides by `MIN_SECS_PER_LEDGER` (4 s) to over-provision the ledger
+    /// count when actual close times are longer. This is the safe direction:
+    /// a too-generous TTL wastes a small amount of rent but an under-estimate
+    /// can archive the entry before the deadline passes.
     fn ttl_for_deadline(env: &Env, deadline: u64) -> u32 {
         let now = env.ledger().timestamp();
         let secs = deadline.saturating_sub(now);
-        let ledgers = (secs / SECS_PER_LEDGER) as u32;
+        let ledgers = (secs / MIN_SECS_PER_LEDGER) as u32;
         ledgers.saturating_add(GRACE_LEDGERS).min(MAX_TTL)
     }
 }
