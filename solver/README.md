@@ -9,6 +9,9 @@ profitability (using live liquidity from Stellar's SDEX and external venues),
 and atomically fills the winners across the EVM escrow and Soroban settlement
 contracts.
 
+**New to running a solver?** See the [operator runbook](../docs/running-a-solver.md)
+for a step-by-step guide to prerequisites, configuration, monitoring, and troubleshooting.
+
 ## Run
 
 ```bash
