@@ -339,15 +339,48 @@ impl Perihelion {
             || p.has(&DataKey::Cancelled(intent_hash.clone()))
     }
 
-    /// Lazy-nonce replay guard: accept only nonces strictly above the high-water
-    /// mark, then advance it.
+    /// Accept a nonce exactly once, regardless of delivery order. Uses a bitmap to
+    /// track consumed nonces in a 64-nonce window (base, base+63]. If a nonce falls
+    /// outside the window, the base advances and the old bitmap is discarded, so
+    /// very old messages are still rejected (cannot replay messages more than ~64
+    /// messages old without an explicit reset). This implements true "unordered
+    /// delivery" semantics per LayerZero V2 lazy-nonce model.
     fn accept_nonce(env: &Env, eid: u32, nonce: u64) -> Result<(), PerihelionError> {
-        let key = DataKey::InboundNonce(eid);
-        let hi: u64 = env.storage().persistent().get(&key).unwrap_or(0);
-        if nonce <= hi {
+        if nonce == 0 {
             return Err(PerihelionError::StaleNonce);
         }
-        env.storage().persistent().set(&key, &nonce);
+
+        let ps = env.storage().persistent();
+        let base_key = DataKey::InboundNonceBase(eid);
+        let bitmap_key = DataKey::InboundNonceBitmap(eid);
+
+        let base: u64 = ps.get(&base_key).unwrap_or(0);
+        let mut bitmap: u64 = ps.get(&bitmap_key).unwrap_or(0);
+
+        // If nonce <= base, it was already processed (or too old).
+        if nonce <= base {
+            return Err(PerihelionError::StaleNonce);
+        }
+
+        // If nonce > base + 64, advance the window.
+        if nonce > base + 64 {
+            let new_base = nonce - 1;
+            ps.set(&base_key, &new_base);
+            ps.set(&bitmap_key, &1u64); // Only the new nonce is set in the bitmap.
+            return Ok(());
+        }
+
+        // Nonce is in the current window: [base + 1, base + 64].
+        let offset = (nonce - base - 1) as u32;
+        let bit = 1u64 << offset;
+
+        if bitmap & bit != 0 {
+            // Already consumed.
+            return Err(PerihelionError::StaleNonce);
+        }
+
+        bitmap |= bit;
+        ps.set(&bitmap_key, &bitmap);
         Ok(())
     }
 

@@ -461,3 +461,31 @@ fn cancel_dispatches_evm_decodable_cancel() {
     }
     assert_eq!(msg.get(34).unwrap(), CANCEL_REASON_EXPIRED);
 }
+
+#[test]
+fn nonce_out_of_order_delivery_accepted() {
+    // Verify that nonces delivered out of order (5, 7, 6) are all accepted
+    // and processed exactly once, validating unordered delivery semantics.
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+
+    // Deliver nonce 5 first
+    let h5 = hash(&s.env, 5);
+    register_intent(&s, &h5, &recipient, 100_000, 5_000, 5, None);
+    assert!(s.client.get_intent(&h5).is_some());
+
+    // Deliver nonce 7 (skipping 6)
+    let h7 = hash(&s.env, 7);
+    register_intent(&s, &h7, &recipient, 100_000, 5_000, 7, None);
+    assert!(s.client.get_intent(&h7).is_some());
+
+    // Now deliver nonce 6 (out of order)
+    let h6 = hash(&s.env, 6);
+    register_intent(&s, &h6, &recipient, 100_000, 5_000, 6, None);
+    assert!(s.client.get_intent(&h6).is_some());
+
+    // All three should be registered
+    assert!(s.client.get_intent(&h5).is_some());
+    assert!(s.client.get_intent(&h6).is_some());
+    assert!(s.client.get_intent(&h7).is_some());
+}
