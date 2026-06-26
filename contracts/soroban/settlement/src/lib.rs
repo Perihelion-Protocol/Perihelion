@@ -36,9 +36,21 @@ const MAX_TTL: u32 = 3_110_400;
 /// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
 /// absorb late confirmations and the refund window.
 const GRACE_LEDGERS: u32 = 120_960;
-/// Approximate ledger close time, in seconds, used to convert a unix deadline
-/// into a TTL bump target.
-const SECS_PER_LEDGER: u64 = 5;
+/// Minimum ledger close time, in seconds, used to convert a unix deadline into
+/// a TTL bump target. Using the *minimum* close time (4 s) means
+/// `secs / MIN_SECS_PER_LEDGER` always over-estimates the ledger count, so the
+/// TTL is over-provisioned relative to the actual close rate. This is the safe
+/// direction: a too-generous TTL wastes a small amount of rent but an
+/// under-estimate can allow the entry to be archived while still live.
+/// Safety invariant: always round TTL *up*, never down.
+const MIN_SECS_PER_LEDGER: u64 = 4;
+
+/// Maximum deadline horizon, in seconds from the current ledger timestamp.
+/// FillInstructions with `deadline > now + MAX_DEADLINE_HORIZON` are rejected
+/// to prevent trivially pinning an entry at MAX_TTL with a far-future deadline.
+/// 7 days = 604_800 s is aligned with the SDK's intent builder maximum and
+/// covers any realistic cross-chain settlement window.
+pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 
 #[contract]
 pub struct Perihelion;
@@ -46,49 +58,158 @@ pub struct Perihelion;
 #[contractimpl]
 impl Perihelion {
     /// Initialize with an admin and the trusted LayerZero endpoint.
+    ///
+    /// # Validation (issue #18)
+    /// - `admin` and `endpoint` must be distinct addresses. Conflating them
+    ///   collapses the authorization model: the endpoint is the trusted transport
+    ///   layer (sole caller of `lz_receive`), while admin is the governance key
+    ///   (rotates config, pauses/unpauses). These roles must remain separate.
+    ///   The EVM escrow rejects a zero endpoint address; we extend that principle
+    ///   by also rejecting role collisions, since misconfiguration at init is
+    ///   unrecoverable (there is no re-init path).
+    ///
+    /// # Expected address kinds
+    /// - `endpoint`: must be a **contract** address — the LayerZero endpoint
+    ///   contract deployed on Stellar that calls `lz_receive`.
+    /// - `admin`: typically an **account** (keypair) or a multisig/timelock
+    ///   contract. Should never be the same address as `endpoint`.
+    ///
+    /// Emits an `initialized` event so deployment tooling can confirm the
+    /// configured values without polling storage.
     pub fn initialize(env: Env, admin: Address, endpoint: Address) -> Result<(), PerihelionError> {
         let storage = env.storage().instance();
         if storage.has(&DataKey::Admin) {
             return Err(PerihelionError::AlreadyInitialized);
         }
+        // Issue #18: reject identical admin and endpoint — role separation invariant.
+        if admin == endpoint {
+            return Err(PerihelionError::AdminEndpointCollision);
+        }
         storage.set(&DataKey::Admin, &admin);
         storage.set(&DataKey::Endpoint, &endpoint);
         storage.set(&DataKey::Paused, &false);
         storage.extend_ttl(17_280, 1_209_600);
+
+        // Issue #16/#18: emit an event so deployment tooling and off-chain
+        // monitors can confirm the configured roles without polling storage.
+        env.events().publish(
+            (Symbol::new(&env, "initialized"),),
+            (admin, endpoint),
+        );
         Ok(())
     }
 
     // --- Admin configuration ---------------------------------------------------
 
     /// Rotate the trusted endpoint. Admin-only.
+    ///
+    /// Emits an `endpoint_set` event with `(old, new)` so off-chain monitors
+    /// can alert on endpoint rotations (issue #16). Endpoint rotations are
+    /// high-sensitivity: a malicious rotation would redirect all inbound
+    /// LayerZero message delivery.
     pub fn set_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
+        let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
         env.storage()
             .instance()
             .set(&DataKey::Endpoint, &new_endpoint);
+        env.events().publish(
+            (Symbol::new(&env, "endpoint_set"),),
+            (old, new_endpoint),
+        );
         Ok(())
     }
 
     /// Register/replace the trusted remote peer (the EVM escrow) for a source
     /// endpoint id. Admin-only.
+    ///
+    /// Emits a `peer_set` event with `(eid, old, new)` (issue #16). Peer
+    /// rotations are critical: a malicious peer change redirects trust for an
+    /// entire endpoint id, allowing spoofed fills and cancellations.
+    ///
+    /// # Peer symmetry (issue #15)
+    /// The same peer address is used for **both** inbound validation
+    /// (`lz_receive` checks `origin.sender == Peer(origin.src_eid)`) and
+    /// outbound dispatch (`dispatch` looks up `Peer(dst_eid)` where
+    /// `dst_eid == rec.src_eid`). This is the intended design: the trusted
+    /// counterparty for a given endpoint id is symmetric — the same EVM escrow
+    /// address we receive from is the one we send FillConfirmed/CancelIntent to.
+    /// Operators must always call `set_peer` with the deployed escrow's 32-byte
+    /// address for every eid that will appear as `src_eid` in a FillInstruction.
     pub fn set_peer(env: Env, eid: u32, peer: BytesN<32>) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
+        let old: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
         env.storage().instance().set(&DataKey::Peer(eid), &peer);
+        env.events().publish(
+            (Symbol::new(&env, "peer_set"),),
+            (eid, old, peer),
+        );
         Ok(())
     }
 
-    /// Transfer admin authority. Admin-only.
+    /// Begin a two-step admin handover (issue #17).
+    ///
+    /// Stores `new_admin` as `PendingAdmin`. The nominee must call
+    /// `accept_admin` (authorizing as themselves) to complete the transfer.
+    /// This mirrors the EVM `transferOwnership` / `acceptOwnership` pattern and
+    /// prevents a fat-fingered or uncontrolled address from permanently capturing
+    /// governance.
+    ///
+    /// To cancel a pending handover, call `set_admin` again with the current
+    /// admin's own address (or any address the current admin controls).
+    /// Effectively this overwrites the pending nominee without completing the
+    /// handover, since the current admin remains in place until `accept_admin`
+    /// is called.
+    ///
+    /// Emits `admin_transfer_started(old, new)` (issue #16).
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), PerihelionError> {
-        Self::require_admin(&env)?.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        let current = Self::require_admin(&env)?;
+        current.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transfer_started"),),
+            (current, new_admin),
+        );
+        Ok(())
+    }
+
+    /// Complete a pending admin handover (issue #17).
+    ///
+    /// Must be called by the address stored in `PendingAdmin`. Atomically
+    /// promotes the nominee to `Admin` and clears `PendingAdmin`.
+    ///
+    /// Emits `admin_transfer_completed(old, new)` (issue #16).
+    pub fn accept_admin(env: Env) -> Result<(), PerihelionError> {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(PerihelionError::NotPendingAdmin)?;
+        pending.require_auth();
+        let old = Self::require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().extend_ttl(17_280, 1_209_600);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transfer_completed"),),
+            (old, pending),
+        );
         Ok(())
     }
 
     /// Emergency halt of state-mutating entrypoints. Admin-only. Fail-safe: a
     /// paused contract cannot move funds.
+    ///
+    /// Emits `paused_set(value)` (issue #16).
     pub fn set_paused(env: Env, paused: bool) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
         env.storage().instance().set(&DataKey::Paused, &paused);
+        env.events().publish(
+            (Symbol::new(&env, "paused_set"),),
+            (paused,),
+        );
         Ok(())
     }
 
@@ -563,6 +684,45 @@ impl Perihelion {
         if fi.min_dest_amount <= 0 {
             return Err(PerihelionError::InvalidAmount);
         }
+        // Reject deadlines that are unreasonably far in the future. This bounds
+        // per-intent TTL to a realistic settlement window and prevents cheap
+        // state-bloat attacks that pin MAX_TTL entries via far-future deadlines.
+        let now = env.ledger().timestamp();
+        if fi.deadline > now.saturating_add(MAX_DEADLINE_HORIZON) {
+            return Err(PerihelionError::DeadlineTooFar);
+        }
+
+        // Issue #15: verify that a peer is configured for fi.src_eid BEFORE
+        // registering the intent. If no peer exists for this eid, dispatch
+        // (FillConfirmed / CancelIntent) will fail at settlement time with
+        // UntrustedPeer, permanently stranding the intent. Rejecting here
+        // surfaces the operator misconfiguration early and prevents stranding.
+        //
+        // Peer symmetry note: `DataKey::Peer(src_eid)` is the same entry used
+        // by both inbound validation (lz_receive checks origin.sender against
+        // Peer(origin.src_eid)) and outbound dispatch (dispatch looks up
+        // Peer(rec.src_eid) to find the EVM escrow receiver). This is intentional
+        // and documented in set_peer above.
+        //
+        // Note on the two distinct src_eid values:
+        // - `origin.src_eid` (LayerZero transport source): the eid of the chain
+        //   that sent this LayerZero message. Already validated by lz_receive
+        //   against the registered peer before we arrive here.
+        // - `fi.src_eid` (intent source eid): the eid embedded inside the
+        //   FillInstruction payload, identifying which chain holds the locked
+        //   funds. For well-formed messages from a compliant EVM escrow these
+        //   two values are always equal (the escrow sets fi.src_eid = stellarEid
+        //   which is the Stellar endpoint id, NOT its own eid; see the EVM codec).
+        //   In practice the two are the same on all known deployments, but we
+        //   guard on fi.src_eid here because that is what dispatch uses at
+        //   settlement time.
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Peer(fi.src_eid))
+        {
+            return Err(PerihelionError::UntrustedPeer);
+        }
 
         let rec = IntentRecord {
             intent_hash: fi.intent_hash.clone(),
@@ -596,6 +756,12 @@ impl Perihelion {
 
     fn on_cancel_inbound(env: &Env, ci: CancelInstruction) -> Result<(), PerihelionError> {
         if Self::is_finalized(env, &ci.intent_hash) {
+            // Emit cancel_ignored event to record the race: cancel arrived after intent was finalized.
+            // This enables auditing and reconciliation to distinguish "never arrived" from "lost race".
+            env.events().publish(
+                (Symbol::new(env, "cancel_ignored"), ci.intent_hash.clone()),
+                (IntentStatus::ConfirmationSent as u32,),
+            );
             return Ok(());
         }
         let key = DataKey::Intent(ci.intent_hash.clone());
@@ -614,6 +780,17 @@ impl Perihelion {
                     &DataKey::Cancelled(ci.intent_hash.clone()),
                     MAX_TTL / 2,
                     MAX_TTL,
+                );
+                env.events().publish(
+                    (Symbol::new(env, "cancelled_inbound"), ci.intent_hash.clone()),
+                    (rec.src_eid,),
+                );
+            } else {
+                // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
+                // Emit cancel_ignored event to record the race.
+                env.events().publish(
+                    (Symbol::new(env, "cancel_ignored"), ci.intent_hash.clone()),
+                    (rec.status as u32,),
                 );
             }
         }
@@ -704,10 +881,15 @@ impl Perihelion {
     }
 
     /// TTL bump target covering `deadline + GRACE`, clamped to `MAX_TTL`.
+    ///
+    /// Divides by `MIN_SECS_PER_LEDGER` (4 s) to over-provision the ledger
+    /// count when actual close times are longer. This is the safe direction:
+    /// a too-generous TTL wastes a small amount of rent but an under-estimate
+    /// can archive the entry before the deadline passes.
     fn ttl_for_deadline(env: &Env, deadline: u64) -> u32 {
         let now = env.ledger().timestamp();
         let secs = deadline.saturating_sub(now);
-        let ledgers = (secs / SECS_PER_LEDGER) as u32;
+        let ledgers = (secs / MIN_SECS_PER_LEDGER) as u32;
         ledgers.saturating_add(GRACE_LEDGERS).min(MAX_TTL)
     }
 }

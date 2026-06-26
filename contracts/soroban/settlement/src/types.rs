@@ -20,6 +20,9 @@ pub const CANCEL_REASON_INVALID: u8 = 0x02;
 pub enum DataKey {
     // Instance tier (config).
     Admin,
+    /// Pending admin nominee for the two-step admin handover (issue #17).
+    /// Present only while a handover is in progress; cleared on accept or cancel.
+    PendingAdmin,
     Endpoint,
     Paused,
     /// Trusted remote OApp (the EVM escrow) per source endpoint id.
@@ -31,9 +34,10 @@ pub enum DataKey {
     Settled(BytesN<32>),
     /// Terminal idempotency marker: set iff the intent was cancelled.
     Cancelled(BytesN<32>),
-    /// Idempotency marker: set iff a FillConfirmed message was dispatched.
+    /// Idempotency marker: set once FillConfirmed has been dispatched for this intent.
     ConfirmationSent(BytesN<32>),
-    /// PROPOSED Phase 3: Aggregate reputation metrics keyed by solver address.
+
+    // Persistent tier (solver reputation — PROPOSED Phase 3).
     SolverReputation(Address),
 
     // Persistent tier (transport bookkeeping).
@@ -43,6 +47,10 @@ pub enum DataKey {
     InboundNonceBitmap(u32),
     /// Base nonce for the bitmap (nonce 0 before first message).
     InboundNonceBase(u32),
+
+    // Persistent tier (solver reputation — PROPOSED Phase 3).
+    /// Aggregate reputation metrics for a solver address.
+    SolverReputation(Address),
 }
 
 /// Lifecycle state of a registered intent.
