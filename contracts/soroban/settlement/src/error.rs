@@ -43,6 +43,8 @@ pub enum PerihelionError {
     InvalidAmount = 145,
     /// Intent already filled (fill race lost).
     AlreadyFilled = 146,
+    /// FillInstruction deadline exceeds MAX_DEADLINE_HORIZON from now.
+    DeadlineTooFar = 147,
 
     // --- Messaging ---
     /// Payload failed structural validation.
