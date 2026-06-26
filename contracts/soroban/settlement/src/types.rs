@@ -20,6 +20,9 @@ pub const CANCEL_REASON_INVALID: u8 = 0x02;
 pub enum DataKey {
     // Instance tier (config).
     Admin,
+    /// Pending admin nominee for the two-step admin handover (issue #17).
+    /// Present only while a handover is in progress; cleared on accept or cancel.
+    PendingAdmin,
     Endpoint,
     Paused,
     /// Trusted remote OApp (the EVM escrow) per source endpoint id.
@@ -35,8 +38,11 @@ pub enum DataKey {
     Settled(BytesN<32>),
     /// Terminal idempotency marker: set iff the intent was cancelled.
     Cancelled(BytesN<32>),
-    /// Idempotency marker: set when FillConfirmed has been dispatched.
+    /// Idempotency marker: set once FillConfirmed has been dispatched for this intent.
     ConfirmationSent(BytesN<32>),
+
+    // Persistent tier (solver reputation — PROPOSED Phase 3).
+    SolverReputation(Address),
 
     // Persistent tier (transport bookkeeping).
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
@@ -46,8 +52,8 @@ pub enum DataKey {
     /// Base nonce for the bitmap (nonce 0 before first message).
     InboundNonceBase(u32),
 
-    // Persistent tier (reputation bookkeeping).
-    /// PROPOSED Phase 3: Aggregate reputation metrics for a solver.
+    // Persistent tier (solver reputation — PROPOSED Phase 3).
+    /// Aggregate reputation metrics for a solver address.
     SolverReputation(Address),
 }
 
@@ -76,6 +82,9 @@ pub struct IntentRecord {
     pub min_dest_amount: i128,
     pub deadline: u64,
     pub preferred_solver: Option<Address>,
+    /// Unix timestamp at which the preferred-solver reservation lapses.
+    /// Zero means the reservation lasts until the deadline.
+    pub reservation_expires: u64,
     pub status: IntentStatus,
     pub solver: Option<Address>,
     pub solver_evm: Option<BytesN<32>>,
@@ -124,6 +133,9 @@ pub struct FillInstruction {
     pub min_dest_amount: i128,
     pub deadline: u64,
     pub preferred_solver: Option<Address>,
+    /// Seconds from registration during which only the preferred solver may fill.
+    /// After this window lapses, any solver may fill. Zero means no reservation.
+    pub reservation_window: u64,
 }
 
 /// A cancellation instruction delivered inbound.
