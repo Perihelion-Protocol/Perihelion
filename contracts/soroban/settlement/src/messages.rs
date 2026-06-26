@@ -15,6 +15,18 @@ use crate::types::{MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, PROTOCOL_VERSION};
 
 /// Encode a `FillConfirmed` payload (90 bytes):
 /// `version(1) | type(1) | intent_hash(32) | solver_evm(32) | amount(16) | ledger(8)`.
+///
+/// ## `amount` field — informational only
+///
+/// The `fill_amount` encoded here is the Stellar-side delivery amount, carried
+/// for off-chain observability (explorer display, solver accounting). It does
+/// **not** control how much the EVM escrow releases: `PerihelionEscrow._onFillConfirmed`
+/// releases `l.amount` — the measured-delta locked amount — regardless of this
+/// field. That is the correct and intentional design: the source-chain escrow
+/// already holds the exact value to release, so re-trusting a Stellar-declared
+/// amount would be redundant and would open a griefing vector. The field exists
+/// so that off-chain tooling can reconcile the Stellar fill with the EVM payout
+/// without a separate RPC call; it must never be used to gate or size the release.
 pub fn encode_fill_confirmed(
     env: &Env,
     intent_hash: &BytesN<32>,
@@ -28,6 +40,8 @@ pub fn encode_fill_confirmed(
     b.append(&Bytes::from_array(env, &intent_hash.to_array()));
     b.append(&Bytes::from_array(env, &solver_evm.to_array()));
     // Amount is validated non-negative before encoding; widen to u128 wire form.
+    // See doc-comment above: this value is informational and is not used by the
+    // EVM escrow to size the release.
     b.append(&Bytes::from_array(
         env,
         &(fill_amount as u128).to_be_bytes(),

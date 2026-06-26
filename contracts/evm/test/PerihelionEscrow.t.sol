@@ -782,6 +782,50 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
     }
 
+    // --- FillConfirmed amount field is informational -------------------------
+
+    /// @notice The `amount` field in FillConfirmed is informational; the escrow
+    ///         always releases `l.amount` (measured-delta), regardless of the
+    ///         value encoded in the message. This test confirms that a message
+    ///         carrying a wildly different amount still releases exactly the
+    ///         locked balance.
+    function test_FillConfirmedReleasesLockAmountNotMessageAmount() public {
+        bytes32 h = _lock(); // locks 100_000 tokens
+
+        // Craft a FillConfirmed with amount field = 999_999 (much bigger than locked).
+        bytes memory msgWithBigAmount = abi.encodePacked(
+            V,
+            T_FILL_CONFIRMED,
+            h,
+            bytes32(uint256(uint160(solver))),
+            uint128(999_999), // informational field — must NOT change the released amount
+            uint64(1)
+        );
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgWithBigAmount);
+
+        // Solver receives exactly l.amount = 100_000, not 999_999.
+        assertEq(token.balanceOf(solver), 100_000);
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
+    /// @notice Symmetric: message amount smaller than locked still releases l.amount.
+    function test_FillConfirmedReleasesLockAmountWhenMessageAmountIsSmaller() public {
+        bytes32 h = _lock(); // locks 100_000 tokens
+
+        bytes memory msgWithSmallAmount = abi.encodePacked(
+            V,
+            T_FILL_CONFIRMED,
+            h,
+            bytes32(uint256(uint160(solver))),
+            uint128(1), // tiny — must NOT under-release
+            uint64(1)
+        );
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgWithSmallAmount);
+
+        assertEq(token.balanceOf(solver), 100_000);
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
     // --- FillConfirmed/CancelIntent codec: exact byte layout ----
 
     /// @notice Verify FillConfirmed decoding against exact 90-byte layout:

@@ -399,6 +399,13 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @dev Decode a 90-byte FillConfirmed:
     ///      version(1)|type(1)|intent_hash(32)|solver_evm(32)|amount(16)|ledger(8).
+    ///
+    ///      The `amount` and `ledger` fields at bytes [66,82) and [82,90) are decoded
+    ///      here for completeness but are **not** used to size the release. The escrow
+    ///      releases `l.amount` — the measured-delta locked amount — because that value
+    ///      is authoritative and already held. Trusting a Stellar-declared amount would
+    ///      be redundant and unsafe. The field is informational: off-chain tooling can
+    ///      use it to reconcile the Stellar fill with the EVM payout.
     function _decodeFillConfirmed(bytes calldata m)
         internal
         pure

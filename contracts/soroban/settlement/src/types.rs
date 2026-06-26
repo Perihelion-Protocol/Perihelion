@@ -24,6 +24,10 @@ pub enum DataKey {
     Paused,
     /// Trusted remote OApp (the EVM escrow) per source endpoint id.
     Peer(u32),
+    /// Per-corridor pause flag. When set for an eid, all inbound and outbound
+    /// operations for that corridor are blocked independently of the global flag.
+    /// Allows quarantining a single compromised chain without halting others.
+    PausedEid(u32),
 
     // Persistent tier (per-intent lifecycle).
     Intent(BytesN<32>),
@@ -31,6 +35,8 @@ pub enum DataKey {
     Settled(BytesN<32>),
     /// Terminal idempotency marker: set iff the intent was cancelled.
     Cancelled(BytesN<32>),
+    /// Idempotency marker: set when FillConfirmed has been dispatched.
+    ConfirmationSent(BytesN<32>),
 
     // Persistent tier (transport bookkeeping).
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
@@ -39,6 +45,10 @@ pub enum DataKey {
     InboundNonceBitmap(u32),
     /// Base nonce for the bitmap (nonce 0 before first message).
     InboundNonceBase(u32),
+
+    // Persistent tier (reputation bookkeeping).
+    /// PROPOSED Phase 3: Aggregate reputation metrics for a solver.
+    SolverReputation(Address),
 }
 
 /// Lifecycle state of a registered intent.

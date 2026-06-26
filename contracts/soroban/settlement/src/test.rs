@@ -294,6 +294,43 @@ fn rejects_replayed_nonce() {
     register_intent(&s, &hash(&s.env, 10), &recipient, 1, 5_000, 5, None);
 }
 
+/// A FillInstruction whose body `src_eid` differs from `origin.src_eid` must
+/// not be trusted for return-path routing. The contract overwrites the body's
+/// src_eid with the transport-authenticated origin.src_eid, so any
+/// FillConfirmed/CancelIntent is dispatched to the chain that actually sent the
+/// message rather than an attacker-declared chain.
+#[test]
+fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 50);
+
+    // Body declares a different src_eid (e.g. a different chain).
+    let attacker_eid = 99999u32;
+    let fi = FillInstruction {
+        intent_hash: h.clone(),
+        src_eid: attacker_eid, // body-declared, must be ignored
+        recipient: recipient.clone(),
+        dest_asset: s.asset.clone(),
+        min_dest_amount: 1,
+        deadline: 5_000,
+        preferred_solver: None,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid, // transport-authenticated
+        sender: s.peer.clone(),
+        nonce: 1,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client
+        .lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+
+    // The stored record must use transport src_eid, not the body-declared one.
+    let rec = s.client.get_intent(&h).unwrap();
+    assert_eq!(rec.src_eid, s.src_eid,
+        "src_eid must be overridden to transport origin.src_eid, not the body-declared attacker_eid");
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #100)")] // AlreadyInitialized
 fn rejects_double_initialize() {
@@ -312,6 +349,199 @@ fn rejects_fill_while_paused() {
     let evm = BytesN::from_array(&s.env, &[0x11; 32]);
     s.client
         .fill_intent(&solver, &evm, &hash(&s.env, 11), &100, &0);
+}
+
+// --- Pause semantics ----------------------------------------------------------
+//
+// Design invariant: `fill_intent`, `cancel_expired_intent`, and
+// `dispatch_confirmation` are pause-gated and must revert with `ContractPaused`
+// (error #102) without moving tokens or changing state.
+//
+// `lz_receive` is deliberately NOT pause-gated. In-flight FillInstruction
+// registrations and inbound cancellations must continue to land so that the
+// Stellar side never diverges from a message already in-flight on the LayerZero
+// channel. This mirrors the EVM side's design: `lzReceive` completes in-flight
+// settlement while `lock` and `cancelExpired` are blocked. The choice is
+// explicitly tested here so the invariant is pinned and cannot drift silently.
+//
+// Admin config paths (set_paused, set_peer, set_admin, set_endpoint) are also
+// not pause-gated — operators must retain the ability to reconfigure during an
+// incident.
+
+#[test]
+#[should_panic(expected = "Error(Contract, #102)")] // ContractPaused
+fn pause_blocks_fill_intent() {
+    let s = setup();
+    s.client.set_paused(&true);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 20);
+    // Register via lz_receive (not pause-gated) so there is an intent to fill.
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    // fill_intent must revert.
+    s.client.fill_intent(&solver, &evm, &h, &100_000, &0);
+}
+
+#[test]
+fn pause_blocks_fill_intent_moves_no_tokens() {
+    let s = setup();
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 21);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    s.client.set_paused(&true);
+
+    let tok = token::TokenClient::new(&s.env, &s.asset);
+    let solver_before = tok.balance(&solver);
+    let recipient_before = tok.balance(&recipient);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let result = s.client.try_fill_intent(&solver, &evm, &h, &100_000, &0);
+    assert!(result.is_err());
+    // No tokens moved.
+    assert_eq!(tok.balance(&solver), solver_before);
+    assert_eq!(tok.balance(&recipient), recipient_before);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #102)")] // ContractPaused
+fn pause_blocks_cancel_expired_intent() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let caller = Address::generate(&s.env);
+    let h = hash(&s.env, 22);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    s.env.ledger().with_mut(|li| li.timestamp = 6_000); // past deadline
+    s.client.set_paused(&true);
+    s.client.cancel_expired_intent(&caller, &h, &0);
+}
+
+#[test]
+fn pause_blocks_cancel_expired_intent_moves_no_tokens() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let caller = Address::generate(&s.env);
+    let h = hash(&s.env, 23);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    s.env.ledger().with_mut(|li| li.timestamp = 6_000);
+    s.client.set_paused(&true);
+
+    let result = s.client.try_cancel_expired_intent(&caller, &h, &0);
+    assert!(result.is_err());
+    // Intent still Locked — no cancellation marker written.
+    assert!(!s.client.is_cancelled(&h));
+    assert_eq!(
+        s.client.get_intent(&h).unwrap().status,
+        IntentStatus::Locked
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #102)")] // ContractPaused
+fn pause_blocks_dispatch_confirmation() {
+    let s = setup();
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 24);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    // Fill without dispatch (deliver_intent path); then pause.
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.deliver_intent(&solver, &evm, &h, &100_000);
+    s.client.set_paused(&true);
+
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h, &0);
+}
+
+/// lz_receive is NOT pause-gated: inbound FillInstruction still registers while
+/// paused. This matches the EVM side where lzReceive completes in-flight
+/// settlement regardless of the pause flag. The rationale: a message already
+/// dispatched over LayerZero cannot be recalled, so refusing it on the Stellar
+/// side would leave the Soroban state behind the EVM state with no recovery path.
+#[test]
+fn pause_does_not_block_lz_receive_fill_instruction() {
+    let s = setup();
+    s.client.set_paused(&true);
+
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 25);
+    // Must succeed even while paused.
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+    assert!(s.client.get_intent(&h).is_some());
+}
+
+/// lz_receive inbound cancel is NOT pause-gated for the same reason.
+#[test]
+fn pause_does_not_block_lz_receive_inbound_cancel() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 26);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    s.client.set_paused(&true);
+
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: 0,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 2,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    // Must succeed while paused.
+    s.client
+        .lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+    assert!(s.client.is_cancelled(&h));
+}
+
+/// Unpausing restores all blocked operations to normal.
+#[test]
+fn unpause_restores_fill_intent() {
+    let s = setup();
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 27);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    s.client.set_paused(&true);
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    assert!(s.client.try_fill_intent(&solver, &evm, &h, &100_000, &0).is_err());
+
+    s.client.set_paused(&false);
+    s.client.fill_intent(&solver, &evm, &h, &100_000, &0);
+    let tok = token::TokenClient::new(&s.env, &s.asset);
+    assert_eq!(tok.balance(&recipient), 100_000);
+    assert!(s.client.is_settled(&h));
+}
+
+/// Unpausing restores cancel_expired_intent.
+#[test]
+fn unpause_restores_cancel_expired_intent() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let caller = Address::generate(&s.env);
+    let h = hash(&s.env, 28);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+    s.env.ledger().with_mut(|li| li.timestamp = 6_000);
+
+    s.client.set_paused(&true);
+    assert!(s.client.try_cancel_expired_intent(&caller, &h, &0).is_err());
+
+    s.client.set_paused(&false);
+    s.client.cancel_expired_intent(&caller, &h, &0);
+    assert!(s.client.is_cancelled(&h));
+    assert_eq!(s.mock.sent(), 1);
 }
 
 // --- Outbound codec -----------------------------------------------------------
