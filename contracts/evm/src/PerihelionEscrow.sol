@@ -63,6 +63,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Upper bound on `confirmationGrace`, so a misconfigured admin can
     ///         never strand a user's local refund indefinitely.
     uint256 public constant MAX_CONFIRMATION_GRACE = 7 days;
+    /// @notice Lower bound on `confirmationGrace`. Must exceed worst-case cross-chain
+    ///         settlement latency (LayerZero relay + Stellar finality) so that
+    ///         `cancelExpired` cannot fire while a valid FillConfirmed is still in
+    ///         flight — which would refund the user after the solver has already
+    ///         delivered on Stellar, leaving the solver unrepaid.
+    uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
 
     // --- Immutable / config --------------------------------------------------
 
@@ -141,6 +147,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error Reentrancy();
     error EnforcedPause();
     error GraceTooLong();
+    error GraceTooShort();
     error ZeroAddress();
 
     // --- Modifiers -----------------------------------------------------------
@@ -185,10 +192,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         emit PeerSet(peer);
     }
 
-    /// @notice Tune the local-refund grace period. Capped so a misconfiguration
-    ///         can never push the user's refund window out indefinitely.
+    /// @notice Tune the local-refund grace period. Bounded by MIN_CONFIRMATION_GRACE
+    ///         (so a cancel cannot race an in-flight FillConfirmed) and
+    ///         MAX_CONFIRMATION_GRACE (so a misconfiguration cannot strand refunds).
     function setConfirmationGrace(uint256 secondsGrace) external onlyOwner {
         if (secondsGrace > MAX_CONFIRMATION_GRACE) revert GraceTooLong();
+        if (secondsGrace < MIN_CONFIRMATION_GRACE) revert GraceTooShort();
         confirmationGrace = secondsGrace;
         emit ConfirmationGraceSet(secondsGrace);
     }

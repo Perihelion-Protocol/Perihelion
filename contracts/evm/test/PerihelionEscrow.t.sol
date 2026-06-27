@@ -1023,4 +1023,23 @@ contract PerihelionEscrowTest is Test {
         _lock();
         assertEq(token.balanceOf(address(escrow)), 100_000);
     }
+
+    // --- #40: MIN_CONFIRMATION_GRACE ----------------------------------------
+
+    function test_RevertWhen_GraceBelowMinimum() public {
+        uint256 tooShort = escrow.MIN_CONFIRMATION_GRACE() - 1;
+        vm.expectRevert(PerihelionEscrow.GraceTooShort.selector);
+        escrow.setConfirmationGrace(tooShort);
+    }
+
+    function test_SetConfirmationGraceAtMinimum() public {
+        escrow.setConfirmationGrace(escrow.MIN_CONFIRMATION_GRACE());
+        assertEq(escrow.confirmationGrace(), escrow.MIN_CONFIRMATION_GRACE());
+    }
+
+    function test_RevertWhen_GraceAboveMaximum() public {
+        uint256 tooLong = escrow.MAX_CONFIRMATION_GRACE() + 1;
+        vm.expectRevert(PerihelionEscrow.GraceTooLong.selector);
+        escrow.setConfirmationGrace(tooLong);
+    }
 }
