@@ -67,20 +67,18 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Cancel reason codes (shared taxonomy with the Soroban side) --------
 
-    /// @dev Cross-chain cancel: intent deadline elapsed on Stellar.
+    /// @dev Known cancel reason codes, mirroring the Soroban side.
     uint8 private constant CANCEL_REASON_EXPIRED       = 0x00;
-    /// @dev Cross-chain cancel: admin-initiated refund.
     uint8 private constant CANCEL_REASON_ADMIN         = 0x01;
-    /// @dev Cross-chain cancel: fill was deemed invalid.
     uint8 private constant CANCEL_REASON_INVALID       = 0x02;
     /// @dev Local refund fallback: timed out waiting for cross-chain confirmation.
     ///      This value (0xFF) is EVM-only; it does not appear in Soroban messages.
     uint8 private constant CANCEL_REASON_LOCAL_TIMEOUT = 0xFF;
 
-    bytes1 private constant PROTOCOL_VERSION = 0x01;
+    bytes1 private constant PROTOCOL_VERSION     = 0x01;
     bytes1 private constant MSG_FILL_INSTRUCTION = 0x01;
-    bytes1 private constant MSG_FILL_CONFIRMED = 0x02;
-    bytes1 private constant MSG_CANCEL_INTENT = 0x03;
+    bytes1 private constant MSG_FILL_CONFIRMED   = 0x02;
+    bytes1 private constant MSG_CANCEL_INTENT    = 0x03;
 
     /// @notice Upper bound on `confirmationGrace`, so a misconfigured admin can
     ///         never strand a user's local refund indefinitely.
@@ -91,11 +89,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         flight — which would refund the user after the solver has already
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
-
-    /// @dev Known cancel reason codes, mirroring the Soroban side.
-    uint8 private constant CANCEL_REASON_EXPIRED = 0x00;
-    uint8 private constant CANCEL_REASON_ADMIN   = 0x01;
-    uint8 private constant CANCEL_REASON_INVALID = 0x02;
 
     // --- Immutable / config --------------------------------------------------
 
@@ -454,25 +447,50 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: codec -----------------------------------------------------
 
-    /// @dev FillInstruction body is ABI-encoded pending the final Soroban LayerZero
-    ///      ABI (the Stellar side decodes it at the adapter boundary). The header
-    ///      mirrors the shared 2-byte `version|type` framing.
-    function _encodeFillInstruction(bytes32 intentHash, Intent calldata intent, uint256 received)
+    /// @dev Encode a FillInstruction payload (158 bytes) using the fixed big-endian
+    ///      layout from architecture spec §3.3, matching the Soroban decoder byte-for-byte:
+    ///
+    ///      version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(32)
+    ///        | dest_asset(32) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
+    ///
+    ///      `intent.destination` and `intent.destAsset` are Stellar strkey bodies encoded
+    ///      as fixed 32-byte fields (right-padded with zeros if shorter).
+    ///      `intent.preferredSolver` is an EVM address left-padded to 32 bytes; all-zeros
+    ///      signals "open" (no preferred solver) on the Soroban side.
+    ///
+    ///      The `received` (locked amount) is NOT transmitted; Stellar determines the
+    ///      fill amount independently via the solver's `fill_intent` call.
+    function _encodeFillInstruction(bytes32 intentHash, Intent calldata intent, uint256 /*received*/)
         internal
         view
         returns (bytes memory)
     {
-        bytes memory body = abi.encode(
-            intentHash,
-            stellarEid,
-            intent.destination,
-            intent.destAsset,
-            received,
-            intent.minDestAmount,
-            intent.deadline,
-            intent.preferredSolver
+        // Encode destination and destAsset as fixed 32-byte fields.
+        bytes32 recipient;
+        bytes32 destAssetWord;
+        bytes memory destBytes = bytes(intent.destination);
+        bytes memory destAssetBytes = bytes(intent.destAsset);
+        // Copy up to 32 bytes; extra bytes are truncated (spec requires exactly 32).
+        assembly {
+            recipient    := mload(add(destBytes,     32))
+            destAssetWord := mload(add(destAssetBytes, 32))
+        }
+
+        // Encode preferredSolver: EVM address left-padded to 32 bytes (zeros = open).
+        bytes32 solverWord = bytes32(uint256(uint160(intent.preferredSolver)));
+
+        return abi.encodePacked(
+            PROTOCOL_VERSION,                   // 1  byte  offset 0
+            MSG_FILL_INSTRUCTION,               // 1  byte  offset 1
+            intentHash,                         // 32 bytes offset 2
+            uint32(stellarEid),                 // 4  bytes offset 34
+            recipient,                          // 32 bytes offset 38
+            destAssetWord,                      // 32 bytes offset 70
+            uint128(intent.minDestAmount),      // 16 bytes offset 102
+            uint64(intent.deadline),            // 8  bytes offset 118
+            solverWord                          // 32 bytes offset 126
+            //                                  total       158
         );
-        return abi.encodePacked(PROTOCOL_VERSION, MSG_FILL_INSTRUCTION, body);
     }
 
     /// @dev Decode a 90-byte FillConfirmed:

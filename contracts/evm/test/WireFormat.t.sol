@@ -15,6 +15,14 @@ contract DecoderHarness is PerihelionEscrow {
     function decodeCancelIntent(bytes calldata m) external pure returns (bytes32, uint8) {
         return _decodeCancelIntent(m);
     }
+
+    function encodeFillInstruction(
+        bytes32 intentHash,
+        Intent calldata intent,
+        uint256 received
+    ) external view returns (bytes memory) {
+        return _encodeFillInstruction(intentHash, intent, received);
+    }
 }
 
 /// @dev Cross-chain wire-format conformance. Reads the same golden vectors the
@@ -32,6 +40,19 @@ contract WireFormatConformanceTest is Test {
         hex"000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     bytes32 internal constant CI_HASH =
         hex"2222222222222222222222222222222222222222222222222222222222222222";
+
+    // FillInstruction canonical inputs (must match fill_instruction.hex).
+    bytes32 internal constant FI_INTENT_HASH =
+        hex"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    // recipient: 32 bytes of 0xBB (Stellar strkey body)
+    bytes32 internal constant FI_RECIPIENT =
+        hex"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    // dest_asset: 32 bytes of 0xCC (Stellar SAC address)
+    bytes32 internal constant FI_DEST_ASSET =
+        hex"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    // preferred_solver: EVM address 0xDDDD...DDDD (20 bytes), left-padded to 32
+    bytes32 internal constant FI_SOLVER_WORD =
+        hex"000000000000000000000000dddddddddddddddddddddddddddddddddddddddd";
 
     function setUp() public {
         harness = new DecoderHarness(address(0x1), 30_316);
@@ -66,5 +87,41 @@ contract WireFormatConformanceTest is Test {
 
         bytes memory rebuilt = abi.encodePacked(bytes1(0x01), bytes1(0x03), CI_HASH, uint8(0));
         assertEq(rebuilt, golden);
+    }
+
+    /// @dev Assert that the EVM encoder produces the canonical FillInstruction bytes.
+    ///      Canonical inputs: intent_hash=0xAA*32, src_eid=30316, recipient=0xBB*32,
+    ///      dest_asset=0xCC*32, min_dest_amount=1_000_000_000, deadline=9999999999,
+    ///      preferred_solver=0xDDDD...DDDD (EVM address).
+    function test_FillInstructionVectorEncodes() public view {
+        bytes memory golden = _readVector("fill_instruction.hex");
+        assertEq(golden.length, 158);
+
+        // Build the Intent calldata with canonical values.
+        // destination / destAsset are passed as strings whose first 32 bytes are the
+        // Stellar strkey bodies encoded in the vector.
+        PerihelionEscrow.Intent memory intent = PerihelionEscrow.Intent({
+            user:              address(0),
+            destination:       _bytes32ToString(FI_RECIPIENT),
+            sourceChainId:     block.chainid,
+            sourceAsset:       address(0),
+            sourceAmount:      0,
+            destAsset:         _bytes32ToString(FI_DEST_ASSET),
+            minDestAmount:     1_000_000_000,
+            deadline:          9_999_999_999,
+            nonce:             0,
+            preferredSolver:   address(uint160(uint256(FI_SOLVER_WORD)))
+        });
+
+        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent, 0);
+        assertEq(encoded.length, 158);
+        assertEq(encoded, golden);
+    }
+
+    /// @dev Convert the first 32 bytes of a bytes32 into a string (for Intent string fields).
+    function _bytes32ToString(bytes32 b) internal pure returns (string memory) {
+        bytes memory raw = new bytes(32);
+        assembly { mstore(add(raw, 32), b) }
+        return string(raw);
     }
 }
