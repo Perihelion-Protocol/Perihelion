@@ -834,13 +834,13 @@ unsigned 128-bit in the asset's smallest unit.
 
 **`FillConfirmed` (Stellar → source)** — authorizes solver payout on source.
 
-| Offset | Size | Field | Description |
-|--------|------|-------|-------------|
-| 2 | 32 | `intent_hash` | Must match a live lock on the escrow. |
-| 34 | 32 | `solver_evm` | Left-padded EVM payout address. |
-| 66 | 16 | `fill_amount` | u128 delivered on Stellar (audit). |
-| 82 | 8 | `fill_ledger` | u64 Stellar ledger seq (audit / dispute). |
-| **90** | | **total** | |
+| Offset | Size | Field | Consumer | Description |
+|--------|------|-------|----------|-------------|
+| 2 | 32 | `intent_hash` | **EVM escrow** | Identifies the lock to release. Must match a live, unfinalized lock. |
+| 34 | 32 | `solver_evm` | **EVM escrow** | Left-padded EVM payout address. The escrow transfers `l.amount` to this address. May differ from the locking solver key (hot lock / cold payout). |
+| 66 | 16 | `fill_amount` | **Off-chain / event log** | u128 Stellar-side delivery amount — **informational only**. Does not control the EVM release; the escrow releases `l.amount` (the measured-delta locked value). Decoded and emitted in the `Released` event for off-chain reconciliation without a separate RPC call. Encoding as u128 matches the `min_dest_amount` width in FillInstruction. |
+| 82 | 8 | `fill_ledger` | **Off-chain / event log** | u64 Stellar ledger sequence at fill time — **informational only**. Sourced from `u32 env.ledger().sequence()` and widened to u64 on the wire: (1) future-proofs against the eventual Stellar u32 overflow (~136 years at current rates) without a breaking wire change; (2) matches the EVM `uint64` receiver width. Decoded and emitted in `Released` for dispute resolution and explorer display. |
+| **90** | | **total** | | |
 
 **`CancelIntent` (either direction)** — instructs the receiver to unwind.
 

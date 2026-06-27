@@ -143,7 +143,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         address asset,
         uint256 amount
     );
-    event Released(bytes32 indexed intentHash, address indexed solver, uint256 amount);
+    /// @param fillAmount Stellar-side delivery amount (informational; the escrow releases
+    ///                   `l.amount`, not this value — see `_decodeFillConfirmed`).
+    /// @param fillLedger Stellar ledger sequence at which the fill was recorded
+    ///                   (informational; useful for off-chain dispute resolution and explorer display).
+    event Released(
+        bytes32 indexed intentHash,
+        address indexed solver,
+        uint256 amount,
+        uint128 fillAmount,
+        uint64  fillLedger
+    );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
@@ -379,14 +389,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      authentication in `lzReceive` — only the trusted Stellar peer can supply
     ///      `solverEvm`, so an attacker cannot redirect funds to an arbitrary address.
     function _onFillConfirmed(bytes calldata message) internal {
-        (bytes32 intentHash, address solverEvm) = _decodeFillConfirmed(message);
+        (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger) =
+            _decodeFillConfirmed(message);
         Lock storage l = locks[intentHash];
         if (l.user == address(0)) revert NotLocked();
         if (l.released || l.refunded) revert AlreadyFinalized();
 
         l.released = true; // effect before interaction (race guard)
         _safeTransfer(l.asset, solverEvm, l.amount);
-        emit Released(intentHash, solverEvm, l.amount);
+        emit Released(intentHash, solverEvm, l.amount, fillAmount, fillLedger);
     }
 
     function _onCancelIntent(bytes calldata message) internal {
@@ -476,28 +487,44 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @dev Decode a 90-byte FillConfirmed:
-    ///      version(1)|type(1)|intent_hash(32)|solver_evm(32)|amount(16)|ledger(8).
+    ///      version(1) | type(1) | intent_hash(32) | solver_evm(32) | fill_amount(16) | fill_ledger(8)
     ///
-    ///      The `amount` and `ledger` fields at bytes [66,82) and [82,90) are decoded
-    ///      here for completeness but are **not** used to size the release. The escrow
-    ///      releases `l.amount` — the measured-delta locked amount — because that value
-    ///      is authoritative and already held. Trusting a Stellar-declared amount would
-    ///      be redundant and unsafe. The field is informational: off-chain tooling can
-    ///      use it to reconcile the Stellar fill with the EVM payout.
+    ///      Field authority:
+    ///      - `intentHash`  — CONSUMED: identifies the lock to release.
+    ///      - `solverEvm`   — CONSUMED: payout destination (may differ from the locking solver key).
+    ///      - `fillAmount`  — INFORMATIONAL: Stellar-side delivery amount. The escrow releases
+    ///                        `l.amount` (the measured-delta locked amount), not this value.
+    ///                        Trusting a Stellar-declared amount would be redundant and would open
+    ///                        a griefing vector. Decoded and emitted in `Released` so off-chain
+    ///                        tooling can reconcile the Stellar fill with the EVM payout without
+    ///                        a separate RPC call.
+    ///      - `fillLedger`  — INFORMATIONAL: Stellar ledger sequence at which the fill was
+    ///                        recorded. Decoded and emitted in `Released` for dispute resolution
+    ///                        and explorer display. Not used to gate or size the release.
     function _decodeFillConfirmed(bytes calldata m)
         internal
         pure
-        returns (bytes32 intentHash, address solverEvm)
+        returns (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger)
     {
         if (m.length != 90) revert MalformedPayload();
         bytes32 hashWord;
         bytes32 solverWord;
+        bytes32 amountWord;
+        bytes32 ledgerWord;
         assembly {
-            hashWord := calldataload(add(m.offset, 2))
+            hashWord   := calldataload(add(m.offset, 2))
             solverWord := calldataload(add(m.offset, 34))
+            // offset 66: 16-byte amount occupies the high 16 bytes of the 32-byte load.
+            amountWord := calldataload(add(m.offset, 66))
+            // offset 82: 8-byte ledger occupies the high 8 bytes of the 32-byte load.
+            ledgerWord := calldataload(add(m.offset, 82))
         }
         intentHash = hashWord;
-        solverEvm = address(uint160(uint256(solverWord)));
+        solverEvm  = address(uint160(uint256(solverWord)));
+        // High 16 bytes of the 32-byte word loaded at offset 66.
+        fillAmount = uint128(uint256(amountWord >> 128));
+        // High 8 bytes of the 32-byte word loaded at offset 82.
+        fillLedger = uint64(uint256(ledgerWord >> 192));
     }
 
     /// @dev Decode a 35-byte CancelIntent:
