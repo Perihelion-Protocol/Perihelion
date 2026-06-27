@@ -124,6 +124,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error NotLocked();
     error InvalidSignature();
     error IntentExpired();
+    error WrongChain();
     error NotEndpoint();
     error UntrustedPeer();
     error ReservedForSolver();
@@ -246,6 +247,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         whenNotPaused
     {
         if (block.timestamp >= intent.deadline) revert IntentExpired();
+        // #39: bind intent to the chain the user signed for.
+        if (intent.sourceChainId != block.chainid) revert WrongChain();
         if (intent.preferredSolver != address(0) && intent.preferredSolver != msg.sender) {
             revert ReservedForSolver();
         }

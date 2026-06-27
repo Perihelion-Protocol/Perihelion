@@ -73,8 +73,10 @@ contract FeeERC20 is IERC20 {
     }
 }
 
-/// @dev USDT-style token: no return value (old USDC behavior). Tests escrow robustness.
-contract NoReturnERC20 is IERC20 {
+/// @dev USDT-style token: no return value on transfer/transferFrom (old USDC behavior).
+///      Does not inherit IERC20 to allow the void return type; the escrow
+///      exercises it via low-level calls in _safeTransfer / _safeTransferFrom.
+contract NoReturnERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -1001,6 +1003,24 @@ contract PerihelionEscrowTest is Test {
 
         vm.prank(preferredSolver);
         escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    // --- #39: WrongChain check -------------------------------------------
+
+    function test_RevertWhen_LockWrongChain() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceChainId = block.chainid + 1; // mismatch
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.WrongChain.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_LockCorrectChain() public {
+        // Ensure the default _intent() (uses block.chainid) still works.
+        _lock();
         assertEq(token.balanceOf(address(escrow)), 100_000);
     }
 }
