@@ -189,7 +189,7 @@ contract PerihelionEscrowTest is Test {
         uint256 amount
     );
     event Released(bytes32 indexed intentHash, address indexed solver, uint256 amount);
-    event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount);
+    event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -435,7 +435,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Refunded(h, user, 100_000);
+        emit Refunded(h, user, 100_000, 0);
         _cancel(h, 1);
 
         assertEq(token.balanceOf(user), 1_000_000);
@@ -516,7 +516,7 @@ contract PerihelionEscrowTest is Test {
 
         vm.warp(intent.deadline + escrow.confirmationGrace());
         vm.expectEmit(true, true, false, true);
-        emit Refunded(h, user, 100_000);
+        emit Refunded(h, user, 100_000, 0);
         escrow.cancelExpired(h);
 
         assertEq(token.balanceOf(user), 1_000_000);
@@ -1041,5 +1041,34 @@ contract PerihelionEscrowTest is Test {
         uint256 tooLong = escrow.MAX_CONFIRMATION_GRACE() + 1;
         vm.expectRevert(PerihelionEscrow.GraceTooLong.selector);
         escrow.setConfirmationGrace(tooLong);
+    }
+
+    // --- #37: CancelIntent reason decoding ----------------------------------
+
+    function test_CancelIntentSurfacesReason() public {
+        bytes32 h = _lock();
+        // reason = 0x01 (ADMIN)
+        bytes memory msg_ = abi.encodePacked(bytes1(0x01), bytes1(0x03), h, uint8(0x01));
+
+        vm.expectEmit(true, true, false, true);
+        emit Refunded(h, user, 100_000, 0x01);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msg_);
+    }
+
+    function test_RevertWhen_CancelIntentUnknownReason() public {
+        bytes32 h = _lock();
+        bytes memory msg_ = abi.encodePacked(bytes1(0x01), bytes1(0x03), h, uint8(0x99));
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msg_);
+    }
+
+    function test_CancelExpiredEmitsExpiredReason() public {
+        bytes32 h = _lock();
+        PerihelionEscrow.Intent memory intent = _intent();
+        vm.warp(intent.deadline + escrow.confirmationGrace());
+
+        vm.expectEmit(true, true, false, true);
+        emit Refunded(h, user, 100_000, 0x00); // CANCEL_REASON_EXPIRED
+        escrow.cancelExpired(h);
     }
 }

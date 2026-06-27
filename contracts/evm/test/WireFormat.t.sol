@@ -12,7 +12,7 @@ contract DecoderHarness is PerihelionEscrow {
         return _decodeFillConfirmed(m);
     }
 
-    function decodeCancelIntent(bytes calldata m) external pure returns (bytes32) {
+    function decodeCancelIntent(bytes calldata m) external pure returns (bytes32, uint8) {
         return _decodeCancelIntent(m);
     }
 }
@@ -60,8 +60,9 @@ contract WireFormatConformanceTest is Test {
         bytes memory golden = _readVector("cancel_intent.hex");
         assertEq(golden.length, 35);
 
-        bytes32 h = harness.decodeCancelIntent(golden);
+        (bytes32 h, uint8 reason) = harness.decodeCancelIntent(golden);
         assertEq(h, CI_HASH);
+        assertEq(reason, 0x00); // CANCEL_REASON_EXPIRED
 
         bytes memory rebuilt = abi.encodePacked(bytes1(0x01), bytes1(0x03), CI_HASH, uint8(0));
         assertEq(rebuilt, golden);

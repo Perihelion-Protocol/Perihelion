@@ -70,6 +70,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
 
+    /// @dev Known cancel reason codes, mirroring the Soroban side.
+    uint8 private constant CANCEL_REASON_EXPIRED = 0x00;
+    uint8 private constant CANCEL_REASON_ADMIN   = 0x01;
+    uint8 private constant CANCEL_REASON_INVALID = 0x02;
+
     // --- Immutable / config --------------------------------------------------
 
     /// @notice EIP-712 domain separator (name="Perihelion", version="1").
@@ -116,7 +121,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         uint256 amount
     );
     event Released(bytes32 indexed intentHash, address indexed solver, uint256 amount);
-    event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount);
+    event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
@@ -338,14 +343,14 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     function _onCancelIntent(bytes calldata message) internal {
-        bytes32 intentHash = _decodeCancelIntent(message);
+        (bytes32 intentHash, uint8 reason) = _decodeCancelIntent(message);
         Lock storage l = locks[intentHash];
         if (l.user == address(0)) revert NotLocked();
         if (l.released || l.refunded) revert AlreadyFinalized();
 
         l.refunded = true;
         _safeTransfer(l.asset, l.user, l.amount);
-        emit Refunded(intentHash, l.user, l.amount);
+        emit Refunded(intentHash, l.user, l.amount, reason);
     }
 
     // --- Refund fallback -----------------------------------------------------
@@ -361,7 +366,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         l.refunded = true;
         _safeTransfer(l.asset, l.user, l.amount);
-        emit Refunded(intentHash, l.user, l.amount);
+        emit Refunded(intentHash, l.user, l.amount, CANCEL_REASON_EXPIRED);
     }
 
     // --- Views ---------------------------------------------------------------
@@ -436,13 +441,24 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @dev Decode a 35-byte CancelIntent:
     ///      version(1)|type(1)|intent_hash(32)|reason(1).
-    function _decodeCancelIntent(bytes calldata m) internal pure returns (bytes32 intentHash) {
+    ///      Rejects unknown reason codes to keep the wire contract strict.
+    function _decodeCancelIntent(bytes calldata m)
+        internal
+        pure
+        returns (bytes32 intentHash, uint8 reason)
+    {
         if (m.length != 35) revert MalformedPayload();
         bytes32 hashWord;
         assembly {
             hashWord := calldataload(add(m.offset, 2))
         }
         intentHash = hashWord;
+        reason = uint8(m[34]);
+        if (
+            reason != CANCEL_REASON_EXPIRED &&
+            reason != CANCEL_REASON_ADMIN &&
+            reason != CANCEL_REASON_INVALID
+        ) revert MalformedPayload();
     }
 
     // --- Internal: signature & token safety ----------------------------------
