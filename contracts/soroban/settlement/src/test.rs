@@ -39,6 +39,11 @@ impl MockEndpoint {
         BytesN::from_array(&env, &[0u8; 32])
     }
 
+    /// Returns 0 so that any non-negative lz_fee passes the pre-check in tests.
+    pub fn quote(_env: Env, _params: MessagingParams) -> i128 {
+        0
+    }
+
     pub fn sent(env: Env) -> u32 {
         env.storage()
             .instance()

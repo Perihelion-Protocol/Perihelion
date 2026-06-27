@@ -92,11 +92,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
 
-    /// @dev Known cancel reason codes, mirroring the Soroban side.
-    uint8 private constant CANCEL_REASON_EXPIRED = 0x00;
-    uint8 private constant CANCEL_REASON_ADMIN   = 0x01;
-    uint8 private constant CANCEL_REASON_INVALID = 0x02;
-
     // --- Immutable / config --------------------------------------------------
 
     /// @notice EIP-712 domain separator — binds signatures to this contract and chain.
@@ -132,6 +127,23 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Lazy-nonce high-water mark per source endpoint id.
     mapping(uint32 => uint64) public inboundNonce;
 
+    // --- Reentrancy invariant (I-RE) -----------------------------------------
+    //
+    // Every externally-callable function that moves funds MUST carry the
+    // `nonReentrant` modifier. The full list is:
+    //
+    //   • lock            — pulls the user's token; dispatches FillInstruction.
+    //   • lzReceive       — releases or refunds via _onFillConfirmed / _onCancelIntent.
+    //   • cancelExpired   — refunds the user after the local-timeout window.
+    //
+    // Safety of the design rests on this mutex being contract-wide: while any
+    // one of these functions is executing, a re-entrant call to any other
+    // fund-moving function (e.g. a malicious token callback on transfer) will
+    // hit _reentrancy == 1 and revert with Reentrancy().
+    //
+    // This property is deliberately tested by MaliciousTokenReentrancyTest in
+    // the test suite (issue #32). If a new fund-moving function is added it MUST
+    // be added to this list and covered by a reentrancy regression test.
     uint256 private _reentrancy;
 
     // --- Events --------------------------------------------------------------

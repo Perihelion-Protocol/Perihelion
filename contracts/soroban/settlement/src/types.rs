@@ -41,9 +41,6 @@ pub enum DataKey {
     /// Idempotency marker: set once FillConfirmed has been dispatched for this intent.
     ConfirmationSent(BytesN<32>),
 
-    // Persistent tier (solver reputation — PROPOSED Phase 3).
-    SolverReputation(Address),
-
     // Persistent tier (transport bookkeeping).
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
     /// Tracks which nonces have been processed. The bitmap covers nonces in
