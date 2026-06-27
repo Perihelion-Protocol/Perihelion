@@ -18,6 +18,12 @@ struct MessagingParams {
     uint256 nativeFee;
 }
 
+/// @notice Fee quote returned by the LayerZero endpoint.
+struct MessagingFee {
+    uint256 nativeFee;
+    uint256 lzTokenFee;
+}
+
 /// @notice The endpoint surface the escrow depends on to dispatch messages.
 interface ILayerZeroEndpoint {
     /// @dev `refundAddress` receives excess native fee. Returns the message GUID.
@@ -25,6 +31,14 @@ interface ILayerZeroEndpoint {
         external
         payable
         returns (bytes32 guid);
+
+    /// @dev Returns the native fee required for the given outbound message.
+    ///      Callers should pass this value (or more) as msg.value to {send};
+    ///      any excess is refunded to the `refundAddress` by the endpoint.
+    function quote(MessagingParams calldata params, address sender)
+        external
+        view
+        returns (MessagingFee memory fee);
 }
 
 /// @notice The receive surface the endpoint invokes on the escrow (OApp).

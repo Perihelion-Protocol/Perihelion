@@ -153,6 +153,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error EnforcedPause();
     error GraceTooLong();
     error GraceTooShort();
+    error FeeTooLow();
     error ZeroAddress();
 
     // --- Modifiers -----------------------------------------------------------
@@ -252,8 +253,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice Solver claims an intent: verify the user's signature, pull the
     ///         funds (measured-delta), and dispatch FillInstruction to Stellar.
-    /// @dev `msg.value` funds the LayerZero send. The user must have approved
-    ///      this contract for `sourceAmount` of `sourceAsset`.
+    /// @dev `msg.value` funds the LayerZero send. Call {quoteFee} to size it.
+    ///      The LayerZero endpoint is expected to refund any excess nativeFee to
+    ///      `msg.sender` (the refundAddress passed to endpoint.send); this is the
+    ///      standard V2 convention. Callers should still use {quoteFee} to minimise
+    ///      over-payment rather than relying on endpoint refunds.
+    ///      The user must have approved this contract for `sourceAmount` of `sourceAsset`.
     function lock(Intent calldata intent, bytes calldata signature)
         external
         payable
@@ -302,6 +307,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         MessagingParams memory params = MessagingParams({
             dstEid: stellarEid, receiver: stellarPeer, message: message, nativeFee: msg.value
         });
+        // Revert early on obvious underpayment rather than letting the endpoint
+        // bubble an opaque error. Any excess is refunded by the endpoint to
+        // msg.sender per the LayerZero V2 convention.
+        uint256 quoted = endpoint.quote(params, msg.sender).nativeFee;
+        if (msg.value < quoted) revert FeeTooLow();
         endpoint.send{ value: msg.value }(params, msg.sender);
     }
 
@@ -370,6 +380,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     // --- Views ---------------------------------------------------------------
+
+    /// @notice Quote the LayerZero native fee for a FillInstruction to Stellar.
+    ///         Solvers should call this off-chain and pass the result (with a small
+    ///         buffer) as `msg.value` to {lock}. Any excess is refunded by the
+    ///         endpoint to the caller per the LayerZero V2 convention.
+    function quoteFee(Intent calldata intent) external view returns (uint256 nativeFee) {
+        // Use a placeholder hash — the fee depends only on message size, not content.
+        bytes memory message =
+            _encodeFillInstruction(bytes32(0), intent, intent.sourceAmount);
+        MessagingParams memory params = MessagingParams({
+            dstEid: stellarEid, receiver: stellarPeer, message: message, nativeFee: 0
+        });
+        return endpoint.quote(params, msg.sender).nativeFee;
+    }
 
     /// @notice Compute the canonical EIP-712 intent hash (I5).
     function hashIntent(Intent calldata intent) public view returns (bytes32) {

@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 import { IERC20 } from "../src/IERC20.sol";
-import { Origin, MessagingParams, ILayerZeroEndpoint } from "../src/interfaces/ILayerZero.sol";
+import { Origin, MessagingParams, MessagingFee, ILayerZeroEndpoint } from "../src/interfaces/ILayerZero.sol";
 
 /// @dev Minimal mintable ERC-20 for tests.
 contract MockERC20 is IERC20 {
@@ -133,6 +133,11 @@ contract MockEndpoint is ILayerZeroEndpoint {
     address public lastRefundAddress;
     uint256 public sendCount;
 
+    /// @dev Fee returned by quote(); 0 means any msg.value >= 0 passes.
+    uint256 public mockFee;
+
+    function setMockFee(uint256 fee) external { mockFee = fee; }
+
     function send(MessagingParams calldata params, address refundAddress)
         external
         payable
@@ -145,6 +150,14 @@ contract MockEndpoint is ILayerZeroEndpoint {
         lastRefundAddress = refundAddress;
         sendCount++;
         return bytes32(uint256(0xABCD));
+    }
+
+    function quote(MessagingParams calldata, address)
+        external
+        view
+        returns (MessagingFee memory)
+    {
+        return MessagingFee({ nativeFee: mockFee, lzTokenFee: 0 });
     }
 
     function deliver(
@@ -1070,5 +1083,27 @@ contract PerihelionEscrowTest is Test {
         vm.expectEmit(true, true, false, true);
         emit Refunded(h, user, 100_000, 0x00); // CANCEL_REASON_EXPIRED
         escrow.cancelExpired(h);
+    }
+
+    // --- #38: Fee quote and underpayment ------------------------------------
+
+    function test_RevertWhen_LockFeeTooLow() public {
+        endpoint.setMockFee(0.05 ether);
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.FeeTooLow.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig); // below the 0.05 ether quote
+    }
+
+    function test_LockExactFeeSucceeds() public {
+        endpoint.setMockFee(0.01 ether);
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
     }
 }
