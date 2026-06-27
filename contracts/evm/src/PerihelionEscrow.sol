@@ -167,6 +167,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error TransferFailed();
     error NothingReceived();
     error MalformedPayload();
+    /// @dev Emitted when the payload version byte is not in the set of accepted versions.
+    ///      See architecture spec §3.3.1 for the versioning and upgrade-coordination policy.
+    error UnknownVersion();
     error UnknownMessageType();
     error StaleNonce();
     error NotOwner();
@@ -358,7 +361,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (origin.nonce <= inboundNonce[origin.srcEid]) revert StaleNonce();
         inboundNonce[origin.srcEid] = origin.nonce;
 
-        if (message.length < 2 || message[0] != PROTOCOL_VERSION) revert MalformedPayload();
+        if (message.length < 2) revert MalformedPayload();
+        // Accept exactly PROTOCOL_VERSION (currently 0x01). During a version-bump
+        // transition window this check widens to accept the previous version as well
+        // (see architecture spec §3.3.1 for the rolling-cutover upgrade sequence).
+        if (message[0] != PROTOCOL_VERSION) revert UnknownVersion();
         bytes1 msgType = message[1];
         if (msgType == MSG_FILL_CONFIRMED) {
             _onFillConfirmed(message);

@@ -858,6 +858,93 @@ unsigned 128-bit in the asset's smallest unit.
 > ABI/XDR version-skew risk. The cost is manual offset discipline, mitigated by
 > exhaustive round-trip encode/decode tests on both chains (§7).
 
+### 3.3.1 Protocol-version policy and cross-chain upgrade coordination
+
+#### Version byte semantics
+
+The first byte of every payload (`version`) is a **monotonically increasing
+unsigned integer**. Version `0x01` is the initial production format. A bump to
+`0x02` (or higher) signals a **breaking** layout change — any field added,
+removed, reordered, or resized. Non-breaking additions are not possible in a
+fixed-offset binary format, so every layout change is by definition breaking and
+requires a version bump.
+
+The version byte does **not** encode a minor/patch component. Backwards-compatible
+extensions (e.g. new message types added via the `msg_type` discriminant without
+altering existing message layouts) do not require a version bump.
+
+#### Receiver acceptance rules
+
+| Received version | Receiver state | Action |
+|-----------------|----------------|--------|
+| Current version | Normal | Accept and process. |
+| Previous version (within transition window) | Transition active | Accept and process using the old-version decoder path. |
+| Previous version (transition window closed) | Post-cutover | Reject (`MalformedPayload` / `UnknownVersion`). |
+| Future version (higher than current) | Any | Reject (`MalformedPayload` / `UnknownVersion`). A future-versioned message means the sender has already upgraded; the receiver must be upgraded before it can process them. |
+
+A **transition window** is the period during which a receiver explicitly
+supports both the old version *N* and the new version *N+1* simultaneously.
+Both decoders must be compiled in and reachable via the version discriminant.
+The window is closed by a subsequent upgrade that removes the old-version path.
+
+#### Cross-chain upgrade sequence (rolling cutover, no flag day)
+
+Because the EVM leg (redeploy or timelocked admin upgrade) and the Soroban leg
+(contract upgrade via `upgrade` entrypoint) deploy independently, upgrades must
+follow a **three-phase rolling sequence** to avoid dropping in-flight messages:
+
+**Phase 1 — Deploy new receiver on both chains (dual-accept window opens)**
+
+1. Deploy the new EVM escrow (or upgrade via admin) that accepts both `0x01` and
+   `0x02` inbound. The new escrow still *emits* `0x01` outbound.
+2. Upgrade the Soroban settlement contract to accept both `0x01` and `0x02`
+   inbound. The contract still *emits* `0x01` outbound.
+3. Both chains now accept messages from either version. Any `0x01` messages
+   in-flight from before the upgrade land successfully.
+
+**Phase 2 — Switch emitters to the new version (both chains emit `0x02`)**
+
+4. Upgrade the EVM escrow to emit `0x02` outbound (or enable via admin flag).
+5. Upgrade the Soroban contract to emit `0x02` outbound.
+6. Both chains emit `0x02`; both still accept `0x01` inbound to drain any
+   residual in-flight messages from the Phase 1 window.
+
+**Phase 3 — Close the transition window (drop `0x01` support)**
+
+7. After confirming no `0x01` messages remain in the LayerZero pipeline (monitor
+   the pending-nonce queue to zero), close the window on both chains by removing
+   or disabling the `0x01` decoder path.
+8. Both chains now reject `0x01` as `MalformedPayload`.
+
+> **In-flight safety guarantee**: Because a LayerZero message is committed to
+> the source chain before it is delivered, a message encoded under version *N*
+> that was sent during Phase 1 will always land on a receiver that still accepts
+> *N* (the dual-accept window is open). No message is silently dropped; an
+> undeliverable message would revert at the executor and be retried until the
+> window is open, or escalated via the LayerZero DVN dispute path.
+
+#### Deprecation timeline
+
+The minimum transition window duration must exceed the worst-case LayerZero
+relay latency for the Stellar ↔ EVM corridor. Based on current DVN SLAs, a
+**72-hour minimum window** is recommended between Phase 1 and Phase 3. The
+exact window for a given upgrade is recorded in the upgrade governance proposal.
+
+#### Implementation checklist for a version bump
+
+When introducing version `N+1`:
+
+- [ ] Define the new layout in §3.3 and add `fill_instruction_v{N+1}.hex` (or
+      appropriate) conformance vectors.
+- [ ] Implement the `N+1` encoder and `N` + `N+1` dual-accept decoder on both
+      chains; gate behind a feature flag or admin toggle if needed.
+- [ ] Update the version constant (`PROTOCOL_VERSION`) only on the emitter side
+      after Phase 1 is confirmed live on both chains.
+- [ ] Remove the `N` decoder path no sooner than 72 hours after all emitters
+      have switched to `N+1` and the pending-nonce queue has drained.
+- [ ] Update this section and the conformance-vector README to reflect the new
+      current version and retired version.
+
 ### 3.4 Nonce management — LayerZero vs. Perihelion
 
 There are **two distinct nonce systems**, intentionally separate:
