@@ -170,6 +170,15 @@ Use the timelock four-step flow from §4.3 with the appropriate calldata, e.g.
 `cast calldata "setConfirmationGrace(uint256)" 7200`. The change is public the
 moment it is proposed and only takes effect after the delay.
 
+**Always use `value == 0` for these ops.** `execute` is `payable` and forwards
+`value` verbatim to the target, but none of the escrow's owner-only setters
+(`setPeer`, `setConfirmationGrace`, `setGuardian`, `setPaused`,
+`transferOwnership`) are payable. Attaching a non-zero `value` to one of these
+proposals makes the call revert (`CallFailed`) only after the full
+propose → confirm → delay window has elapsed — the entire timelock cycle is
+wasted. `value` exists for targets that are genuinely payable; double-check the
+target accepts ETH before proposing anything other than `0`.
+
 ### Emergency halt
 
 ```bash

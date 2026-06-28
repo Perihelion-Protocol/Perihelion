@@ -298,4 +298,38 @@ contract PerihelionTimelockTest is Test {
         tl.execute(address(escrow), 0, peerData, salt2);
         assertEq(escrow.stellarPeer(), newPeer);
     }
+
+    /// @notice Pins the dead-value-path failure mode (issue: timelock forwards
+    ///         `value` but the escrow's admin setters are non-payable): a
+    ///         mistaken non-zero-value admin op reverts cleanly with
+    ///         CallFailed, only after the full propose/confirm/delay cycle.
+    function test_RevertWhen_NonZeroValueTargetsNonPayableEscrowFunction() public {
+        MockEndpoint endpoint = new MockEndpoint();
+        PerihelionEscrow escrow = new PerihelionEscrow(address(endpoint), 30_316);
+        escrow.transferOwnership(address(tl));
+        bytes memory acceptData = abi.encodeWithSelector(PerihelionEscrow.acceptOwnership.selector);
+        bytes32 acceptId = tl.hashOperation(address(escrow), 0, acceptData, SALT);
+        vm.prank(a);
+        tl.propose(address(escrow), 0, acceptData, SALT);
+        vm.prank(b);
+        tl.confirm(acceptId);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(escrow), 0, acceptData, SALT);
+
+        // Mistaken op: setPeer is non-payable, but the proposer attaches value.
+        vm.deal(address(tl), 1 ether);
+        bytes32 newPeer = bytes32(uint256(0xCAFE));
+        bytes memory peerData = abi.encodeWithSelector(PerihelionEscrow.setPeer.selector, newPeer);
+        bytes32 salt3 = bytes32(uint256(3));
+        bytes32 peerId = tl.hashOperation(address(escrow), 1 ether, peerData, salt3);
+        vm.prank(a);
+        tl.propose(address(escrow), 1 ether, peerData, salt3);
+        vm.prank(b);
+        tl.confirm(peerId);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.CallFailed.selector);
+        tl.execute(address(escrow), 1 ether, peerData, salt3);
+    }
 }

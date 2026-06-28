@@ -131,6 +131,13 @@ contract PerihelionTimelock {
     // --- Multisig lifecycle --------------------------------------------------
 
     /// @notice Propose an operation and confirm it as the proposer.
+    /// @dev `value` is forwarded verbatim by `execute`. For admin operations
+    ///      targeting the governed escrow, `value` should be `0`: none of the
+    ///      escrow's owner-only setters are payable, so a non-zero value
+    ///      there makes the call revert (`CallFailed`) only after the full
+    ///      propose → confirm → delay cycle has elapsed. `value` is meant for
+    ///      targets that are actually payable; verify the target accepts ETH
+    ///      before proposing a non-zero value.
     function propose(address target, uint256 value, bytes calldata data, bytes32 salt)
         external
         onlyOwner
