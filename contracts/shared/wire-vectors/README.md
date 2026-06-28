@@ -37,3 +37,42 @@ Both files hold one `0x`-prefixed hex string, no trailing newline.
 > carries variable-length Stellar addresses and its raw codec is finalized at
 > the adapter boundary once the Soroban LayerZero ABI is GA (architecture spec
 > §3.3). Only the fully-specified, fixed-length outbound payloads are locked.
+
+## `neg/` — adversarial / negative conformance vectors
+
+Each file in `neg/` is a mutation of a golden payload that **both decoders
+must reject**. The EVM decoder tests (`WireFormat.t.sol`) and the Soroban
+inbound decoder tests (`test.rs`) each load these vectors and assert rejection.
+A new decoder implementation is conformant only if it rejects every vector here
+and accepts every golden vector above.
+
+### `solver_evm` address encoding (issue #60)
+
+An EVM address occupies the **low 20 bytes** (160 bits) of the 32-byte
+`solver_evm` word. The high 12 bytes must be zero. A decoder that silently
+truncates a word with non-zero high bytes would redirect funds to a different
+address; decoders must therefore reject such words with a `MalformedPayload`
+error rather than truncating.
+
+`neg/fill_confirmed_nonzero_high.hex` contains a valid-length FillConfirmed
+with the first byte of `solver_evm` set to `0xFF`. Both decoders must reject it.
+
+### FillConfirmed negative vectors
+
+| File | Length | Mutation | Expected error |
+| ---- | ------ | -------- | -------------- |
+| `fill_confirmed_short.hex` | 89 | Last byte removed | `MalformedPayload` (length) |
+| `fill_confirmed_long.hex` | 91 | Extra `0x00` appended | `MalformedPayload` (length) |
+| `fill_confirmed_bad_version.hex` | 90 | `version` byte = `0x02` | `MalformedPayload` (version) |
+| `fill_confirmed_bad_type.hex` | 90 | `type` byte = `0x04` (unknown) | `UnknownMessageType` / `MalformedPayload` |
+| `fill_confirmed_nonzero_high.hex` | 90 | `solver_evm[0]` = `0xFF` | `MalformedPayload` (address) |
+
+### CancelIntent negative vectors
+
+| File | Length | Mutation | Expected error |
+| ---- | ------ | -------- | -------------- |
+| `cancel_intent_short.hex` | 34 | `reason` byte removed | `MalformedPayload` (length) |
+| `cancel_intent_long.hex` | 36 | Extra `0x00` appended | `MalformedPayload` (length) |
+| `cancel_intent_bad_version.hex` | 35 | `version` byte = `0x02` | `MalformedPayload` (version) |
+| `cancel_intent_bad_type.hex` | 35 | `type` byte = `0x04` (unknown) | `UnknownMessageType` / `MalformedPayload` |
+| `cancel_intent_bad_reason.hex` | 35 | `reason` byte = `0xFF` (unknown) | `MalformedPayload` (reason) |

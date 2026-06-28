@@ -51,10 +51,6 @@ pub enum DataKey {
     InboundNonceBitmap(u32),
     /// Base nonce for the bitmap (nonce 0 before first message).
     InboundNonceBase(u32),
-
-    // Persistent tier (solver reputation — PROPOSED Phase 3).
-    /// Aggregate reputation metrics for a solver address.
-    SolverReputation(Address),
 }
 
 /// Lifecycle state of a registered intent.

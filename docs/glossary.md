@@ -90,3 +90,21 @@ solver must deliver at least this much, or the fill is rejected on-chain.
 
 The difference between what the user offers on the source chain and what the
 solver must deliver on Stellar — the solver's gross margin before costs.
+
+### Cross-chain address encoding
+
+Addresses cross the bridge as 32-byte LayerZero words.
+
+**EVM address ↔ `bytes32`**: An EVM address is 20 bytes (160 bits). When packed
+into a 32-byte word it is **left-padded with 12 zero bytes**
+(`bytes32 = bytes12(0) ++ address`). Decoders **must reject** any word whose
+high 12 bytes are non-zero rather than silently truncating — a non-zero high
+word would send funds to a different address than intended. The check is:
+`uint256(word) >> 160 == 0`.
+
+**Stellar strkey ↔ `BytesN<32>`**: A Stellar account or contract address is a
+strkey string (`G…` / `C…`, 56 base32 characters using the alphabet A–Z and
+2–7). At the LayerZero boundary the underlying 32-byte public key (stripped of
+the 1-byte type prefix and 2-byte checksum) is transported as a `BytesN<32>`.
+The Soroban SDK's `Address` type encapsulates this encoding; callers do not
+manipulate the raw bytes directly.

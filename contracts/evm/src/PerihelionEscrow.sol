@@ -92,10 +92,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
 
-    /// @dev Known cancel reason codes, mirroring the Soroban side.
-    uint8 private constant CANCEL_REASON_EXPIRED = 0x00;
-    uint8 private constant CANCEL_REASON_ADMIN   = 0x01;
-    uint8 private constant CANCEL_REASON_INVALID = 0x02;
 
     // --- Immutable / config --------------------------------------------------
 
@@ -497,6 +493,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             solverWord := calldataload(add(m.offset, 34))
         }
         intentHash = hashWord;
+        // Reject non-zero high 12 bytes: a valid EVM address occupies the low 20 bytes
+        // (160 bits) of the 32-byte word. Any non-zero bit above that would silently
+        // truncate to a different address, potentially redirecting funds.
+        if (uint256(solverWord) >> 160 != 0) revert MalformedPayload();
         solverEvm = address(uint160(uint256(solverWord)));
     }
 

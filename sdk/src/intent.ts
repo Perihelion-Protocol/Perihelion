@@ -7,7 +7,9 @@
  */
 
 import {
+  bytesToBigInt,
   hashTypedData,
+  isAddress,
   recoverTypedDataAddress,
   zeroAddress,
   type TypedDataDomain,
@@ -49,6 +51,89 @@ export const INTENT_TYPES = {
 export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
   Partial<Pick<Intent, "nonce" | "preferredSolver">>;
 
+/** Thrown by {@link validateIntent} and {@link buildIntent} when a field is malformed. */
+export class IntentValidationError extends Error {
+  readonly field: string;
+  constructor(field: string, message: string) {
+    super(`[Perihelion] Invalid '${field}': ${message}`);
+    this.name = "IntentValidationError";
+    this.field = field;
+  }
+}
+
+// Stellar strkey: G (account) or C (contract), followed by 55 base32 chars (A-Z, 2-7).
+const STRKEY_RE = /^[GC][A-Z2-7]{55}$/;
+
+// destAsset: "native" (XLM) or "<CODE>:<ISSUER>" where issuer is a G... account strkey.
+const DEST_ASSET_RE = /^(?:native|[A-Z0-9]{1,12}:G[A-Z2-7]{55})$/;
+
+function isPositiveIntString(s: string): boolean {
+  return /^[1-9][0-9]*$/.test(s);
+}
+
+function isNonNegIntString(s: string): boolean {
+  return /^(?:0|[1-9][0-9]*)$/.test(s);
+}
+
+/**
+ * Validate all fields of intent parameters, throwing {@link IntentValidationError}
+ * on the first failure. Called automatically by {@link buildIntent}; can also be
+ * called independently before signing.
+ *
+ * @param params - Intent parameters to validate.
+ * @param now    - Current Unix timestamp in seconds (defaults to `Date.now()`).
+ */
+export function validateIntent(
+  params: IntentParams,
+  now = Math.floor(Date.now() / 1000),
+): void {
+  if (!isAddress(params.user)) {
+    throw new IntentValidationError("user", `must be a valid 20-byte EVM address (got '${params.user}')`);
+  }
+  if (!STRKEY_RE.test(params.destination)) {
+    throw new IntentValidationError(
+      "destination",
+      `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7 (got '${params.destination}')`,
+    );
+  }
+  if (!Number.isInteger(params.sourceChainId) || params.sourceChainId <= 0) {
+    throw new IntentValidationError(
+      "sourceChainId",
+      `must be a positive integer chain ID (got ${params.sourceChainId})`,
+    );
+  }
+  if (!isAddress(params.sourceAsset)) {
+    throw new IntentValidationError(
+      "sourceAsset",
+      `must be a valid 20-byte EVM address (got '${params.sourceAsset}')`,
+    );
+  }
+  if (!isPositiveIntString(params.sourceAmount)) {
+    throw new IntentValidationError(
+      "sourceAmount",
+      `must be a positive integer string with no leading zeros (got '${params.sourceAmount}')`,
+    );
+  }
+  if (!DEST_ASSET_RE.test(params.destAsset)) {
+    throw new IntentValidationError(
+      "destAsset",
+      `must be 'native' or '<CODE>:<G...ISSUER>' (got '${params.destAsset}')`,
+    );
+  }
+  if (!isNonNegIntString(params.minDestAmount)) {
+    throw new IntentValidationError(
+      "minDestAmount",
+      `must be a non-negative integer string with no leading zeros (got '${params.minDestAmount}')`,
+    );
+  }
+  if (!Number.isInteger(params.deadline) || params.deadline <= now) {
+    throw new IntentValidationError(
+      "deadline",
+      `must be a Unix timestamp strictly in the future (got ${params.deadline}, now is ${now})`,
+    );
+  }
+}
+
 /**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
  * messaging fee makes the intent unprofitable to fill. Override via {@link BuildOptions.minNotional}.
@@ -66,10 +151,13 @@ export interface BuildOptions {
 
 /**
  * Build a fully-formed {@link Intent}, filling in an open solver and a random
- * nonce when not provided. Emits a non-fatal warning if the intent's source amount
- * is below the economical threshold (V_min).
+ * nonce when not provided. Validates all caller-supplied fields and throws
+ * {@link IntentValidationError} if any are malformed. Emits a non-fatal warning
+ * if the intent's source amount is below the economical threshold (V_min).
  */
 export function buildIntent(params: IntentParams, options?: BuildOptions): Intent {
+  validateIntent(params);
+
   const vMin = options?.vMin ?? DEFAULT_V_MIN;
   const suppressWarning = options?.suppressWarning ?? false;
 
@@ -132,13 +220,17 @@ export function isExpired(intent: Intent, now = Math.floor(Date.now() / 1000)): 
   return intent.deadline <= now;
 }
 
-/** Generate a 256-bit random nonce as a decimal string. */
+/**
+ * Generate a 256-bit random nonce as a decimal string.
+ *
+ * Returns a value in [0, 2^256) suitable for use as a uint256 nonce in
+ * EIP-712 typed data. The decimal string form round-trips through BigInt
+ * without loss: `BigInt(randomNonce())` is always stable.
+ */
 export function randomNonce(): string {
   const bytes = new Uint8Array(32);
   globalThis.crypto.getRandomValues(bytes);
-  let n = 0n;
-  for (const b of bytes) n = (n << 8n) | BigInt(b);
-  return n.toString();
+  return bytesToBigInt(bytes).toString();
 }
 
 /** Coerce string amounts to bigint for viem's typed-data encoder. */
