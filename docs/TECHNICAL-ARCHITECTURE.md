@@ -1370,6 +1370,21 @@ path — there is no `sweep`/`drain` function — so even a fully compromised ad
 cannot directly steal locked user funds; the worst case is a denial-of-service
 (pause) bounded by the decentralization roadmap (§8).
 
+*Cancellation trust model (deliberate, 1-of-N).* `PerihelionTimelock.cancel` is
+callable by any single owner, not just the proposer or a threshold — an
+intentional asymmetry with confirm/execute, which require `threshold`. This is a
+cheap liveness valve: any owner can clear a stuck or contested operation without
+assembling the same threshold that confirmed it. The acknowledged cost is a
+griefing vector — one dissenting owner can repeatedly cancel an operation the
+rest of the multisig supports, indefinitely stalling that specific action (cancel
+is O(1); re-proposing is equally cheap, so this is a stalemate, not a one-sided
+veto). It does **not** allow denial-of-service against the multisig's ability to
+act in general, and it cannot move or freeze funds — the worst case is delayed
+governance, not loss. Threshold-to-cancel and proposer-only alternatives were
+considered and rejected: both trade away the liveness valve without removing
+the need for owners to coordinate on what should run, which is a process
+concern outside the contract's scope.
+
 ---
 
 ## 7. Testing Strategy

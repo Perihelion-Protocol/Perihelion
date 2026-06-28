@@ -212,6 +212,22 @@ contract PerihelionTimelockTest is Test {
         assertEq(readyAt, block.timestamp + DELAY);
     }
 
+    // --- Cancellation policy ---------------------------------------------------
+    //
+    // Deliberate choice (documented in SECURITY.md / TECHNICAL-ARCHITECTURE.md
+    // §6.1 T10): cancellation stays 1-of-N. Any single owner — not just the
+    // proposer or a threshold — may cancel a pending (un-executed) operation.
+    // This is a cheap liveness valve (anyone can clear a stuck or contested op
+    // without needing to assemble the same threshold that confirms), at the
+    // acknowledged cost that one dissenting owner can repeatedly cancel
+    // operations a majority supports, stalling that specific action (not the
+    // multisig's ability to act in general — re-proposing is equally cheap).
+    // Symmetric (threshold-to-cancel) and proposer-only alternatives were
+    // considered and rejected for now: both reduce the cancel path's
+    // liveness without removing the underlying need for owners to coordinate
+    // on what should run, which is a process/governance concern, not a
+    // contract one.
+
     function test_Cancel() public {
         vm.prank(a);
         bytes32 id = tl.propose(address(target), 0, _setValueData(1), SALT);
@@ -219,6 +235,42 @@ contract PerihelionTimelockTest is Test {
         tl.cancel(id);
         (,,, bool exists) = tl.operations(id);
         assertFalse(exists);
+    }
+
+    /// @notice Pins the deliberate 1-of-N policy: a single non-proposing
+    ///         owner can unilaterally cancel, even one who never confirmed.
+    function test_Cancel_BySingleNonProposingOwner_Succeeds() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(2), SALT);
+        // c never confirmed this op, yet a single owner suffices to cancel.
+        vm.prank(c);
+        tl.cancel(id);
+        (,,, bool exists) = tl.operations(id);
+        assertFalse(exists);
+    }
+
+    function test_RevertWhen_NonOwnerCancels() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(3), SALT);
+        vm.prank(stranger);
+        vm.expectRevert(PerihelionTimelock.NotOwner.selector);
+        tl.cancel(id);
+    }
+
+    function test_RevertWhen_CancelExecuted() public {
+        bytes memory data = _setValueData(4);
+        bytes32 id = tl.hashOperation(address(target), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(target), 0, data, SALT);
+
+        vm.prank(c);
+        vm.expectRevert(PerihelionTimelock.AlreadyExecuted.selector);
+        tl.cancel(id);
     }
 
     // --- Self-administered config -------------------------------------------

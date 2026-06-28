@@ -205,3 +205,10 @@ address and whose calldata is the config call, then run the standard flow.
 | Compromised guardian key           | Timelock `setGuardian(new)`                   | Treat protocol as still safe (guardian can't move funds) |
 | Compromised single timelock owner  | Timelock `removeOwner` + `addOwner` (threshold protects you below M) | Audit all pending operations, `cancel` any unknown ones |
 | Stuck/expired intent               | Anyone calls `cancelExpired` / `cancel_expired_intent` after the window | None — permissionless                      |
+
+`PerihelionTimelock.cancel` is deliberately 1-of-N (any single owner, not a
+threshold) — see [the threat matrix](./TECHNICAL-ARCHITECTURE.md#61-detailed-mitigations-for-high-impact-attacks)
+for the trade-off. In practice this means a dissenting owner can repeatedly
+cancel an operation the rest of the multisig wants; if that happens, treat it
+as an owner-coordination problem (escalate off-chain, or remove the owner via
+governance) rather than a contract bug.
