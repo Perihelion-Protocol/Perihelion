@@ -74,8 +74,48 @@ from live state but restorable by paying rent). See
 
 ### SAC (Stellar Asset Contract)
 
-The Soroban contract interface that represents a Stellar asset as a token,
-allowing contracts to hold and transfer it.
+The Soroban contract interface that wraps a Stellar asset as a Soroban token,
+allowing smart contracts to hold and transfer it via the `token::Interface`.
+
+Every classic Stellar asset and native XLM has exactly one SAC whose contract
+address is derived deterministically from the asset and the network passphrase:
+
+```
+contract_id = SHA-256(
+    HashIDPreimage::CONTRACT_ID {
+        network_id:            SHA-256(network_passphrase),
+        contract_id_preimage:  ContractIDPreimage::ASSET(asset),
+    }
+)
+```
+
+Where `asset` is the Stellar XDR `Asset` type:
+
+| `StellarAsset` string  | XDR `Asset`                                         |
+| ---------------------- | --------------------------------------------------- |
+| `"native"`             | `Asset::NATIVE`                                     |
+| `"CODE:ISSUER_G..."`   | `Asset::CREDIT_ALPHANUM4(code, issuer_public_key)`  |
+|                        | or `Asset::CREDIT_ALPHANUM12(...)` for codes >4 chars |
+
+The resulting 32-byte hash is the SAC's **contract ID**, which in Soroban is
+represented as an `Address` value with the `Contract` discriminant.
+
+**Resolving a SAC address back to its asset:** The Stellar SDK's
+`StellarBase.Contract.fromAsset(asset, networkPassphrase)` computes the address
+in the forward direction. To reverse, query the SAC's `asset()` or `name()`
+contract function via RPC — or maintain a pre-image index keyed on
+`(network_id, asset_code, asset_issuer)`.
+
+Well-known SAC addresses on Stellar mainnet (network passphrase
+`"Public Global Stellar Network ; September 2015"`):
+
+| Asset                            | SAC contract ID (C-address)                            |
+| -------------------------------- | ------------------------------------------------------ |
+| XLM (native)                     | `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC` |
+| USDC (Centre, GABC…)             | varies by issuer — derive from the issuer G-address    |
+
+See also [§ Asset representation](./intent-spec.md#asset-representation) in the
+intent spec for how `StellarAsset` strings map to SAC addresses at settlement.
 
 ### SEP-40
 
