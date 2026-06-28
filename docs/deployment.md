@@ -156,7 +156,7 @@ Configure the LayerZero send/receive libraries and the DVN set per chain
 | --------------------- | ------------------------------------------------------------ |
 | Timelock owners       | ≥ 3 hardware-wallet keys held by distinct people             |
 | Timelock threshold    | A true majority (e.g. 2-of-3, 3-of-5)                        |
-| Timelock delay        | 24–48h in guarded beta; long enough for users to exit        |
+| Timelock delay        | 24–48h in guarded beta; long enough for users to exit. Enforced on-chain to `MIN_DELAY` (1 day) – `MAX_DELAY` (30 days); `setDelay` cannot self-neutralize the reaction window |
 | Guardian              | A separate hot key (or 1-of-n Safe) for fast incident pause  |
 | `confirmationGrace`   | A few hours; must exceed worst-case LayerZero delivery time. Hard-capped at `MAX_CONFIRMATION_GRACE` (7 days) |
 

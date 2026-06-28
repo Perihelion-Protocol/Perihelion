@@ -30,6 +30,13 @@ contract PerihelionTimelock {
 
     // --- Storage -------------------------------------------------------------
 
+    /// @notice Floor on `delay`: prevents a confirmed `setDelay` from
+    ///         self-neutralizing the timelock's reaction window.
+    uint256 public constant MIN_DELAY = 1 days;
+    /// @notice Ceiling on `delay`: prevents governance from bricking itself
+    ///         with an unworkably long delay.
+    uint256 public constant MAX_DELAY = 30 days;
+
     address[] private _owners;
     mapping(address => bool) public isOwner;
     uint256 public threshold;
@@ -96,6 +103,7 @@ contract PerihelionTimelock {
         if (owners_.length == 0 || threshold_ == 0 || threshold_ > owners_.length) {
             revert InvalidConfig();
         }
+        if (delay_ < MIN_DELAY || delay_ > MAX_DELAY) revert InvalidConfig();
         for (uint256 i = 0; i < owners_.length; i++) {
             address o = owners_[i];
             if (o == address(0) || isOwner[o]) revert InvalidConfig();
@@ -241,6 +249,7 @@ contract PerihelionTimelock {
     }
 
     function setDelay(uint256 delay_) external onlySelf {
+        if (delay_ < MIN_DELAY || delay_ > MAX_DELAY) revert InvalidConfig();
         delay = delay_;
         emit DelaySet(delay_);
     }
