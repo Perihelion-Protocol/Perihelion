@@ -32,7 +32,7 @@ use messages::{encode_cancel_intent, encode_fill_confirmed};
 
 /// Hard ceiling for TTL extension. Mirrors the representative network
 /// `max_entry_ttl`; clamp every extension to this. Should track network config.
-const MAX_TTL: u32 = 3_110_400;
+pub const MAX_TTL: u32 = 3_110_400;
 /// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
 /// absorb late confirmations and the refund window.
 const GRACE_LEDGERS: u32 = 120_960;
@@ -692,6 +692,10 @@ impl Perihelion {
             let new_base = nonce - 1;
             ps.set(&base_key, &new_base);
             ps.set(&bitmap_key, &1u64); // Only the new nonce is set in the bitmap.
+            // Replay-safety invariant: archival of either entry resets the
+            // high-water mark to zero, re-opening previously consumed nonces.
+            ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
+            ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
             return Ok(());
         }
 
@@ -705,7 +709,13 @@ impl Perihelion {
         }
 
         bitmap |= bit;
+        // Write base explicitly so extend_ttl can always find the key in storage.
+        ps.set(&base_key, &base);
         ps.set(&bitmap_key, &bitmap);
+        // Replay-safety invariant: archival of either entry resets the
+        // high-water mark to zero, re-opening previously consumed nonces.
+        ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
+        ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
         Ok(())
     }
 
