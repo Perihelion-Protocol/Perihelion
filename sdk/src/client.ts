@@ -92,19 +92,39 @@ export class PerihelionClient {
   /**
    * Poll until the intent reaches a terminal state (`settled`, `refunded`, or
    * `expired`) or the timeout elapses.
+   *
+   * @param opts.onStatus  Called on every status poll when the status changes.
+   *                       Use this to surface progress to the user or react to
+   *                       stalls (e.g. `claimed` but never advancing to `settling`
+   *                       indicates a stuck relayer; `pending` throughout suggests
+   *                       no solver picked up the intent).
    */
   async waitForSettlement(
     hash: Hex,
-    opts: { intervalMs?: number; timeoutMs?: number } = {},
+    opts: {
+      intervalMs?: number;
+      timeoutMs?: number;
+      onStatus?: (status: IntentRecord["status"], record: IntentRecord) => void;
+    } = {},
   ): Promise<IntentRecord> {
     const interval = opts.intervalMs ?? 3_000;
     const deadline = Date.now() + (opts.timeoutMs ?? 5 * 60_000);
     const terminal = new Set(["settled", "refunded", "expired"]);
+    let lastStatus: IntentRecord["status"] | undefined;
     for (;;) {
       const record = await this.getIntent(hash);
+      if (record.status !== lastStatus) {
+        lastStatus = record.status;
+        opts.onStatus?.(record.status, record);
+      }
       if (terminal.has(record.status)) return record;
       if (Date.now() > deadline) {
-        throw new Error(`waitForSettlement timed out for ${hash}`);
+        throw Object.assign(
+          new Error(
+            `waitForSettlement timed out for ${hash} (last status: ${lastStatus ?? "unknown"})`,
+          ),
+          { lastStatus },
+        );
       }
       await sleep(interval);
     }
