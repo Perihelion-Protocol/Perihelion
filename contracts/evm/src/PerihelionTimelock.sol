@@ -30,6 +30,12 @@ contract PerihelionTimelock {
 
     // --- Storage -------------------------------------------------------------
 
+    /// @notice Window after `readyAt` during which a confirmed operation may
+    ///         still be executed. Past it, `execute` reverts as expired and
+    ///         the operation must be re-proposed, so a stale-but-confirmed op
+    ///         cannot be executed arbitrarily far in the future.
+    uint256 public constant GRACE_PERIOD = 14 days;
+
     address[] private _owners;
     mapping(address => bool) public isOwner;
     uint256 public threshold;
@@ -68,6 +74,7 @@ contract PerihelionTimelock {
     error NotEnoughConfirmations();
     error CallFailed();
     error Reentrancy();
+    error Expired();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -126,6 +133,15 @@ contract PerihelionTimelock {
         returns (bytes32)
     {
         return keccak256(abi.encode(target, value, data, salt));
+    }
+
+    /// @notice Timestamp after which a ready operation can no longer be
+    ///         executed and must be re-proposed. Returns 0 if the operation
+    ///         has not yet reached threshold confirmations.
+    function expiryOf(bytes32 id) external view returns (uint256) {
+        uint64 readyAt = operations[id].readyAt;
+        if (readyAt == 0) return 0;
+        return readyAt + GRACE_PERIOD;
     }
 
     // --- Multisig lifecycle --------------------------------------------------
@@ -190,6 +206,7 @@ contract PerihelionTimelock {
         if (op.executed) revert AlreadyExecuted();
         if (op.confirmations < threshold) revert NotEnoughConfirmations();
         if (op.readyAt == 0 || block.timestamp < op.readyAt) revert NotReady();
+        if (block.timestamp > op.readyAt + GRACE_PERIOD) revert Expired();
 
         op.executed = true; // effect before interaction
         emit Executed(id);

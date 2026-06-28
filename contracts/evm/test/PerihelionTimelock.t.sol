@@ -188,6 +188,46 @@ contract PerihelionTimelockTest is Test {
         tl.execute(address(target), 0, data, SALT);
     }
 
+    // --- Expiry ----------------------------------------------------------------
+
+    function test_ExecuteJustBeforeExpiry_Succeeds() public {
+        bytes memory data = _setValueData(11);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        assertEq(tl.expiryOf(id), readyAt + tl.GRACE_PERIOD());
+
+        // One second before expiry: still executable.
+        vm.warp(readyAt + tl.GRACE_PERIOD());
+        vm.prank(a);
+        tl.execute(address(target), 0, data, SALT);
+        assertEq(target.value(), 11);
+    }
+
+    function test_RevertWhen_ExecuteAfterExpiry() public {
+        bytes memory data = _setValueData(12);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        vm.warp(readyAt + tl.GRACE_PERIOD() + 1);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.Expired.selector);
+        tl.execute(address(target), 0, data, SALT);
+    }
+
+    function test_ExpiryOf_ZeroBeforeReady() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(1), SALT);
+        // Only proposer confirmed: not ready yet.
+        assertEq(tl.expiryOf(id), 0);
+    }
+
     // --- Revocation & cancellation ------------------------------------------
 
     function test_RevokeResetsTimelock() public {
