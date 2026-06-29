@@ -17,9 +17,12 @@ export { SorobanDestinationDelivery } from "./soroban-delivery.js";
 export { Relayer } from "./relayer.js";
 export { FileCheckpointStore } from "./file-checkpoint-store.js";
 export { NoopCheckpointStore } from "./checkpoint.js";
+export { InMemoryDeadLetterStore } from "./dead-letter.js";
 export type { CheckpointStore } from "./checkpoint.js";
-export type { SourceWatcher, DestinationDelivery, Logger } from "./relayer.js";
-export type { PendingMessage, BridgeMessage, RelayResult, EndpointId } from "./types.js";
+export type { DeadLetterStore, DeadLetterEntry } from "./dead-letter.js";
+export type { SourceWatcher, DestinationDelivery, Logger, RetryPolicy, RelayMetrics } from "./relayer.js";
+export type { PendingMessage, BridgeMessage, RelayResult, EndpointId, MessageType, MessageKey } from "./types.js";
+export { messageKeyString } from "./types.js";
 export type { RelayerConfig } from "./config.js";
 
 async function main(): Promise<void> {

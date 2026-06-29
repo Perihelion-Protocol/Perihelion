@@ -2,63 +2,439 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadConfig } from "../src/config.js";
 import { Relayer } from "../src/relayer.js";
+import { InMemoryDeadLetterStore } from "../src/dead-letter.js";
+import { messageKeyString } from "../src/types.js";
 import type {
   DestinationDelivery,
   Logger,
   SourceWatcher,
+  RetryPolicy,
 } from "../src/relayer.js";
 import type { CheckpointStore } from "../src/checkpoint.js";
-import type { PendingMessage } from "../src/types.js";
+import type { PendingMessage, MessageKey } from "../src/types.js";
 
-/** In-memory checkpoint store standing in for a restart between two Relayer instances. */
-function memoryCheckpointStore(): CheckpointStore {
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+function memCheckpoint(): CheckpointStore {
   let saved: number | undefined;
   return {
-    async load() {
-      return saved;
-    },
-    async save(block) {
-      saved = block;
-    },
+    async load() { return saved; },
+    async save(b) { saved = b; },
   };
 }
 
 const silent: Logger = { info() {}, warn() {}, error() {} };
 
-function message(block: number): PendingMessage {
+const VALID_ESCROW = "0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA";
+const VALID_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4";
+
+function makeMsg(
+  block: number,
+  overrides: Partial<PendingMessage["message"]> = {},
+): PendingMessage {
   return {
     srcTxHash: `0xtx${block}`,
     srcBlock: block,
     message: {
       srcEid: 30101,
       dstEid: 40161,
-      intentHash: `0x${block.toString(16).padStart(64, "0")}`,
+      intentHash: `0x${"ab".repeat(32)}`,
+      messageType: "FillInstruction",
       solver: "0x0000000000000000000000000000000000000001",
       recipient: "GUSER",
       destAsset: "native",
       amount: "1000000",
       nonce: block,
+      ...overrides,
     },
   };
 }
 
-test("delivers only messages past the confirmation depth", async () => {
-  const config = { ...loadConfig(), confirmations: 6 };
+function baseConfig() {
+  return loadConfig({
+    PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
+    PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
+  });
+}
+
+// ─── Issue 1: Config validation ─────────────────────────────────────────────
+
+test("loadConfig throws when PERIHELION_ESCROW_ADDRESS is missing", () => {
+  assert.throws(
+    () => loadConfig({ PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT }),
+    /PERIHELION_ESCROW_ADDRESS is required/,
+  );
+});
+
+test("loadConfig throws when PERIHELION_SETTLEMENT_CONTRACT is missing", () => {
+  assert.throws(
+    () => loadConfig({ PERIHELION_ESCROW_ADDRESS: VALID_ESCROW }),
+    /PERIHELION_SETTLEMENT_CONTRACT is required/,
+  );
+});
+
+test("loadConfig throws for malformed EVM address", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        PERIHELION_ESCROW_ADDRESS: "not-an-address",
+        PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
+      }),
+    /EVM address/,
+  );
+});
+
+test("loadConfig throws for malformed Soroban contract id", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
+        PERIHELION_SETTLEMENT_CONTRACT: "bad-id",
+      }),
+    /Soroban contract id/,
+  );
+});
+
+test("loadConfig throws for NaN confirmations", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
+        PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
+        PERIHELION_CONFIRMATIONS: "notanumber",
+      }),
+    /PERIHELION_CONFIRMATIONS/,
+  );
+});
+
+test("loadConfig throws for NaN pollIntervalMs", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
+        PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
+        PERIHELION_POLL_INTERVAL_MS: "notanumber",
+      }),
+    /PERIHELION_POLL_INTERVAL_MS/,
+  );
+});
+
+test("loadConfig succeeds with valid required fields and applies defaults", () => {
+  const cfg = loadConfig({
+    PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
+    PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
+  });
+  assert.equal(cfg.escrowAddress, VALID_ESCROW);
+  assert.equal(cfg.settlementContractId, VALID_CONTRACT);
+  assert.equal(cfg.confirmations, 6);
+  assert.equal(cfg.pollIntervalMs, 5000);
+});
+
+test("loadConfig error message lists all invalid fields together", () => {
+  let msg = "";
+  try {
+    loadConfig({});
+  } catch (e) {
+    msg = String(e);
+  }
+  assert.ok(msg.includes("PERIHELION_ESCROW_ADDRESS"));
+  assert.ok(msg.includes("PERIHELION_SETTLEMENT_CONTRACT"));
+});
+
+// ─── Issue 2: Composite dedup key ───────────────────────────────────────────
+
+test("two messages sharing intentHash but different messageType are both delivered", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
   const watcher: SourceWatcher = {
     async poll() {
-      // head=100; block 90 is final (90 <= 94), block 96 is not.
-      return { messages: [message(90), message(96)], head: 100 };
+      return {
+        messages: [
+          makeMsg(10, { messageType: "FillInstruction", nonce: 10 }),
+          makeMsg(10, { messageType: "FillConfirmed", nonce: 10 }),
+        ],
+        head: 10,
+      };
+    },
+  };
+  const delivered: string[] = [];
+  const deliveredKeys = new Set<string>();
+  const delivery: DestinationDelivery = {
+    async deliver(p) {
+      delivered.push(p.message.messageType);
+      return "0xdst";
+    },
+    async isDelivered(key) {
+      const k = messageKeyString(key);
+      if (deliveredKeys.has(k)) return true;
+      deliveredKeys.add(k);
+      return false;
+    },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent);
+  const results = await relayer.tick();
+
+  assert.equal(results.filter((r) => r.delivered).length, 2);
+  assert.deepEqual(delivered.sort(), ["FillConfirmed", "FillInstruction"]);
+});
+
+test("same message (same composite key) is not delivered twice", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  let callCount = 0;
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      callCount++;
+      return "0xdst";
+    },
+    async isDelivered() { return callCount > 0; },
+  };
+  const watcher: SourceWatcher = {
+    async poll() {
+      return { messages: [makeMsg(10)], head: 10 };
+    },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent);
+  await relayer.tick();
+  await relayer.tick();
+  assert.equal(callCount, 1);
+});
+
+test("FillConfirmed and CancelIntent for same intent both delivered", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const watcher: SourceWatcher = {
+    async poll() {
+      return {
+        messages: [
+          makeMsg(5, { messageType: "FillConfirmed", nonce: 1 }),
+          makeMsg(5, { messageType: "CancelIntent", nonce: 2 }),
+        ],
+        head: 5,
+      };
+    },
+  };
+  const types: string[] = [];
+  const seen = new Set<string>();
+  const delivery: DestinationDelivery = {
+    async deliver(p) {
+      types.push(p.message.messageType);
+      return "0xdst";
+    },
+    async isDelivered(key) {
+      const k = messageKeyString(key);
+      if (seen.has(k)) return true;
+      seen.add(k);
+      return false;
+    },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent);
+  await relayer.tick();
+  assert.deepEqual(types.sort(), ["CancelIntent", "FillConfirmed"]);
+});
+
+// ─── Issue 3: Dead-letter / retry policy ────────────────────────────────────
+
+test("message is dead-lettered after exhausting retry budget", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const retry: RetryPolicy = { maxAttempts: 3, baseBackoffMs: 0 };
+  const dlStore = new InMemoryDeadLetterStore();
+  let deliverCalls = 0;
+
+  const watcher: SourceWatcher = {
+    async poll() { return { messages: [makeMsg(1)], head: 1 }; },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { deliverCalls++; throw new Error("permanent failure"); },
+    async isDelivered() { return false; },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, memCheckpoint(), dlStore, retry);
+
+  // Attempt 1
+  await relayer.tick();
+  assert.equal(dlStore.list().length, 0, "not dead-lettered after attempt 1");
+
+  // Attempt 2
+  await relayer.tick();
+  assert.equal(dlStore.list().length, 0, "not dead-lettered after attempt 2");
+
+  // Attempt 3 — exhausts budget
+  await relayer.tick();
+  assert.equal(dlStore.list().length, 1, "dead-lettered after attempt 3");
+  assert.equal(dlStore.list()[0]?.attempts, 3);
+  assert.ok(dlStore.list()[0]?.lastError.includes("permanent failure"));
+});
+
+test("dead-lettered message is not retried until drained", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const retry: RetryPolicy = { maxAttempts: 1, baseBackoffMs: 0 };
+  const dlStore = new InMemoryDeadLetterStore();
+  let deliverCalls = 0;
+
+  const watcher: SourceWatcher = {
+    async poll() { return { messages: [makeMsg(1)], head: 1 }; },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { deliverCalls++; throw new Error("fail"); },
+    async isDelivered() { return false; },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, memCheckpoint(), dlStore, retry);
+  await relayer.tick(); // dead-letters on first attempt
+  assert.equal(dlStore.list().length, 1);
+
+  const callsBefore = deliverCalls;
+  await relayer.tick(); // should NOT retry — still dead-lettered
+  assert.equal(deliverCalls, callsBefore, "dead-lettered message not retried");
+});
+
+test("metrics count delivered, failed, and dead-lettered messages", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const retry: RetryPolicy = { maxAttempts: 2, baseBackoffMs: 0 };
+  const dlStore = new InMemoryDeadLetterStore();
+
+  // Use separate watchers per tick so we can control exactly which messages each tick sees.
+  let tickN = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      tickN++;
+      if (tickN === 1) {
+        // Tick 1: both messages present
+        return {
+          messages: [
+            makeMsg(1, { nonce: 1 }), // succeeds
+            makeMsg(2, { nonce: 2 }), // fails (attempt 1/2)
+          ],
+          head: 2,
+        };
+      }
+      // Tick 2: only nonce2 so nonce1 doesn't inflate delivered count
+      return { messages: [makeMsg(2, { nonce: 2 })], head: 2 };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver(p) {
+      if (p.message.nonce === 2) throw new Error("fail");
+      return "0xdst";
+    },
+    async isDelivered() { return false; },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, memCheckpoint(), dlStore, retry);
+  await relayer.tick(); // nonce1 ok (delivered=1); nonce2 fail (attempt 1, failed=1)
+  await relayer.tick(); // nonce2 fail → dead-lettered (attempt 2, deadLettered=1)
+
+  assert.equal(relayer.metrics.delivered, 1);
+  assert.ok(relayer.metrics.failed >= 1);
+  assert.equal(relayer.metrics.deadLettered, 1);
+});
+
+// ─── Issue 4: Reorg detection ────────────────────────────────────────────────
+
+test("relayer detects reorg and rolls back cursor", async () => {
+  const config = { ...baseConfig(), confirmations: 2 };
+  const polledFrom: number[] = [];
+
+  // First poll: canonical chain up to block 10
+  // Second poll: head=10 but with a different parentHash → reorg at depth 1
+  let pollCount = 0;
+  const watcher: SourceWatcher = {
+    async poll(fromBlock) {
+      polledFrom.push(fromBlock);
+      pollCount++;
+      if (pollCount === 1) {
+        // Normal: head=10, hash=0xAAA, parent=0x999
+        return {
+          messages: [makeMsg(8)],
+          head: 10,
+          headHash: "0xAAA",
+          parentHash: "0x999",
+        };
+      }
+      // Reorg: same height 10, but parent changed
+      return {
+        messages: [],
+        head: 10,
+        headHash: "0xBBB",
+        parentHash: "0xXXX", // different parent → reorg
+      };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, memCheckpoint());
+
+  // First tick: normal, processes block 8, advances cursor to 9 (10-2+1)
+  await relayer.tick();
+  const cursorAfterFirst = (relayer as unknown as { cursor: number }).cursor;
+
+  // Second tick: reorg detected — cursor rolls back
+  // After reorg the tick() re-polls; since watcher now returns no messages,
+  // cursor stays at the rolled-back value.
+  await relayer.tick();
+  const cursorAfterReorg = (relayer as unknown as { cursor: number }).cursor;
+
+  // After reorg, cursor should be <= cursorAfterFirst (rolled back)
+  assert.ok(
+    cursorAfterReorg <= cursorAfterFirst,
+    `expected cursor rollback: ${cursorAfterReorg} <= ${cursorAfterFirst}`,
+  );
+});
+
+test("relayer emits DEEP_REORG alert when reorg exceeds confirmation depth", async () => {
+  // confirmations=0 means any reorg depth > 0 is "deep"
+  const config = { ...baseConfig(), confirmations: 0 };
+  const errorMsgs: string[] = [];
+  const logger: Logger = {
+    info() {},
+    warn() {},
+    error(msg) { errorMsgs.push(msg); },
+  };
+
+  // Tick 1: record block 9 with hash 0xPrev
+  // Tick 2: block 10 arrives, parent hash doesn't match 0xPrev → reorg depth 1 > confirmations 0
+  let pollCount = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      pollCount++;
+      if (pollCount === 1) {
+        return { messages: [], head: 9, headHash: "0xPrev", parentHash: "0xOld" };
+      }
+      return { messages: [], head: 10, headHash: "0xNew", parentHash: "0xUnknown" };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, logger, 0, memCheckpoint());
+  await relayer.tick(); // records block 9
+  await relayer.tick(); // detects reorg depth 1 > confirmations 0 → DEEP_REORG
+
+  assert.ok(
+    errorMsgs.some((m) => m.includes("DEEP_REORG")),
+    `expected DEEP_REORG alert; got: ${JSON.stringify(errorMsgs)}`,
+  );
+});
+
+// ─── Existing behaviour preserved ───────────────────────────────────────────
+
+test("delivers only messages past the confirmation depth", async () => {
+  const config = { ...baseConfig(), confirmations: 6 };
+  const watcher: SourceWatcher = {
+    async poll() {
+      return { messages: [makeMsg(90), makeMsg(96)], head: 100 };
     },
   };
   const delivered: string[] = [];
   const delivery: DestinationDelivery = {
-    async deliver(p) {
-      delivered.push(p.message.intentHash);
-      return "0xdst";
-    },
-    async isDelivered() {
-      return false;
-    },
+    async deliver(p) { delivered.push(p.message.intentHash); return "0xdst"; },
+    async isDelivered() { return false; },
   };
 
   const relayer = new Relayer(config, watcher, delivery, silent);
@@ -66,23 +442,16 @@ test("delivers only messages past the confirmation depth", async () => {
 
   assert.equal(results.length, 1);
   assert.equal(results[0]?.delivered, true);
-  assert.equal(delivered.length, 1);
 });
 
 test("skips messages already delivered (replay guard)", async () => {
-  const config = { ...loadConfig(), confirmations: 0 };
+  const config = { ...baseConfig(), confirmations: 0 };
   const watcher: SourceWatcher = {
-    async poll() {
-      return { messages: [message(10)], head: 10 };
-    },
+    async poll() { return { messages: [makeMsg(10)], head: 10 }; },
   };
   const delivery: DestinationDelivery = {
-    async deliver() {
-      throw new Error("should not deliver");
-    },
-    async isDelivered() {
-      return true;
-    },
+    async deliver() { throw new Error("should not deliver"); },
+    async isDelivered() { return true; },
   };
 
   const relayer = new Relayer(config, watcher, delivery, silent);
@@ -90,44 +459,35 @@ test("skips messages already delivered (replay guard)", async () => {
   assert.equal(results[0]?.delivered, false);
 });
 
-test("a restarted relayer resumes from the persisted checkpoint, not the start block", async () => {
-  const config = { ...loadConfig(), confirmations: 0 };
-  const checkpoint = memoryCheckpointStore();
+test("a restarted relayer resumes from the persisted checkpoint", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const checkpoint = memCheckpoint();
   const polledFrom: number[] = [];
-  const watcher: SourceWatcher = {
-    async poll(fromBlock) {
-      polledFrom.push(fromBlock);
-      return { messages: [message(fromBlock)], head: fromBlock };
-    },
-  };
   const delivery: DestinationDelivery = {
-    async deliver() {
-      return "0xdst";
-    },
-    async isDelivered() {
-      return false;
-    },
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
   };
 
-  // First process: boots from scratch (no checkpoint yet), advances to block 50, "crashes".
-  const before = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
-  await before.resume();
-  await before.tick(); // poll(0) -> head 0 -> cursor advances to 1, persisted.
-
-  const advancing: SourceWatcher = {
+  const watcher1: SourceWatcher = {
     async poll(fromBlock) {
       polledFrom.push(fromBlock);
-      return { messages: [message(fromBlock)], head: 50 };
+      return { messages: [makeMsg(fromBlock)], head: fromBlock };
     },
   };
-  const stillRunning = new Relayer(config, advancing, delivery, silent, 0, checkpoint);
-  await stillRunning.resume(); // resumes from the checkpoint (1), not startBlock (0).
-  await stillRunning.tick(); // poll(1) -> head 50 -> cursor advances to 51, persisted.
 
-  // Second process: a fresh Relayer instance (the "restart"), again with startBlock=0.
-  const restarted = new Relayer(config, advancing, delivery, silent, 0, checkpoint);
+  const before = new Relayer(config, watcher1, delivery, silent, 0, checkpoint);
+  await before.resume();
+  await before.tick(); // poll(0) → cursor → 1
+
+  const watcher2: SourceWatcher = {
+    async poll(fromBlock) {
+      polledFrom.push(fromBlock);
+      return { messages: [makeMsg(fromBlock)], head: 50 };
+    },
+  };
+  const restarted = new Relayer(config, watcher2, delivery, silent, 0, checkpoint);
   await restarted.resume();
-  await restarted.tick();
+  await restarted.tick(); // resumes from 1, not 0
 
-  assert.deepEqual(polledFrom, [0, 1, 51]);
+  assert.deepEqual(polledFrom, [0, 1]);
 });

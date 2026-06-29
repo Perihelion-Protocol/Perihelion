@@ -5,10 +5,12 @@
 
 import {
   PerihelionClient,
-  parseIntentRecordArray,
   verifyIntent,
+  hashIntent,
+  perihelionDomain,
   type IntentRecord,
   type SignedIntent,
+  type Hex,
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
 import { evaluate } from "./quote.js";
@@ -32,9 +34,51 @@ export interface Logger {
   error(msg: string, meta?: Record<string, unknown>): void;
 }
 
+/**
+ * LRU cache for signature verification results. Evicts oldest entries when the
+ * cache exceeds its size limit to prevent unbounded memory growth.
+ */
+class VerificationCache {
+  private readonly cache = new Map<Hex, boolean>();
+  private readonly maxSize: number;
+
+  constructor(maxSize = 10_000) {
+    this.maxSize = maxSize;
+  }
+
+  get(hash: Hex): boolean | undefined {
+    const result = this.cache.get(hash);
+    if (result !== undefined) {
+      // Move to end (LRU)
+      this.cache.delete(hash);
+      this.cache.set(hash, result);
+    }
+    return result;
+  }
+
+  set(hash: Hex, valid: boolean): void {
+    // Evict oldest if at capacity
+    if (this.cache.size >= this.maxSize) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
+    this.cache.set(hash, valid);
+  }
+
+  size(): number {
+    return this.cache.size;
+  }
+}
+
 export class Solver {
   private readonly client: PerihelionClient;
+  /**
+   * `seen` only contains hashes whose outcome is terminal (filled, skipped for
+   * a durable reason, or exhausted retries). Transient failures are tracked in
+   * `retryState` and remain eligible for reconsideration.
+   */
   private readonly seen = new Set<string>();
+  private readonly verificationCache: VerificationCache;
   private running = false;
   private readonly backoff: BackoffState;
 
@@ -76,10 +120,15 @@ export class Solver {
 
   /** One poll-evaluate-fill cycle. Exposed for testing. */
   async tick(): Promise<void> {
-    const pending = await this.fetchPending();
+    const pending = await this.client.listPending();
+    const now = Date.now();
     for (const record of pending) {
-      if (this.seen.has(record.hash)) continue;
-      this.seen.add(record.hash);
+      const { hash } = record;
+      if (this.seen.has(hash)) continue;
+
+      const retry = this.retryState.get(hash);
+      if (retry && now < retry.nextRetryAt) continue;
+
       await this.consider(record);
     }
   }
@@ -87,12 +136,34 @@ export class Solver {
   private async consider(record: IntentRecord): Promise<void> {
     const { intent, signature, hash } = record;
 
-    if (!(await verifyIntent(intent, signature))) {
-      this.log.warn("rejecting intent with invalid signature", { hash });
+    // Verify the mempool's hash matches our recomputation
+    const domain = perihelionDomain(this.config.sourceChainId, this.config.escrowAddress);
+    const recomputedHash = hashIntent(intent, domain);
+    if (recomputedHash.toLowerCase() !== hash.toLowerCase()) {
+      this.log.warn("rejecting intent: mempool hash mismatch", {
+        hash,
+        recomputedHash,
+      });
       return;
     }
 
-    const decision = await evaluate(intent, this.config);
+    // Check cache first to avoid redundant verification
+    let valid = this.verificationCache.get(hash);
+    if (valid === undefined) {
+      // Not cached — verify and cache the result
+      valid = await verifyIntent(intent, signature, domain);
+      this.verificationCache.set(hash, valid);
+    }
+
+    if (!valid) {
+      this.log.warn("rejecting intent with invalid signature", { hash });
+      // Terminal: invalid signature will never become valid.
+      this.seen.add(hash);
+      this.retryState.delete(hash);
+      return;
+    }
+
+    const decision = await evaluate(intent, this.config, this.pricingDeps);
     if (!decision.fill) {
       this.log.info("skipping intent", { hash, reason: decision.reason });
       this.metrics?.recordSkip(decision.reason);
@@ -115,10 +186,19 @@ export class Solver {
     }
   }
 
-  private async fetchPending(): Promise<IntentRecord[]> {
-    const res = await fetch(`${this.config.mempoolUrl}/intents?status=pending`);
-    if (!res.ok) throw new Error(`mempool poll failed: ${res.status}`);
-    return parseIntentRecordArray(await res.json());
+  private scheduleRetry(hash: string): void {
+    const state = this.retryState.get(hash) ?? { attempts: 0, nextRetryAt: 0 };
+    const attempts = state.attempts + 1;
+    if (attempts > MAX_FILL_RETRIES) {
+      this.log.warn("max retries exhausted, retiring intent", { hash, attempts });
+      this.seen.add(hash);
+      this.retryState.delete(hash);
+    } else {
+      this.retryState.set(hash, {
+        attempts,
+        nextRetryAt: Date.now() + retryBackoff(attempts - 1),
+      });
+    }
   }
 }
 

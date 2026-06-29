@@ -7,6 +7,17 @@ build/
 .env.*
 !.env.example
 npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test artifacts & snapshots
+coverage/
+lcov.info
+*.lcov
+__snapshots__/
+*.snap
+test-results/
+.nyc_output/
 
 # Rust / Soroban
 target/
@@ -24,10 +35,9 @@ contracts/evm/lib/
 # Slither
 crytic-export/
 
-# Coverage / test artifacts
-coverage/
-lcov.info
-*.lcov
+# Relayer runtime files
+.perihelion-relayer-checkpoint.json
+*.checkpoint.json
 
 # Editor / OS
 .DS_Store

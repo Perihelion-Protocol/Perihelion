@@ -9,7 +9,7 @@ import {
   type Account,
 } from "@stellar/stellar-sdk";
 import type { DestinationDelivery } from "./relayer.js";
-import type { PendingMessage } from "./types.js";
+import type { PendingMessage, MessageKey } from "./types.js";
 
 /** Configuration for SorobanDestinationDelivery. */
 export interface SorobanDeliveryConfig {
@@ -72,14 +72,16 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     }
   }
 
-  async isDelivered(intentHash: string): Promise<boolean> {
+  async isDelivered(key: MessageKey): Promise<boolean> {
     try {
       // Query the settlement contract to check if this intent was already settled
       // via the is_settled view or by checking the Settled marker in storage.
+      // Keyed on the composite (srcEid, dstEid, intentHash, messageType, nonce).
       // Placeholder: return false for now.
+      void key;
       return false;
     } catch (err) {
-      console.error("Failed to check if delivered", { intentHash, err });
+      console.error("Failed to check if delivered", { key, err });
       return false;
     }
   }
