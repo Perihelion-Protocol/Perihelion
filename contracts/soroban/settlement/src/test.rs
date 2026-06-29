@@ -39,6 +39,11 @@ impl MockEndpoint {
         BytesN::from_array(&env, &[0u8; 32])
     }
 
+    /// Returns 0 so that any non-negative lz_fee passes the pre-check in tests.
+    pub fn quote(_env: Env, _params: MessagingParams) -> i128 {
+        0
+    }
+
     pub fn sent(env: Env) -> u32 {
         env.storage()
             .instance()
@@ -993,4 +998,50 @@ fn cancel_intent_when_locked_emits_event() {
         IntentStatus::Cancelled
     );
     assert!(s.client.is_cancelled(&h));
+}
+
+// --- Replay-safety: nonce TTL extension ---------------------------------------
+
+#[test]
+fn inbound_nonce_ttl_extended_on_write() {
+    // Each accepted nonce must extend both nonce storage entries to MAX_TTL.
+    // If either entry is archived, the replay high-water mark silently resets
+    // to zero, re-opening previously consumed nonces.
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 51);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    let contract_id = s.client.address.clone();
+    s.env.as_contract(&contract_id, || {
+        let ps = s.env.storage().persistent();
+        let base_ttl = ps.get_ttl(&DataKey::InboundNonceBase(s.src_eid));
+        let bitmap_ttl = ps.get_ttl(&DataKey::InboundNonceBitmap(s.src_eid));
+        assert_eq!(base_ttl, MAX_TTL, "InboundNonceBase TTL must be MAX_TTL after write");
+        assert_eq!(bitmap_ttl, MAX_TTL, "InboundNonceBitmap TTL must be MAX_TTL after write");
+    });
+}
+
+#[test]
+fn inbound_nonce_ttl_extended_after_window_advance() {
+    // Window-advance path also writes and must extend both nonce entries.
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+
+    // Nonce 1 seeds the bitmap without advancing the window.
+    let h1 = hash(&s.env, 52);
+    register_intent(&s, &h1, &recipient, 1, 5_000, 1, None);
+
+    // Nonce 200 (> 0 + 64) forces a window advance, rewriting both keys.
+    let h2 = hash(&s.env, 53);
+    register_intent(&s, &h2, &recipient, 1, 5_000, 200, None);
+
+    let contract_id = s.client.address.clone();
+    s.env.as_contract(&contract_id, || {
+        let ps = s.env.storage().persistent();
+        let base_ttl = ps.get_ttl(&DataKey::InboundNonceBase(s.src_eid));
+        let bitmap_ttl = ps.get_ttl(&DataKey::InboundNonceBitmap(s.src_eid));
+        assert_eq!(base_ttl, MAX_TTL, "InboundNonceBase TTL must be MAX_TTL after window advance");
+        assert_eq!(bitmap_ttl, MAX_TTL, "InboundNonceBitmap TTL must be MAX_TTL after window advance");
+    });
 }

@@ -85,6 +85,20 @@ contract PerihelionTimelockTest is Test {
         new PerihelionTimelock(owners, 1, DELAY);
     }
 
+    function test_RevertWhen_ConstructorDelayBelowMin() public {
+        address[] memory owners = new address[](1);
+        owners[0] = a;
+        vm.expectRevert(PerihelionTimelock.InvalidConfig.selector);
+        new PerihelionTimelock(owners, 1, tl.MIN_DELAY() - 1);
+    }
+
+    function test_RevertWhen_ConstructorDelayAboveMax() public {
+        address[] memory owners = new address[](1);
+        owners[0] = a;
+        vm.expectRevert(PerihelionTimelock.InvalidConfig.selector);
+        new PerihelionTimelock(owners, 1, tl.MAX_DELAY() + 1);
+    }
+
     // --- Happy path ----------------------------------------------------------
 
     function test_ProposeConfirmDelayExecute() public {
@@ -188,6 +202,46 @@ contract PerihelionTimelockTest is Test {
         tl.execute(address(target), 0, data, SALT);
     }
 
+    // --- Expiry ----------------------------------------------------------------
+
+    function test_ExecuteJustBeforeExpiry_Succeeds() public {
+        bytes memory data = _setValueData(11);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        assertEq(tl.expiryOf(id), readyAt + tl.GRACE_PERIOD());
+
+        // One second before expiry: still executable.
+        vm.warp(readyAt + tl.GRACE_PERIOD());
+        vm.prank(a);
+        tl.execute(address(target), 0, data, SALT);
+        assertEq(target.value(), 11);
+    }
+
+    function test_RevertWhen_ExecuteAfterExpiry() public {
+        bytes memory data = _setValueData(12);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        vm.warp(readyAt + tl.GRACE_PERIOD() + 1);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.Expired.selector);
+        tl.execute(address(target), 0, data, SALT);
+    }
+
+    function test_ExpiryOf_ZeroBeforeReady() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(1), SALT);
+        // Only proposer confirmed: not ready yet.
+        assertEq(tl.expiryOf(id), 0);
+    }
+
     // --- Revocation & cancellation ------------------------------------------
 
     function test_RevokeResetsTimelock() public {
@@ -212,6 +266,22 @@ contract PerihelionTimelockTest is Test {
         assertEq(readyAt, block.timestamp + DELAY);
     }
 
+    // --- Cancellation policy ---------------------------------------------------
+    //
+    // Deliberate choice (documented in SECURITY.md / TECHNICAL-ARCHITECTURE.md
+    // §6.1 T10): cancellation stays 1-of-N. Any single owner — not just the
+    // proposer or a threshold — may cancel a pending (un-executed) operation.
+    // This is a cheap liveness valve (anyone can clear a stuck or contested op
+    // without needing to assemble the same threshold that confirms), at the
+    // acknowledged cost that one dissenting owner can repeatedly cancel
+    // operations a majority supports, stalling that specific action (not the
+    // multisig's ability to act in general — re-proposing is equally cheap).
+    // Symmetric (threshold-to-cancel) and proposer-only alternatives were
+    // considered and rejected for now: both reduce the cancel path's
+    // liveness without removing the underlying need for owners to coordinate
+    // on what should run, which is a process/governance concern, not a
+    // contract one.
+
     function test_Cancel() public {
         vm.prank(a);
         bytes32 id = tl.propose(address(target), 0, _setValueData(1), SALT);
@@ -219,6 +289,42 @@ contract PerihelionTimelockTest is Test {
         tl.cancel(id);
         (,,, bool exists) = tl.operations(id);
         assertFalse(exists);
+    }
+
+    /// @notice Pins the deliberate 1-of-N policy: a single non-proposing
+    ///         owner can unilaterally cancel, even one who never confirmed.
+    function test_Cancel_BySingleNonProposingOwner_Succeeds() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(2), SALT);
+        // c never confirmed this op, yet a single owner suffices to cancel.
+        vm.prank(c);
+        tl.cancel(id);
+        (,,, bool exists) = tl.operations(id);
+        assertFalse(exists);
+    }
+
+    function test_RevertWhen_NonOwnerCancels() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(3), SALT);
+        vm.prank(stranger);
+        vm.expectRevert(PerihelionTimelock.NotOwner.selector);
+        tl.cancel(id);
+    }
+
+    function test_RevertWhen_CancelExecuted() public {
+        bytes memory data = _setValueData(4);
+        bytes32 id = tl.hashOperation(address(target), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(target), 0, data, SALT);
+
+        vm.prank(c);
+        vm.expectRevert(PerihelionTimelock.AlreadyExecuted.selector);
+        tl.cancel(id);
     }
 
     // --- Self-administered config -------------------------------------------
@@ -242,6 +348,46 @@ contract PerihelionTimelockTest is Test {
 
         assertTrue(tl.isOwner(stranger));
         assertEq(tl.ownerCount(), 4);
+    }
+
+    function test_RevertWhen_SetDelayBelowMin() public {
+        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, tl.MIN_DELAY() - 1);
+        bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.CallFailed.selector); // inner InvalidConfig
+        tl.execute(address(tl), 0, data, SALT);
+    }
+
+    function test_RevertWhen_SetDelayAboveMax() public {
+        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, tl.MAX_DELAY() + 1);
+        bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.CallFailed.selector); // inner InvalidConfig
+        tl.execute(address(tl), 0, data, SALT);
+    }
+
+    function test_SetDelayAtMinBoundarySucceeds() public {
+        uint256 newDelay = tl.MIN_DELAY();
+        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, newDelay);
+        bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(tl), 0, data, SALT);
+        assertEq(tl.delay(), newDelay);
     }
 
     function test_RevertWhen_RemoveOwnerBreaksThreshold() public {
@@ -297,5 +443,39 @@ contract PerihelionTimelockTest is Test {
         vm.prank(b);
         tl.execute(address(escrow), 0, peerData, salt2);
         assertEq(escrow.stellarPeer(), newPeer);
+    }
+
+    /// @notice Pins the dead-value-path failure mode (issue: timelock forwards
+    ///         `value` but the escrow's admin setters are non-payable): a
+    ///         mistaken non-zero-value admin op reverts cleanly with
+    ///         CallFailed, only after the full propose/confirm/delay cycle.
+    function test_RevertWhen_NonZeroValueTargetsNonPayableEscrowFunction() public {
+        MockEndpoint endpoint = new MockEndpoint();
+        PerihelionEscrow escrow = new PerihelionEscrow(address(endpoint), 30_316);
+        escrow.transferOwnership(address(tl));
+        bytes memory acceptData = abi.encodeWithSelector(PerihelionEscrow.acceptOwnership.selector);
+        bytes32 acceptId = tl.hashOperation(address(escrow), 0, acceptData, SALT);
+        vm.prank(a);
+        tl.propose(address(escrow), 0, acceptData, SALT);
+        vm.prank(b);
+        tl.confirm(acceptId);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(escrow), 0, acceptData, SALT);
+
+        // Mistaken op: setPeer is non-payable, but the proposer attaches value.
+        vm.deal(address(tl), 1 ether);
+        bytes32 newPeer = bytes32(uint256(0xCAFE));
+        bytes memory peerData = abi.encodeWithSelector(PerihelionEscrow.setPeer.selector, newPeer);
+        bytes32 salt3 = bytes32(uint256(3));
+        bytes32 peerId = tl.hashOperation(address(escrow), 1 ether, peerData, salt3);
+        vm.prank(a);
+        tl.propose(address(escrow), 1 ether, peerData, salt3);
+        vm.prank(b);
+        tl.confirm(peerId);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.CallFailed.selector);
+        tl.execute(address(escrow), 1 ether, peerData, salt3);
     }
 }
