@@ -14,6 +14,7 @@ import type { RelayerConfig } from "./config.js";
 import type { CheckpointStore } from "./checkpoint.js";
 import { NoopCheckpointStore } from "./checkpoint.js";
 import type { PendingMessage, RelayResult } from "./types.js";
+import { BackoffState } from "./backoff.js";
 
 /** Observes bridge messages emitted on the source chain. */
 export interface SourceWatcher {
@@ -43,6 +44,7 @@ export interface Logger {
 export class Relayer {
   private running = false;
   private cursor: number;
+  private readonly backoff: BackoffState;
 
   constructor(
     private readonly config: RelayerConfig,
@@ -53,6 +55,7 @@ export class Relayer {
     private readonly checkpoint: CheckpointStore = new NoopCheckpointStore(),
   ) {
     this.cursor = startBlock;
+    this.backoff = new BackoffState(config);
   }
 
   /**
@@ -76,10 +79,15 @@ export class Relayer {
     while (this.running) {
       try {
         await this.tick();
+        this.backoff.recordSuccess();
       } catch (err) {
-        this.log.error("tick failed", { err: String(err) });
+        this.backoff.recordFailure();
+        this.log.error("tick failed", {
+          err: String(err),
+          consecutiveFailures: this.backoff.consecutiveFailures,
+        });
       }
-      await sleep(this.config.pollIntervalMs);
+      await sleep(this.backoff.nextDelay());
     }
   }
 
@@ -90,6 +98,7 @@ export class Relayer {
   /** One watch-confirm-deliver cycle. Exposed for testing. */
   async tick(): Promise<RelayResult[]> {
     const { messages, head } = await this.watcher.poll(this.cursor);
+    const confirmedHead = head - this.config.confirmations;
     const results: RelayResult[] = [];
 
     // Only advance the cursor past blocks that were fully handled (delivered,

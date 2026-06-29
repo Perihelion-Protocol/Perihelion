@@ -12,6 +12,8 @@ import {
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
 import { evaluate } from "./quote.js";
+import { BackoffState } from "./backoff.js";
+import type { Metrics } from "./metrics.js";
 
 /** Pluggable execution backend — abstracts the two settlement legs. */
 export interface Executor {
@@ -34,13 +36,16 @@ export class Solver {
   private readonly client: PerihelionClient;
   private readonly seen = new Set<string>();
   private running = false;
+  private readonly backoff: BackoffState;
 
   constructor(
     private readonly config: SolverConfig,
     private readonly executor: Executor,
     private readonly log: Logger = console,
+    private readonly metrics?: Metrics,
   ) {
     this.client = new PerihelionClient({ mempoolUrl: config.mempoolUrl });
+    this.backoff = new BackoffState(config);
   }
 
   /** Start the poll loop. Resolves when {@link stop} is called. */
@@ -53,10 +58,15 @@ export class Solver {
     while (this.running) {
       try {
         await this.tick();
+        this.backoff.recordSuccess();
       } catch (err) {
-        this.log.error("tick failed", { err: String(err) });
+        this.backoff.recordFailure();
+        this.log.error("tick failed", {
+          err: String(err),
+          consecutiveFailures: this.backoff.consecutiveFailures,
+        });
       }
-      await sleep(this.config.pollIntervalMs);
+      await sleep(this.backoff.nextDelay());
     }
   }
 
@@ -85,15 +95,23 @@ export class Solver {
     const decision = await evaluate(intent, this.config);
     if (!decision.fill) {
       this.log.info("skipping intent", { hash, reason: decision.reason });
+      this.metrics?.recordSkip(decision.reason);
       return;
     }
 
     this.log.info("filling intent", { hash, marginBps: decision.marginBps });
+    this.metrics?.recordFillAttempt(intent.destAsset);
     try {
       const { settlementTx } = await this.executor.fill(record);
       this.log.info("filled", { hash, settlementTx });
+      this.metrics?.recordFillWon(
+        intent.destAsset,
+        BigInt(intent.minDestAmount),
+        decision.marginBps ?? 0,
+      );
     } catch (err) {
       this.log.error("fill failed", { hash, err: String(err) });
+      this.metrics?.recordFillLost(intent.destAsset, String(err));
     }
   }
 

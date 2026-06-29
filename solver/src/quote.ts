@@ -9,7 +9,10 @@
 
 import { isExpired, toSmallestUnits, fromSmallestUnits } from "@perihelion/sdk";
 import type { Intent } from "@perihelion/sdk";
+import { zeroAddress, isAddressEqual, type Address } from "viem";
 import type { SolverConfig } from "./config.js";
+import type { InventoryProvider, InFlightTracker } from "./inventory.js";
+import { UnlimitedInventoryProvider } from "./inventory.js";
 
 export interface FillDecision {
   readonly fill: boolean;
@@ -46,10 +49,27 @@ export async function priceDestAsset(intent: Intent): Promise<bigint> {
   // const rate = await fetchStellarDexRate(intent.sourceAsset, intent.destAsset);
 }
 
+/**
+ * Returns true when the intent is open to any solver or is reserved for
+ * `solverAddress`. Uses viem helpers for checksum-insensitive comparison.
+ */
+export function isSolverEligible(
+  preferredSolver: string,
+  solverAddress: Address,
+): boolean {
+  const preferred = preferredSolver as Address;
+  return (
+    isAddressEqual(preferred, zeroAddress) ||
+    isAddressEqual(preferred, solverAddress)
+  );
+}
+
 /** Decide whether to fill an intent given current config and pricing. */
 export async function evaluate(
   intent: Intent,
   config: SolverConfig,
+  inventory: InventoryProvider = new UnlimitedInventoryProvider(),
+  inFlight?: InFlightTracker,
 ): Promise<FillDecision> {
   if (isExpired(intent)) {
     return { fill: false, reason: "intent expired" };
@@ -57,10 +77,7 @@ export async function evaluate(
   if (!config.supportedDestAssets.includes(intent.destAsset)) {
     return { fill: false, reason: `unsupported dest asset ${intent.destAsset}` };
   }
-  if (
-    intent.preferredSolver !== "0x0000000000000000000000000000000000000000" &&
-    intent.preferredSolver.toLowerCase() !== config.solverAddress.toLowerCase()
-  ) {
+  if (!isSolverEligible(intent.preferredSolver, config.solverAddress)) {
     return { fill: false, reason: "reserved for another solver" };
   }
 
@@ -75,5 +92,14 @@ export async function evaluate(
   if (marginBps < config.minMarginBps) {
     return { fill: false, reason: `margin ${marginBps}bps below threshold`, marginBps };
   }
+
+  // Inventory check: ensure we can fund the fill after accounting for in-flight fills.
+  const required = deliverable;
+  const available = await inventory.availableBalance(intent.destAsset);
+  const reserved = inFlight?.reservedFor(intent.destAsset) ?? 0n;
+  if (available - reserved < required) {
+    return { fill: false, reason: "insufficient inventory", marginBps };
+  }
+
   return { fill: true, reason: "profitable", marginBps };
 }
