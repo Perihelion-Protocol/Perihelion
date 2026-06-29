@@ -12,22 +12,23 @@ import {
   PerihelionHttpError,
   PerihelionTimeoutError,
 } from "./errors.js";
-import { parseIntentRecord } from "./validate.js";
+import { parseIntentRecord, parseIntentRecordArray } from "./validate.js";
 import type {
   Address,
   Hex,
   Intent,
   IntentRecord,
+  IntentStatus,
   SignedIntent,
 } from "./types.js";
 
 export interface ClientOptions {
   /** Base URL of the Perihelion mempool / relayer API. */
   readonly mempoolUrl: string;
-  /** Chain ID of the EVM network the escrow is deployed on. */
-  readonly chainId: number;
-  /** Address of the PerihelionEscrow contract. */
-  readonly verifyingContract: Address;
+  /** Chain ID of the EVM network the escrow is deployed on. Required for {@link PerihelionClient.signIntent}. */
+  readonly chainId?: number;
+  /** Address of the PerihelionEscrow contract. Required for {@link PerihelionClient.signIntent}. */
+  readonly verifyingContract?: Address;
   /**
    * Per-request timeout in milliseconds. Applies to every fetch call.
    * Defaults to 10 000 ms. Set to 0 to disable.
@@ -46,16 +47,25 @@ export interface ClientOptions {
 export class PerihelionClient {
   private readonly base: string;
   private readonly fetchImpl: typeof fetch;
-  private readonly domain: TypedDataDomain;
+  private readonly opts: ClientOptions;
   private readonly requestTimeoutMs: number;
   private readonly maxRetries: number;
 
   constructor(opts: ClientOptions) {
     this.base = opts.mempoolUrl.replace(/\/$/, "");
     this.fetchImpl = opts.fetch ?? globalThis.fetch;
-    this.domain = perihelionDomain(opts.chainId, opts.verifyingContract);
+    this.opts = opts;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 10_000;
     this.maxRetries = opts.maxRetries ?? 3;
+  }
+
+  private get domain(): TypedDataDomain {
+    if (this.opts.chainId == null || this.opts.verifyingContract == null) {
+      throw new Error(
+        "[Perihelion] chainId and verifyingContract are required for signing",
+      );
+    }
+    return perihelionDomain(this.opts.chainId, this.opts.verifyingContract);
   }
 
   /** Sign an intent with a viem wallet, producing a {@link SignedIntent}. */
@@ -104,6 +114,19 @@ export class PerihelionClient {
       throw new PerihelionHttpError("getIntent", res.status, await res.text());
     }
     return parseIntentRecord(await res.json());
+  }
+
+  /**
+   * List intents filtered by status.
+   * Defaults to `"pending"`, which is the primary solver use-case.
+   */
+  async listPending(status: IntentStatus = "pending"): Promise<IntentRecord[]> {
+    const url = `${this.base}/intents?status=${encodeURIComponent(status)}`;
+    const res = await this.fetchWithRetry(url, {});
+    if (!res.ok) {
+      throw new PerihelionHttpError("listPending", res.status, await res.text());
+    }
+    return parseIntentRecordArray(await res.json());
   }
 
   /**

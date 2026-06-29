@@ -5,7 +5,6 @@
 
 import {
   PerihelionClient,
-  parseIntentRecordArray,
   verifyIntent,
   hashIntent,
   perihelionDomain,
@@ -14,7 +13,7 @@ import {
   type Hex,
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
-import { evaluate } from "./quote.js";
+import { evaluate, type PricingDeps } from "./quote.js";
 
 /** Pluggable execution backend — abstracts the two settlement legs. */
 export interface Executor {
@@ -71,6 +70,11 @@ class VerificationCache {
 
 export class Solver {
   private readonly client: PerihelionClient;
+  /**
+   * `seen` only contains hashes whose outcome is terminal (filled, skipped for
+   * a durable reason, or exhausted retries). Transient failures are tracked in
+   * `retryState` and remain eligible for reconsideration.
+   */
   private readonly seen = new Set<string>();
   private readonly verificationCache: VerificationCache;
   private running = false;
@@ -79,6 +83,8 @@ export class Solver {
     private readonly config: SolverConfig,
     private readonly executor: Executor,
     private readonly log: Logger = console,
+    fetchImpl?: typeof fetch,
+    private readonly pricingDeps: PricingDeps = {},
   ) {
     this.client = new PerihelionClient({
       mempoolUrl: config.mempoolUrl,
@@ -111,10 +117,15 @@ export class Solver {
 
   /** One poll-evaluate-fill cycle. Exposed for testing. */
   async tick(): Promise<void> {
-    const pending = await this.fetchPending();
+    const pending = await this.client.listPending();
+    const now = Date.now();
     for (const record of pending) {
-      if (this.seen.has(record.hash)) continue;
-      this.seen.add(record.hash);
+      const { hash } = record;
+      if (this.seen.has(hash)) continue;
+
+      const retry = this.retryState.get(hash);
+      if (retry && now < retry.nextRetryAt) continue;
+
       await this.consider(record);
     }
   }
@@ -143,28 +154,53 @@ export class Solver {
 
     if (!valid) {
       this.log.warn("rejecting intent with invalid signature", { hash });
+      // Terminal: invalid signature will never become valid.
+      this.seen.add(hash);
+      this.retryState.delete(hash);
       return;
     }
 
-    const decision = await evaluate(intent, this.config);
+    const decision = await evaluate(intent, this.config, this.pricingDeps);
     if (!decision.fill) {
-      this.log.info("skipping intent", { hash, reason: decision.reason });
+      if (decision.terminal) {
+        // Terminal skip — never retry.
+        this.log.info("skipping intent (terminal)", { hash, reason: decision.reason });
+        this.seen.add(hash);
+        this.retryState.delete(hash);
+      } else {
+        // Transient skip (e.g. evaluate pricing error) — schedule retry.
+        this.scheduleRetry(hash);
+        this.log.info("skipping intent (transient)", { hash, reason: decision.reason });
+      }
       return;
     }
 
-    this.log.info("filling intent", { hash, marginBps: decision.marginBps });
+    this.log.info("filling intent", { hash, profitBps: decision.profitBps });
     try {
       const { settlementTx } = await this.executor.fill(record);
       this.log.info("filled", { hash, settlementTx });
+      // Terminal: successfully filled.
+      this.seen.add(hash);
+      this.retryState.delete(hash);
     } catch (err) {
       this.log.error("fill failed", { hash, err: String(err) });
+      this.scheduleRetry(hash);
     }
   }
 
-  private async fetchPending(): Promise<IntentRecord[]> {
-    const res = await fetch(`${this.config.mempoolUrl}/intents?status=pending`);
-    if (!res.ok) throw new Error(`mempool poll failed: ${res.status}`);
-    return parseIntentRecordArray(await res.json());
+  private scheduleRetry(hash: string): void {
+    const state = this.retryState.get(hash) ?? { attempts: 0, nextRetryAt: 0 };
+    const attempts = state.attempts + 1;
+    if (attempts > MAX_FILL_RETRIES) {
+      this.log.warn("max retries exhausted, retiring intent", { hash, attempts });
+      this.seen.add(hash);
+      this.retryState.delete(hash);
+    } else {
+      this.retryState.set(hash, {
+        attempts,
+        nextRetryAt: Date.now() + retryBackoff(attempts - 1),
+      });
+    }
   }
 }
 

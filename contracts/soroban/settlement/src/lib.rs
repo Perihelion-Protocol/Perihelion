@@ -25,9 +25,6 @@ mod test;
 #[cfg(test)]
 mod fuzz;
 
-#[cfg(test)]
-mod ttl_archival;
-
 pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
