@@ -351,8 +351,12 @@ export function randomNonce(): string {
   return bytesToBigInt(bytes).toString();
 }
 
-/** Coerce string amounts to bigint for viem's typed-data encoder. */
-function toMessage(intent: Intent) {
+/**
+ * Coerce string amounts to bigint for viem's typed-data encoder.
+ * This is the single source of truth for the EIP-712 message shape; used by
+ * {@link hashIntent}, {@link verifyIntent}, and `PerihelionClient.signIntent`.
+ */
+export function toMessage(intent: Intent) {
   return {
     user: intent.user,
     destination: intent.destination,
