@@ -12,7 +12,8 @@
     "sdk",
     "relayer",
     "solver",
-    "mempool"
+    "mempool",
+    "test"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
