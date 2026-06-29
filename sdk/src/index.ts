@@ -30,3 +30,5 @@
 export * from "./types.js";
 export * from "./intent.js";
 export * from "./client.js";
+export * from "./units.js";
+export * from "./stellar.js";

@@ -15,6 +15,7 @@ import {
   type TypedDataDomain,
 } from "viem";
 import type { Address, Hex, Intent } from "./types.js";
+import { isStellarAddress, isStellarAsset } from "./stellar.js";
 
 /**
  * Build the EIP-712 domain for a specific Perihelion escrow deployment.
@@ -135,6 +136,19 @@ export function validateIntent(
 }
 
 /**
+ * Maximum byte length of `Intent.destination`. A Stellar strkey (G.../C...) is
+ * exactly 56 characters. Matches `PerihelionEscrow.MAX_DESTINATION_LEN`.
+ */
+export const MAX_DESTINATION_LEN = 56;
+
+/**
+ * Maximum byte length of `Intent.destAsset`. The longest valid form is
+ * `<CODE>:<ISSUER>` (12 + 1 + 56 = 69 bytes); `"native"` is 6 bytes.
+ * Matches `PerihelionEscrow.MAX_DEST_ASSET_LEN`.
+ */
+export const MAX_DEST_ASSET_LEN = 69;
+
+/**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
  * messaging fee makes the intent unprofitable to fill. Override via {@link BuildOptions.minNotional}.
  * Default: $10 USD equivalent.
@@ -160,6 +174,17 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
 
   const vMin = options?.vMin ?? DEFAULT_V_MIN;
   const suppressWarning = options?.suppressWarning ?? false;
+
+  if (!isStellarAddress(params.destination)) {
+    throw new Error(
+      `buildIntent: invalid destination "${params.destination}" — must be a G... or C... Stellar strkey`,
+    );
+  }
+  if (!isStellarAsset(params.destAsset)) {
+    throw new Error(
+      `buildIntent: invalid destAsset "${params.destAsset}" — must be "native" or "CODE:ISSUER"`,
+    );
+  }
 
   const intent: Intent = {
     ...params,
@@ -215,9 +240,30 @@ export async function verifyIntent(
   return recovered.toLowerCase() === intent.user.toLowerCase();
 }
 
-/** True if the intent's deadline is in the past relative to `now` (unix seconds). */
-export function isExpired(intent: Intent, now = Math.floor(Date.now() / 1000)): boolean {
-  return intent.deadline <= now;
+/**
+ * True if the intent's deadline is considered expired.
+ *
+ * The check is: `deadline <= now - clockSkew`.
+ *
+ * @param now       Unix seconds to use as "current time" (defaults to `Date.now()/1000`).
+ *                  Pass chain time here when available to avoid client-clock disagreements.
+ * @param clockSkew Seconds subtracted from `now` before comparing.
+ *                  - **Positive** (e.g. `+30`): acts as if the clock is 30 s slower — the
+ *                    intent is considered expired only after `now` exceeds `deadline + skew`.
+ *                    Use this in the **solver fill path** to avoid claiming an intent that
+ *                    the chain will reject as just-expired.
+ *                  - **Negative** (e.g. `-30`): acts as if the clock is 30 s faster — the
+ *                    intent is considered expired once `now >= deadline - |skew|`.
+ *                    Use this for **submission guards** to avoid sending something that
+ *                    will land just after its deadline.
+ *                  - Default: `0` (no adjustment). Recommended: `+30` for solver fills.
+ */
+export function isExpired(
+  intent: Intent,
+  now = Math.floor(Date.now() / 1000),
+  clockSkew = 0,
+): boolean {
+  return intent.deadline <= now - clockSkew;
 }
 
 /**

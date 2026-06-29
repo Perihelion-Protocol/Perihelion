@@ -8,7 +8,7 @@ import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 contract DecoderHarness is PerihelionEscrow {
     constructor(address endpoint_, uint32 eid_) PerihelionEscrow(endpoint_, eid_) { }
 
-    function decodeFillConfirmed(bytes calldata m) external pure returns (bytes32, address) {
+    function decodeFillConfirmed(bytes calldata m) external pure returns (bytes32, address, uint128, uint64) {
         return _decodeFillConfirmed(m);
     }
 
@@ -48,6 +48,19 @@ contract WireFormatConformanceTest is Test {
     bytes32 internal constant CI_HASH =
         hex"2222222222222222222222222222222222222222222222222222222222222222";
 
+    // FillInstruction canonical inputs (must match fill_instruction.hex).
+    bytes32 internal constant FI_INTENT_HASH =
+        hex"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    // recipient: 32 bytes of 0xBB (Stellar strkey body)
+    bytes32 internal constant FI_RECIPIENT =
+        hex"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    // dest_asset: 32 bytes of 0xCC (Stellar SAC address)
+    bytes32 internal constant FI_DEST_ASSET =
+        hex"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    // preferred_solver: EVM address 0xDDDD...DDDD (20 bytes), left-padded to 32
+    bytes32 internal constant FI_SOLVER_WORD =
+        hex"000000000000000000000000dddddddddddddddddddddddddddddddddddddddd";
+
     function setUp() public {
         harness = new DecoderHarness(address(0x1), 30_316);
     }
@@ -60,9 +73,13 @@ contract WireFormatConformanceTest is Test {
         bytes memory golden = _readVector("fill_confirmed.hex");
         assertEq(golden.length, 90);
 
-        (bytes32 h, address solver) = harness.decodeFillConfirmed(golden);
+        (bytes32 h, address solver, uint128 fillAmount, uint64 fillLedger) =
+            harness.decodeFillConfirmed(golden);
         assertEq(h, FC_HASH);
         assertEq(solver, address(uint160(uint256(FC_SOLVER_WORD))));
+        // Audit fields are decoded and emitted in Released but do not control the release.
+        assertEq(fillAmount, 1_000_000);
+        assertEq(fillLedger, 42);
 
         // The EVM view of the layout must re-encode to the exact golden bytes.
         bytes memory rebuilt = abi.encodePacked(

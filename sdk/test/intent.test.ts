@@ -14,6 +14,8 @@ import {
   verifyIntent,
 } from "../src/intent.js";
 import { PerihelionClient } from "../src/client.js";
+import { toSmallestUnits, fromSmallestUnits } from "../src/units.js";
+import { isStellarAddress, isStellarAsset } from "../src/stellar.js";
 
 const PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const account = privateKeyToAccount(PK);
@@ -33,7 +35,7 @@ function sampleParams() {
     sourceChainId: 8453,
     sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const,
     sourceAmount: "1000000",
-    destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    destAsset: VALID_DEST_ASSET,
     minDestAmount: "9900000",
     deadline: 4102444800, // year 2100
     nonce: "42",
@@ -92,7 +94,7 @@ test("buildIntent warns when sourceAmount is below V_min", () => {
       sourceChainId: 8453,
       sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       sourceAmount: "1000", // very small amount
-      destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      destAsset: VALID_DEST_ASSET,
       minDestAmount: "900",
       deadline: 4102444800,
     });
@@ -116,7 +118,7 @@ test("buildIntent does not warn when sourceAmount is above V_min", () => {
       sourceChainId: 8453,
       sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       sourceAmount: "100000000", // well above default V_min
-      destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      destAsset: VALID_DEST_ASSET,
       minDestAmount: "99000000",
       deadline: 4102444800,
     });
@@ -140,7 +142,7 @@ test("buildIntent respects suppressWarning option", () => {
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: "1000",
-        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        destAsset: VALID_DEST_ASSET,
         minDestAmount: "900",
         deadline: 4102444800,
       },
@@ -166,7 +168,7 @@ test("buildIntent respects custom vMin option", () => {
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: "50000000", // 50 USD
-        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        destAsset: VALID_DEST_ASSET,
         minDestAmount: "49000000",
         deadline: 4102444800,
       },
