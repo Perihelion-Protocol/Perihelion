@@ -250,6 +250,10 @@ cd ../..
 npm test                               # all TypeScript packages
 ( cd contracts/soroban && cargo test ) # Soroban unit tests
 ( cd contracts/evm && forge test )     # EVM unit tests
+
+# Differential fuzzing for wire format codecs
+make fuzz-bounded                      # 100 cases (~30s)
+make fuzz-extended                     # 10k cases (~5min)
 ```
 
 ### Use the SDK
@@ -297,6 +301,7 @@ See the [`sdk/` README](./sdk/README.md) for the full API.
 | [Architecture Overview](./docs/architecture.md)                         | High-level settlement flow and trust model                                  |
 | [Intent Specification](./docs/intent-spec.md)                           | The signable intent format and EIP-712 encoding                             |
 | [Deployment & Operations](./docs/deployment.md)                         | Production deployment, the timelock-multisig owner + guardian, and admin/incident runbooks |
+| [Differential Fuzzing](./docs/differential-fuzzing.md)                  | Wire format codec validation harness for detecting encoder/decoder divergence |
 | [Glossary](./docs/glossary.md)                                          | Definitions of every protocol term                                          |
 | [FAQ](./docs/faq.md)                                                    | Common questions about safety, solvers, and trust                           |
 | [Contributing Guide](./CONTRIBUTING.md)                                 | How to contribute and where the work lives                                  |
