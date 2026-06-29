@@ -7,6 +7,7 @@
 
 import type { TypedDataDomain, WalletClient } from "viem";
 import { hashIntent, INTENT_TYPES, perihelionDomain } from "./intent.js";
+import { parseIntentRecord } from "./validate.js";
 import type {
   Address,
   Hex,
@@ -86,7 +87,7 @@ export class PerihelionClient {
     if (!res.ok) {
       throw new Error(`getIntent failed: ${res.status} ${await res.text()}`);
     }
-    return (await res.json()) as IntentRecord;
+    return parseIntentRecord(await res.json());
   }
 
   /**

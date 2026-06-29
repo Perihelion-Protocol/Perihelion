@@ -11,6 +11,8 @@
  */
 
 import type { RelayerConfig } from "./config.js";
+import type { CheckpointStore } from "./checkpoint.js";
+import { NoopCheckpointStore } from "./checkpoint.js";
 import type { PendingMessage, RelayResult } from "./types.js";
 
 /** Observes bridge messages emitted on the source chain. */
@@ -47,17 +49,29 @@ export class Relayer {
     private readonly watcher: SourceWatcher,
     private readonly delivery: DestinationDelivery,
     private readonly log: Logger = console,
-    startBlock = 0,
+    private readonly startBlock = 0,
+    private readonly checkpoint: CheckpointStore = new NoopCheckpointStore(),
   ) {
     this.cursor = startBlock;
   }
 
+  /**
+   * Resume the cursor from the checkpoint store, falling back to the
+   * configured start block on first run (no checkpoint persisted yet).
+   * Called automatically by {@link start}; exposed for tests/manual control.
+   */
+  async resume(): Promise<void> {
+    this.cursor = (await this.checkpoint.load()) ?? this.startBlock;
+  }
+
   /** Start the watch-and-relay loop. Resolves when {@link stop} is called. */
   async start(): Promise<void> {
+    await this.resume();
     this.running = true;
     this.log.info("relayer started", {
       escrow: this.config.escrowAddress,
       settlement: this.config.settlementContractId,
+      cursor: this.cursor,
     });
     while (this.running) {
       try {
@@ -78,21 +92,25 @@ export class Relayer {
     const { messages, head } = await this.watcher.poll(this.cursor);
     const results: RelayResult[] = [];
 
-    // `head` is assumed to be the source chain's latest block height. If the
-    // chain has fewer blocks than the required confirmation depth (a fresh
-    // local/test network, or a watcher reporting a small head), nothing can
-    // be final yet — bail out before the subtraction below goes negative.
-    if (head < this.config.confirmations) return results;
-
-    const confirmedHead = Math.max(0, head - this.config.confirmations);
+    // Only advance the cursor past blocks that were fully handled (delivered,
+    // or already-delivered per the idempotency check). A delivery failure
+    // caps the cursor at that block so it's retried next tick.
+    let cursorTarget = confirmedHead + 1;
 
     for (const pending of messages) {
       if (pending.srcBlock > confirmedHead) continue; // not yet final
-      results.push(await this.relayOne(pending));
+      const result = await this.relayOne(pending);
+      results.push(result);
+      if (result.error !== undefined) {
+        cursorTarget = Math.min(cursorTarget, pending.srcBlock);
+      }
     }
 
-    // Advance the cursor past everything we've now confirmed.
+    // Advance the cursor past everything we've now confirmed, and persist it
+    // so a restart resumes here instead of re-scanning from genesis or
+    // skipping messages emitted while down.
     this.cursor = Math.max(this.cursor, confirmedHead + 1);
+    await this.checkpoint.save(this.cursor);
     return results;
   }
 
