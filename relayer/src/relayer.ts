@@ -11,6 +11,8 @@
  */
 
 import type { RelayerConfig } from "./config.js";
+import type { CheckpointStore } from "./checkpoint.js";
+import { NoopCheckpointStore } from "./checkpoint.js";
 import type { PendingMessage, RelayResult } from "./types.js";
 
 /** Observes bridge messages emitted on the source chain. */
@@ -42,17 +44,29 @@ export class Relayer {
     private readonly watcher: SourceWatcher,
     private readonly delivery: DestinationDelivery,
     private readonly log: Logger = console,
-    startBlock = 0,
+    private readonly startBlock = 0,
+    private readonly checkpoint: CheckpointStore = new NoopCheckpointStore(),
   ) {
     this.cursor = startBlock;
   }
 
+  /**
+   * Resume the cursor from the checkpoint store, falling back to the
+   * configured start block on first run (no checkpoint persisted yet).
+   * Called automatically by {@link start}; exposed for tests/manual control.
+   */
+  async resume(): Promise<void> {
+    this.cursor = (await this.checkpoint.load()) ?? this.startBlock;
+  }
+
   /** Start the watch-and-relay loop. Resolves when {@link stop} is called. */
   async start(): Promise<void> {
+    await this.resume();
     this.running = true;
     this.log.info("relayer started", {
       escrow: this.config.escrowAddress,
       settlement: this.config.settlementContractId,
+      cursor: this.cursor,
     });
     while (this.running) {
       try {
@@ -79,8 +93,11 @@ export class Relayer {
       results.push(await this.relayOne(pending));
     }
 
-    // Advance the cursor past everything we've now confirmed.
+    // Advance the cursor past everything we've now confirmed, and persist it
+    // so a restart resumes here instead of re-scanning from genesis or
+    // skipping messages emitted while down.
     this.cursor = Math.max(this.cursor, confirmedHead + 1);
+    await this.checkpoint.save(this.cursor);
     return results;
   }
 

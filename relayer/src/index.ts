@@ -10,10 +10,14 @@ import { loadConfig } from "./config.js";
 import { Relayer } from "./relayer.js";
 import { EVMSourceWatcher } from "./evm-watcher.js";
 import { SorobanDestinationDelivery } from "./soroban-delivery.js";
+import { FileCheckpointStore } from "./file-checkpoint-store.js";
 
 export { EVMSourceWatcher } from "./evm-watcher.js";
 export { SorobanDestinationDelivery } from "./soroban-delivery.js";
 export { Relayer } from "./relayer.js";
+export { FileCheckpointStore } from "./file-checkpoint-store.js";
+export { NoopCheckpointStore } from "./checkpoint.js";
+export type { CheckpointStore } from "./checkpoint.js";
 export type { SourceWatcher, DestinationDelivery, Logger } from "./relayer.js";
 export type { PendingMessage, BridgeMessage, RelayResult, EndpointId } from "./types.js";
 export type { RelayerConfig } from "./config.js";
@@ -39,7 +43,10 @@ async function main(): Promise<void> {
     signerSecret: process.env.SIGNER_SECRET || "",
   });
 
-  const relayer = new Relayer(config, watcher, delivery);
+  const checkpoint = new FileCheckpointStore(
+    process.env.PERIHELION_CHECKPOINT_FILE || "./.perihelion-relayer-checkpoint.json",
+  );
+  const relayer = new Relayer(config, watcher, delivery, console, 0, checkpoint);
 
   const shutdown = () => {
     console.info("shutting down relayer");
