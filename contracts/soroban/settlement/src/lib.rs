@@ -670,6 +670,16 @@ impl Perihelion {
     /// very old messages are still rejected (cannot replay messages more than ~64
     /// messages old without an explicit reset). This implements true "unordered
     /// delivery" semantics per LayerZero V2 lazy-nonce model.
+    ///
+    /// This is the **LayerZero transport nonce** guard. It prevents the same
+    /// LayerZero message from being replayed at the transport layer. It is distinct
+    /// from the `Intent.nonce` 256-bit random value in the EIP-712 payload, which
+    /// only prevents two identical intents from mapping to the same `intent_hash`
+    /// (collision prevention). The application-layer idempotency guarantee against
+    /// double-settle and double-cancel is provided by the `Settled` and `Cancelled`
+    /// persistent markers checked in `fill_intent` and `cancel_expired_intent`.
+    ///
+    /// See `docs/TECHNICAL-ARCHITECTURE.md §11` for the full anti-replay story.
     fn accept_nonce(env: &Env, eid: u32, nonce: u64) -> Result<(), PerihelionError> {
         if nonce == 0 {
             return Err(PerihelionError::StaleNonce);

@@ -48,6 +48,10 @@ pub enum DataKey {
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
     /// Tracks which nonces have been processed. The bitmap covers nonces in
     /// the range [base, base + 63] where base is stored separately.
+    ///
+    /// This is the per-eid **LayerZero transport nonce** state — distinct from
+    /// `Intent.nonce` (a 256-bit random collision-prevention field in the
+    /// EIP-712 payload). See `docs/TECHNICAL-ARCHITECTURE.md §11`.
     InboundNonceBitmap(u32),
     /// Base nonce for the bitmap (nonce 0 before first message).
     InboundNonceBase(u32),
