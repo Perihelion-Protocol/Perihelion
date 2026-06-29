@@ -55,6 +55,13 @@ pub enum PerihelionError {
     StaleNonce = 162,
     /// Sender is not the registered peer for the inbound endpoint id.
     UntrustedPeer = 163,
+    /// The supplied `lz_fee` is below the amount the endpoint requires.
+    /// Callers must call `quote_lz_fee` before `fill_intent` / `cancel_expired_intent`
+    /// and pass the returned value (plus a small buffer for fee fluctuation) as
+    /// `lz_fee`. Underpayment is now surfaced as this dedicated error rather than
+    /// an opaque revert from inside the endpoint client, so solver operators can
+    /// distinguish fee estimation bugs from other dispatch failures.
+    InsufficientLzFee = 164,
 
     // --- Invariant / internal ---
     /// Arithmetic error that prior checks should have made unreachable.

@@ -7,7 +7,7 @@
  * {@link priceDestAsset} with real liquidity routing.
  */
 
-import { isExpired } from "@perihelion/sdk";
+import { isExpired, toSmallestUnits, fromSmallestUnits } from "@perihelion/sdk";
 import type { Intent } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
 
@@ -31,21 +31,19 @@ export interface FillDecision {
  * - RedStone Oracle (SEP-40 compliant)
  * - External DEX aggregators
  */
-export async function priceDestAsset(intent: Intent): Promise<bigint> {
-  const source = BigInt(intent.sourceAmount);
+// Decimal places for corridor assets.
+// EVM stablecoins (USDC, EURC, …) use 6dp; Stellar assets use 7dp.
+const SOURCE_DECIMALS = 6;
+const DEST_DECIMALS = 7;
 
-  // Basic rate: 1:1 with decimal adjustment
-  // Most EVM stablecoins are 6 decimals, Stellar assets are 7 decimals.
-  // If sourceAsset is USDC (6dp) and destAsset is also USDC on Stellar (7dp),
-  // then 1e6 source = 1e7 destination (multiply by 10).
-  const rate = 10n;
+export async function priceDestAsset(intent: Intent): Promise<bigint> {
+  // Convert source smallest-units → human → dest smallest-units for 1:1 rate.
+  // This centralises the 6↔7 decimal corridor rather than baking in * 10n.
+  const humanAmount = fromSmallestUnits(intent.sourceAmount, SOURCE_DECIMALS);
+  return BigInt(toSmallestUnits(humanAmount, DEST_DECIMALS));
 
   // In production, fetch live quotes from an oracle or DEX:
   // const rate = await fetchStellarDexRate(intent.sourceAsset, intent.destAsset);
-  // or
-  // const rate = await fetchRedStoneRate(intent.destAsset);
-
-  return source * rate;
 }
 
 /** Decide whether to fill an intent given current config and pricing. */

@@ -3,8 +3,19 @@ import { test } from "node:test";
 import { privateKeyToAccount } from "viem/accounts";
 import { createWalletClient, http, zeroAddress } from "viem";
 import { base } from "viem/chains";
-import { buildIntent, DEFAULT_V_MIN, hashIntent, perihelionDomain, verifyIntent } from "../src/intent.js";
+import {
+  buildIntent,
+  DEFAULT_V_MIN,
+  hashIntent,
+  I128_MAX,
+  perihelionDomain,
+  U128_MAX,
+  validateAmount,
+  verifyIntent,
+} from "../src/intent.js";
 import { PerihelionClient } from "../src/client.js";
+import { toSmallestUnits, fromSmallestUnits } from "../src/units.js";
+import { isStellarAddress, isStellarAsset } from "../src/stellar.js";
 
 const PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const account = privateKeyToAccount(PK);
@@ -14,18 +25,25 @@ const CHAIN_ID = 8453;
 const CONTRACT_ADDRESS = "0x1234567890123456789012345678901234567890" as const;
 const DOMAIN = perihelionDomain(CHAIN_ID, CONTRACT_ADDRESS);
 
-function sampleIntent() {
-  return buildIntent({
+// A valid G... Stellar account strkey (56 chars, base32 A-Z/2-7).
+const VALID_DESTINATION = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+
+function sampleParams() {
+  return {
     user: account.address,
-    destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+    destination: VALID_DESTINATION,
     sourceChainId: 8453,
-    sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const,
     sourceAmount: "1000000",
-    destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    destAsset: VALID_DEST_ASSET,
     minDestAmount: "9900000",
     deadline: 4102444800, // year 2100
     nonce: "42",
-  });
+  };
+}
+
+function sampleIntent() {
+  return buildIntent(sampleParams());
 }
 
 test("buildIntent defaults open solver and keeps explicit nonce", () => {
@@ -72,11 +90,11 @@ test("buildIntent warns when sourceAmount is below V_min", () => {
   try {
     buildIntent({
       user: account.address,
-      destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+      destination: VALID_DESTINATION,
       sourceChainId: 8453,
       sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       sourceAmount: "1000", // very small amount
-      destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      destAsset: VALID_DEST_ASSET,
       minDestAmount: "900",
       deadline: 4102444800,
     });
@@ -96,11 +114,11 @@ test("buildIntent does not warn when sourceAmount is above V_min", () => {
   try {
     buildIntent({
       user: account.address,
-      destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+      destination: VALID_DESTINATION,
       sourceChainId: 8453,
       sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       sourceAmount: "100000000", // well above default V_min
-      destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      destAsset: VALID_DEST_ASSET,
       minDestAmount: "99000000",
       deadline: 4102444800,
     });
@@ -120,11 +138,11 @@ test("buildIntent respects suppressWarning option", () => {
     buildIntent(
       {
         user: account.address,
-        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        destination: VALID_DESTINATION,
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: "1000",
-        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        destAsset: VALID_DEST_ASSET,
         minDestAmount: "900",
         deadline: 4102444800,
       },
@@ -146,11 +164,11 @@ test("buildIntent respects custom vMin option", () => {
     buildIntent(
       {
         user: account.address,
-        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        destination: VALID_DESTINATION,
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: "50000000", // 50 USD
-        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        destAsset: VALID_DEST_ASSET,
         minDestAmount: "49000000",
         deadline: 4102444800,
       },
@@ -160,4 +178,139 @@ test("buildIntent respects custom vMin option", () => {
   } finally {
     console.warn = originalWarn;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #57 — Amount boundary conformance vectors
+//
+// These tests assert the exact boundary conditions documented in
+// docs/intent-spec.md §Amount Field Specification.
+// ---------------------------------------------------------------------------
+
+// --- validateAmount unit tests ---------------------------------------------
+
+test("validateAmount: zero is rejected", () => {
+  assert.throws(() => validateAmount("0", "sourceAmount"), RangeError);
+});
+
+test("validateAmount: 1 is accepted", () => {
+  assert.doesNotThrow(() => validateAmount("1", "sourceAmount"));
+});
+
+test("validateAmount: i128::MAX is accepted for minDestAmount", () => {
+  assert.doesNotThrow(() => validateAmount(I128_MAX.toString(), "minDestAmount", I128_MAX));
+});
+
+test("validateAmount: i128::MAX + 1 is rejected for minDestAmount", () => {
+  assert.throws(
+    () => validateAmount((I128_MAX + 1n).toString(), "minDestAmount", I128_MAX),
+    RangeError
+  );
+});
+
+test("validateAmount: u128::MAX is accepted for sourceAmount", () => {
+  assert.doesNotThrow(() => validateAmount(U128_MAX.toString(), "sourceAmount", U128_MAX));
+});
+
+test("validateAmount: u128::MAX + 1 is rejected for sourceAmount", () => {
+  assert.throws(
+    () => validateAmount((U128_MAX + 1n).toString(), "sourceAmount", U128_MAX),
+    RangeError
+  );
+});
+
+test("validateAmount: negative string is rejected", () => {
+  assert.throws(() => validateAmount("-1", "sourceAmount"), RangeError);
+});
+
+// --- buildIntent enforces amount bounds ------------------------------------
+
+test("buildIntent rejects sourceAmount of zero", () => {
+  assert.throws(
+    () =>
+      buildIntent({
+        user: account.address,
+        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "0",
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: "1",
+        deadline: 4102444800,
+      }),
+    RangeError
+  );
+});
+
+test("buildIntent rejects minDestAmount exceeding i128::MAX", () => {
+  assert.throws(
+    () =>
+      buildIntent({
+        user: account.address,
+        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: (I128_MAX + 1n).toString(),
+        deadline: 4102444800,
+      }),
+    RangeError
+  );
+});
+
+test("buildIntent rejects sourceAmount exceeding u128::MAX", () => {
+  assert.throws(
+    () =>
+      buildIntent(
+        {
+          user: account.address,
+          destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+          sourceChainId: 8453,
+          sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          sourceAmount: (U128_MAX + 1n).toString(),
+          destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+          minDestAmount: "1",
+          deadline: 4102444800,
+        },
+        { suppressWarning: true }
+      ),
+    RangeError
+  );
+});
+
+test("buildIntent accepts sourceAmount = u128::MAX (exact boundary)", () => {
+  assert.doesNotThrow(() =>
+    buildIntent(
+      {
+        user: account.address,
+        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: U128_MAX.toString(),
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: "1",
+        deadline: 4102444800,
+      },
+      { suppressWarning: true }
+    )
+  );
+});
+
+test("buildIntent accepts minDestAmount = i128::MAX (exact boundary)", () => {
+  assert.doesNotThrow(() =>
+    buildIntent(
+      {
+        user: account.address,
+        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: I128_MAX.toString(),
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: I128_MAX.toString(),
+        deadline: 4102444800,
+      },
+      { suppressWarning: true }
+    )
+  );
 });

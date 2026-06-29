@@ -22,4 +22,10 @@ pub trait LzEndpoint {
         refund_address: Address,
         native_fee: i128,
     ) -> BytesN<32>;
+
+    /// Quote the native fee required to dispatch `params` via LayerZero.
+    /// Callers (solvers / keepers) must pass at least this value as `lz_fee`
+    /// to `fill_intent` / `cancel_expired_intent`. A small buffer is advisable
+    /// to absorb fee fluctuations between the quote and the send.
+    fn quote(env: Env, params: MessagingParams) -> i128;
 }

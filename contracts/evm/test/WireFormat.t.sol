@@ -8,12 +8,27 @@ import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 contract DecoderHarness is PerihelionEscrow {
     constructor(address endpoint_, uint32 eid_) PerihelionEscrow(endpoint_, eid_) { }
 
-    function decodeFillConfirmed(bytes calldata m) external pure returns (bytes32, address) {
+    function decodeFillConfirmed(bytes calldata m) external pure returns (bytes32, address, uint128, uint64) {
         return _decodeFillConfirmed(m);
     }
 
     function decodeCancelIntent(bytes calldata m) external pure returns (bytes32, uint8) {
         return _decodeCancelIntent(m);
+    }
+
+    /// @dev Mirrors lzReceive's message routing without endpoint/peer auth —
+    ///      used by conformance tests to verify version and type rejection.
+    function routeInbound(bytes calldata m) external {
+        // 0x01 = PROTOCOL_VERSION, 0x02 = MSG_FILL_CONFIRMED, 0x03 = MSG_CANCEL_INTENT
+        if (m.length < 2 || m[0] != 0x01) revert MalformedPayload();
+        bytes1 msgType = m[1];
+        if (msgType == 0x02) {
+            _decodeFillConfirmed(m);
+        } else if (msgType == 0x03) {
+            _decodeCancelIntent(m);
+        } else {
+            revert UnknownMessageType();
+        }
     }
 }
 
@@ -33,6 +48,19 @@ contract WireFormatConformanceTest is Test {
     bytes32 internal constant CI_HASH =
         hex"2222222222222222222222222222222222222222222222222222222222222222";
 
+    // FillInstruction canonical inputs (must match fill_instruction.hex).
+    bytes32 internal constant FI_INTENT_HASH =
+        hex"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    // recipient: 32 bytes of 0xBB (Stellar strkey body)
+    bytes32 internal constant FI_RECIPIENT =
+        hex"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    // dest_asset: 32 bytes of 0xCC (Stellar SAC address)
+    bytes32 internal constant FI_DEST_ASSET =
+        hex"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    // preferred_solver: EVM address 0xDDDD...DDDD (20 bytes), left-padded to 32
+    bytes32 internal constant FI_SOLVER_WORD =
+        hex"000000000000000000000000dddddddddddddddddddddddddddddddddddddddd";
+
     function setUp() public {
         harness = new DecoderHarness(address(0x1), 30_316);
     }
@@ -45,9 +73,13 @@ contract WireFormatConformanceTest is Test {
         bytes memory golden = _readVector("fill_confirmed.hex");
         assertEq(golden.length, 90);
 
-        (bytes32 h, address solver) = harness.decodeFillConfirmed(golden);
+        (bytes32 h, address solver, uint128 fillAmount, uint64 fillLedger) =
+            harness.decodeFillConfirmed(golden);
         assertEq(h, FC_HASH);
         assertEq(solver, address(uint160(uint256(FC_SOLVER_WORD))));
+        // Audit fields are decoded and emitted in Released but do not control the release.
+        assertEq(fillAmount, 1_000_000);
+        assertEq(fillLedger, 42);
 
         // The EVM view of the layout must re-encode to the exact golden bytes.
         bytes memory rebuilt = abi.encodePacked(
@@ -66,5 +98,94 @@ contract WireFormatConformanceTest is Test {
 
         bytes memory rebuilt = abi.encodePacked(bytes1(0x01), bytes1(0x03), CI_HASH, uint8(0));
         assertEq(rebuilt, golden);
+    }
+
+    // -------------------------------------------------------------------------
+    // Negative / adversarial conformance vectors (issue #61)
+    //
+    // Each vector below is a mutation of the golden payload that must be
+    // rejected. The decoder under test is the one that would normally process
+    // this message type; the router-level checks (version, type) are exercised
+    // via `routeInbound`.
+    // -------------------------------------------------------------------------
+
+    string internal constant NEG_DIR = "../shared/wire-vectors/neg/";
+
+    function _readNeg(string memory name) internal view returns (bytes memory) {
+        return vm.parseBytes(vm.readFile(string.concat(NEG_DIR, name)));
+    }
+
+    // --- FillConfirmed negatives ---
+
+    function test_FillConfirmedRejectsShortPayload() public {
+        bytes memory m = _readNeg("fill_confirmed_short.hex");
+        assertEq(m.length, 89);
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        harness.decodeFillConfirmed(m);
+    }
+
+    function test_FillConfirmedRejectsLongPayload() public {
+        bytes memory m = _readNeg("fill_confirmed_long.hex");
+        assertEq(m.length, 91);
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        harness.decodeFillConfirmed(m);
+    }
+
+    function test_FillConfirmedRejectsNonzeroHighBytesInSolverWord() public {
+        bytes memory m = _readNeg("fill_confirmed_nonzero_high.hex");
+        assertEq(m.length, 90);
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        harness.decodeFillConfirmed(m);
+    }
+
+    function test_FillConfirmedRejectsBadVersion() public {
+        bytes memory m = _readNeg("fill_confirmed_bad_version.hex");
+        assertEq(m.length, 90);
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        harness.routeInbound(m);
+    }
+
+    function test_FillConfirmedRejectsUnknownType() public {
+        bytes memory m = _readNeg("fill_confirmed_bad_type.hex");
+        assertEq(m.length, 90);
+        vm.expectRevert(PerihelionEscrow.UnknownMessageType.selector);
+        harness.routeInbound(m);
+    }
+
+    // --- CancelIntent negatives ---
+
+    function test_CancelIntentRejectsShortPayload() public {
+        bytes memory m = _readNeg("cancel_intent_short.hex");
+        assertEq(m.length, 34);
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        harness.decodeCancelIntent(m);
+    }
+
+    function test_CancelIntentRejectsLongPayload() public {
+        bytes memory m = _readNeg("cancel_intent_long.hex");
+        assertEq(m.length, 36);
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        harness.decodeCancelIntent(m);
+    }
+
+    function test_CancelIntentRejectsUnknownReasonCode() public {
+        bytes memory m = _readNeg("cancel_intent_bad_reason.hex");
+        assertEq(m.length, 35);
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        harness.decodeCancelIntent(m);
+    }
+
+    function test_CancelIntentRejectsBadVersion() public {
+        bytes memory m = _readNeg("cancel_intent_bad_version.hex");
+        assertEq(m.length, 35);
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        harness.routeInbound(m);
+    }
+
+    function test_CancelIntentRejectsUnknownType() public {
+        bytes memory m = _readNeg("cancel_intent_bad_type.hex");
+        assertEq(m.length, 35);
+        vm.expectRevert(PerihelionEscrow.UnknownMessageType.selector);
+        harness.routeInbound(m);
     }
 }
