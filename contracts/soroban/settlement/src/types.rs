@@ -41,15 +41,20 @@ pub enum DataKey {
     /// Idempotency marker: set once FillConfirmed has been dispatched for this intent.
     ConfirmationSent(BytesN<32>),
 
-    // Persistent tier (solver reputation — PROPOSED Phase 3).
-    SolverReputation(Address),
-
     // Persistent tier (transport bookkeeping).
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
     /// Tracks which nonces have been processed. The bitmap covers nonces in
-    /// the range [base, base + 63] where base is stored separately.
+    /// the range [base+1, base+64] where base is stored in InboundNonceBase.
+    ///
+    /// REPLAY-SAFETY: archival of this entry resets the bitmap to zero,
+    /// allowing re-acceptance of all nonces in the current window. TTL must
+    /// be extended to MAX_TTL on every write; see accept_nonce in lib.rs.
     InboundNonceBitmap(u32),
-    /// Base nonce for the bitmap (nonce 0 before first message).
+    /// Base nonce for the bitmap window (implicit 0 before first message).
+    ///
+    /// REPLAY-SAFETY: archival of this entry resets the base to zero, allowing
+    /// re-acceptance of any nonce below the previous high-water mark. TTL must
+    /// be extended to MAX_TTL on every write; see accept_nonce in lib.rs.
     InboundNonceBase(u32),
 
     // Persistent tier (solver reputation — PROPOSED Phase 3).

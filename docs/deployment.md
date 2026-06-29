@@ -157,6 +157,7 @@ Configure the LayerZero send/receive libraries and the DVN set per chain
 | Timelock owners       | ≥ 3 hardware-wallet keys held by distinct people             |
 | Timelock threshold    | A true majority (e.g. 2-of-3, 3-of-5)                        |
 | Timelock delay        | 24–48h in guarded beta; long enough for users to exit        |
+| Timelock grace period | Fixed on-chain at `GRACE_PERIOD` (14 days) after `readyAt`; a confirmed op not executed within that window expires and must be re-proposed — cancel stale ops explicitly rather than relying on expiry as the primary control |
 | Guardian              | A separate hot key (or 1-of-n Safe) for fast incident pause  |
 | `confirmationGrace`   | A few hours; must exceed worst-case LayerZero delivery time. Hard-capped at `MAX_CONFIRMATION_GRACE` (7 days) |
 
@@ -169,6 +170,15 @@ Configure the LayerZero send/receive libraries and the DVN set per chain
 Use the timelock four-step flow from §4.3 with the appropriate calldata, e.g.
 `cast calldata "setConfirmationGrace(uint256)" 7200`. The change is public the
 moment it is proposed and only takes effect after the delay.
+
+**Always use `value == 0` for these ops.** `execute` is `payable` and forwards
+`value` verbatim to the target, but none of the escrow's owner-only setters
+(`setPeer`, `setConfirmationGrace`, `setGuardian`, `setPaused`,
+`transferOwnership`) are payable. Attaching a non-zero `value` to one of these
+proposals makes the call revert (`CallFailed`) only after the full
+propose → confirm → delay window has elapsed — the entire timelock cycle is
+wasted. `value` exists for targets that are genuinely payable; double-check the
+target accepts ETH before proposing anything other than `0`.
 
 ### Emergency halt
 
@@ -205,3 +215,10 @@ address and whose calldata is the config call, then run the standard flow.
 | Compromised guardian key           | Timelock `setGuardian(new)`                   | Treat protocol as still safe (guardian can't move funds) |
 | Compromised single timelock owner  | Timelock `removeOwner` + `addOwner` (threshold protects you below M) | Audit all pending operations, `cancel` any unknown ones |
 | Stuck/expired intent               | Anyone calls `cancelExpired` / `cancel_expired_intent` after the window | None — permissionless                      |
+
+`PerihelionTimelock.cancel` is deliberately 1-of-N (any single owner, not a
+threshold) — see [the threat matrix](./TECHNICAL-ARCHITECTURE.md#61-detailed-mitigations-for-high-impact-attacks)
+for the trade-off. In practice this means a dissenting owner can repeatedly
+cancel an operation the rest of the multisig wants; if that happens, treat it
+as an owner-coordination problem (escalate off-chain, or remove the owner via
+governance) rather than a contract bug.

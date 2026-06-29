@@ -16,7 +16,16 @@ use crate::types::{
 /// Encode a `FillConfirmed` payload (90 bytes):
 /// `version(1) | type(1) | intent_hash(32) | solver_evm(32) | amount(16) | ledger(8)`.
 ///
-/// ## `amount` field — informational only
+/// ## Field authority
+///
+/// | Field         | Consumer   | Notes |
+/// |---------------|------------|-------|
+/// | `intent_hash` | EVM escrow | Identifies the lock to release. |
+/// | `solver_evm`  | EVM escrow | Payout destination (may differ from locking solver key). |
+/// | `fill_amount` | Off-chain  | Stellar-side delivery amount — **informational only**. |
+/// | `fill_ledger` | Off-chain  | Stellar ledger sequence — **informational only**. |
+///
+/// ## `fill_amount` field — informational only
 ///
 /// The `fill_amount` encoded here is the Stellar-side delivery amount, carried
 /// for off-chain observability (explorer display, solver accounting). It does
@@ -24,9 +33,26 @@ use crate::types::{
 /// releases `l.amount` — the measured-delta locked amount — regardless of this
 /// field. That is the correct and intentional design: the source-chain escrow
 /// already holds the exact value to release, so re-trusting a Stellar-declared
-/// amount would be redundant and would open a griefing vector. The field exists
-/// so that off-chain tooling can reconcile the Stellar fill with the EVM payout
-/// without a separate RPC call; it must never be used to gate or size the release.
+/// amount would be redundant and would open a griefing vector. The field is
+/// decoded and emitted in the EVM `Released` event so that off-chain tooling can
+/// reconcile the Stellar fill with the EVM payout without a separate RPC call;
+/// it must never be used to gate or size the release.
+///
+/// ## `fill_ledger` field — u32 → u64 widening
+///
+/// Stellar ledger sequence numbers are `u32` (`env.ledger().sequence()`). The
+/// wire format encodes them as `u64` (8 bytes, big-endian) for two reasons:
+///
+/// 1. **Future-proofing**: Stellar's ledger counter will overflow a `u32` in
+///    roughly 136 years at current rates. Encoding as `u64` on the wire today
+///    costs 4 extra bytes per message and avoids a breaking wire-format change
+///    when the Stellar runtime eventually widens the type.
+/// 2. **Symmetry**: The EVM side reads the field as `uint64`, so the wire type
+///    matches the receiver's native integer width without sign-extension risk.
+///
+/// The widening is lossless: `fill_ledger as u64` preserves the exact value.
+/// The field is decoded and emitted in the EVM `Released` event for dispute
+/// resolution and audit; it does not affect fund movement.
 pub fn encode_fill_confirmed(
     env: &Env,
     intent_hash: &BytesN<32>,
@@ -46,6 +72,8 @@ pub fn encode_fill_confirmed(
         env,
         &(fill_amount as u128).to_be_bytes(),
     ));
+    // Widen u32 ledger sequence to u64 for the wire format. Lossless cast;
+    // rationale in the doc-comment above (future-proofing + EVM symmetry).
     b.append(&Bytes::from_array(env, &(fill_ledger as u64).to_be_bytes()));
     b
 }

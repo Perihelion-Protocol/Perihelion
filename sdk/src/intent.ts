@@ -51,6 +51,19 @@ export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
   Partial<Pick<Intent, "nonce" | "preferredSolver">>;
 
 /**
+ * Maximum byte length of `Intent.destination`. A Stellar strkey (G.../C...) is
+ * exactly 56 characters. Matches `PerihelionEscrow.MAX_DESTINATION_LEN`.
+ */
+export const MAX_DESTINATION_LEN = 56;
+
+/**
+ * Maximum byte length of `Intent.destAsset`. The longest valid form is
+ * `<CODE>:<ISSUER>` (12 + 1 + 56 = 69 bytes); `"native"` is 6 bytes.
+ * Matches `PerihelionEscrow.MAX_DEST_ASSET_LEN`.
+ */
+export const MAX_DEST_ASSET_LEN = 69;
+
+/**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
  * messaging fee makes the intent unprofitable to fill. Override via {@link BuildOptions.minNotional}.
  * Default: $10 USD equivalent.
