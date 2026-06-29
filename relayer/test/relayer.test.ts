@@ -75,3 +75,39 @@ test("skips messages already delivered (replay guard)", async () => {
   const results = await relayer.tick();
   assert.equal(results[0]?.delivered, false);
 });
+
+test("a delivery failure does not advance the cursor past the failed message, and it is retried", async () => {
+  const config = { ...loadConfig(), confirmations: 0 };
+  const watcher: SourceWatcher = {
+    async poll(fromBlock) {
+      void fromBlock;
+      return { messages: [message(10), message(11)], head: 11 };
+    },
+  };
+  let attempts = 0;
+  const delivered: string[] = [];
+  const delivery: DestinationDelivery = {
+    async deliver(p) {
+      if (p.message.intentHash === message(10).message.intentHash) {
+        attempts++;
+        if (attempts === 1) throw new Error("network blip");
+      }
+      delivered.push(p.message.intentHash);
+      return "0xdst";
+    },
+    async isDelivered() {
+      return false;
+    },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent);
+
+  const first = await relayer.tick();
+  assert.equal(first.find((r) => r.intentHash === message(10).message.intentHash)?.delivered, false);
+  // Block 11 still delivered even though block 10 failed.
+  assert.ok(delivered.includes(message(11).message.intentHash));
+
+  const second = await relayer.tick();
+  assert.equal(second.find((r) => r.intentHash === message(10).message.intentHash)?.delivered, true);
+  assert.equal(delivered.filter((h) => h === message(10).message.intentHash).length, 1);
+});
