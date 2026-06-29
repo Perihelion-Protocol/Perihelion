@@ -994,3 +994,146 @@ fn cancel_intent_when_locked_emits_event() {
     );
     assert!(s.client.is_cancelled(&h));
 }
+
+// --- Issue #57: Amount boundary conformance vectors --------------------------
+//
+// These tests assert the boundary values documented in docs/intent-spec.md
+// §Amount Field Specification:
+//
+//   • i128::MAX is the maximum valid Soroban amount (fill_amount, min_dest_amount).
+//   • Amounts <= 0 are rejected at fill time and at registration time.
+//   • The sign boundary (i128::MAX + 1 as u128 would be negative as i128) is
+//     rejected because on_fill_instruction checks min_dest_amount <= 0 and
+//     fill_intent checks fill_amount <= 0.
+//   • The 16-byte wire field carries amounts as big-endian u128; the encoder
+//     performs a non-negative i128 -> u128 widening that is safe for all valid
+//     amounts.
+
+/// i128::MAX fills successfully (maximum valid amount).
+#[test]
+fn amount_boundary_i128_max_fills() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let max_amount: i128 = i128::MAX;
+    s.asset_admin.mint(&solver, &max_amount);
+
+    let h = hash(&s.env, 0xA1);
+    register_intent(&s, &h, &recipient, max_amount, 5_000, 1, None);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &max_amount, &0);
+
+    let tok = token::TokenClient::new(&s.env, &s.asset);
+    assert_eq!(tok.balance(&recipient), max_amount);
+    assert!(s.client.is_settled(&h));
+}
+
+/// fill_amount = 1 is the minimum accepted value (zero-plus-one boundary).
+#[test]
+fn amount_boundary_fill_amount_one() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000);
+
+    let h = hash(&s.env, 0xA2);
+    register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &1, &0);
+    assert!(s.client.is_settled(&h));
+}
+
+/// fill_amount = 0 is rejected (zero boundary).
+#[test]
+#[should_panic(expected = "Error(Contract, #145)")] // InvalidAmount
+fn amount_boundary_fill_amount_zero_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000);
+
+    let h = hash(&s.env, 0xA3);
+    register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &0, &0);
+}
+
+/// fill_amount < 0 is rejected (negative boundary).
+#[test]
+#[should_panic(expected = "Error(Contract, #145)")] // InvalidAmount
+fn amount_boundary_fill_amount_negative_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000);
+
+    let h = hash(&s.env, 0xA4);
+    register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &-1, &0);
+}
+
+/// min_dest_amount = 0 is rejected at registration (zero boundary).
+#[test]
+#[should_panic(expected = "Error(Contract, #145)")] // InvalidAmount
+fn amount_boundary_min_dest_amount_zero_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    // min = 0 must be rejected by on_fill_instruction
+    register_intent(&s, &hash(&s.env, 0xA5), &recipient, 0, 5_000, 1, None);
+}
+
+/// min_dest_amount < 0 is rejected at registration (negative boundary).
+#[test]
+#[should_panic(expected = "Error(Contract, #145)")] // InvalidAmount
+fn amount_boundary_min_dest_amount_negative_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    register_intent(&s, &hash(&s.env, 0xA6), &recipient, -1, 5_000, 1, None);
+}
+
+/// Wire encoding of i128::MAX round-trips through encode_fill_confirmed without
+/// loss. The 16-byte big-endian u128 field must encode the maximum valid amount.
+#[test]
+fn amount_boundary_i128_max_wire_encoding() {
+    let env = Env::default();
+    let h = BytesN::from_array(&env, &[0x11u8; 32]);
+    let solver = BytesN::from_array(&env, &[0xAAu8; 32]);
+    let max: i128 = i128::MAX;
+
+    let b = crate::messages::encode_fill_confirmed(&env, &h, &solver, max, 0);
+    assert_eq!(b.len(), 90);
+
+    // Decode the 16-byte amount field at offset 66.
+    let mut amount_bytes = [0u8; 16];
+    for i in 0..16u32 {
+        amount_bytes[i as usize] = b.get(66 + i).unwrap();
+    }
+    let decoded = u128::from_be_bytes(amount_bytes);
+    // i128::MAX as u128 is 170141183460469231731687303715884105727.
+    assert_eq!(decoded, max as u128);
+    // Verify the high bit is 0 (distinguishes i128::MAX from the sign boundary).
+    assert_eq!(amount_bytes[0] & 0x80, 0x00);
+}
+
+/// Wire encoding of amount = 1 (minimum valid).
+#[test]
+fn amount_boundary_one_wire_encoding() {
+    let env = Env::default();
+    let h = BytesN::from_array(&env, &[0x11u8; 32]);
+    let solver = BytesN::from_array(&env, &[0xAAu8; 32]);
+
+    let b = crate::messages::encode_fill_confirmed(&env, &h, &solver, 1, 0);
+    assert_eq!(b.len(), 90);
+
+    let mut amount_bytes = [0u8; 16];
+    for i in 0..16u32 {
+        amount_bytes[i as usize] = b.get(66 + i).unwrap();
+    }
+    let decoded = u128::from_be_bytes(amount_bytes);
+    assert_eq!(decoded, 1u128);
+}
