@@ -25,12 +25,23 @@ npm run dev
 ## How it works
 
 ```
-poll mempool ──► verify signature ──► evaluate() profitability ──► fill()
-                                            │                        │
-                                  margin >= threshold?      lock EVM escrow +
-                                  asset supported?          release on Stellar
-                                  before deadline?
+poll mempool ──► validate hash ──► verify signature ──► evaluate() profitability ──► fill()
+                      │                   │                    │                        │
+                 hash matches         (cached)        margin >= threshold?      lock EVM escrow +
+                 recomputed?                          asset supported?          release on Stellar
+                                                      before deadline?
 ```
+
+### Performance optimizations
+
+- **Signature verification caching**: Each intent's signature is verified at most once,
+  with results cached by intent hash. This prevents redundant ECDSA recovery operations
+  when intents are reconsidered (e.g., after retry/reconsideration logic).
+- **Hash validation**: Before verification, the solver independently recomputes the
+  intent hash and compares it to the mempool's returned hash, detecting any
+  mempool-trust issues early.
+- **Bounded LRU cache**: The verification cache uses LRU eviction with a configurable
+  size limit (default 10,000 entries) to prevent unbounded memory growth.
 
 | Module        | Responsibility                                                |
 | ------------- | ------------------------------------------------------------- |
