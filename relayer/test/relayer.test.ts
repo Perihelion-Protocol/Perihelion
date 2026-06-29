@@ -75,3 +75,32 @@ test("skips messages already delivered (replay guard)", async () => {
   const results = await relayer.tick();
   assert.equal(results[0]?.delivered, false);
 });
+
+test("a chain shorter than the confirmation depth relays nothing and keeps a non-negative cursor", async () => {
+  const config = { ...loadConfig(), confirmations: 6 };
+  const polledFrom: number[] = [];
+  const watcher: SourceWatcher = {
+    async poll(fromBlock) {
+      polledFrom.push(fromBlock);
+      // head=3 < confirmations=6: nothing can be final yet.
+      return { messages: [message(1), message(2)], head: 3 };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      throw new Error("should not deliver");
+    },
+    async isDelivered() {
+      return false;
+    },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent);
+  const results = await relayer.tick();
+  await relayer.tick();
+
+  assert.deepEqual(results, []);
+  // Cursor never went negative across ticks (re-polled from the same non-negative point).
+  assert.ok(polledFrom.every((b) => b >= 0));
+  assert.deepEqual(polledFrom, [0, 0]);
+});

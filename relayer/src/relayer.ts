@@ -15,7 +15,12 @@ import type { PendingMessage, RelayResult } from "./types.js";
 
 /** Observes bridge messages emitted on the source chain. */
 export interface SourceWatcher {
-  /** Return messages emitted since `fromBlock` (inclusive). */
+  /**
+   * Return messages emitted since `fromBlock` (inclusive). `head` must be the
+   * source chain's latest block height — it may be smaller than the
+   * configured confirmation depth (e.g. a fresh local/test chain), which
+   * {@link Relayer.tick} handles by relaying nothing that tick.
+   */
   poll(fromBlock: number): Promise<{ messages: PendingMessage[]; head: number }>;
 }
 
@@ -71,8 +76,15 @@ export class Relayer {
   /** One watch-confirm-deliver cycle. Exposed for testing. */
   async tick(): Promise<RelayResult[]> {
     const { messages, head } = await this.watcher.poll(this.cursor);
-    const confirmedHead = head - this.config.confirmations;
     const results: RelayResult[] = [];
+
+    // `head` is assumed to be the source chain's latest block height. If the
+    // chain has fewer blocks than the required confirmation depth (a fresh
+    // local/test network, or a watcher reporting a small head), nothing can
+    // be final yet — bail out before the subtraction below goes negative.
+    if (head < this.config.confirmations) return results;
+
+    const confirmedHead = Math.max(0, head - this.config.confirmations);
 
     for (const pending of messages) {
       if (pending.srcBlock > confirmedHead) continue; // not yet final
