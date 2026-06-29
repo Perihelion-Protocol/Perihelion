@@ -85,6 +85,20 @@ contract PerihelionTimelockTest is Test {
         new PerihelionTimelock(owners, 1, DELAY);
     }
 
+    function test_RevertWhen_ConstructorDelayBelowMin() public {
+        address[] memory owners = new address[](1);
+        owners[0] = a;
+        vm.expectRevert(PerihelionTimelock.InvalidConfig.selector);
+        new PerihelionTimelock(owners, 1, tl.MIN_DELAY() - 1);
+    }
+
+    function test_RevertWhen_ConstructorDelayAboveMax() public {
+        address[] memory owners = new address[](1);
+        owners[0] = a;
+        vm.expectRevert(PerihelionTimelock.InvalidConfig.selector);
+        new PerihelionTimelock(owners, 1, tl.MAX_DELAY() + 1);
+    }
+
     // --- Happy path ----------------------------------------------------------
 
     function test_ProposeConfirmDelayExecute() public {
@@ -282,6 +296,46 @@ contract PerihelionTimelockTest is Test {
 
         assertTrue(tl.isOwner(stranger));
         assertEq(tl.ownerCount(), 4);
+    }
+
+    function test_RevertWhen_SetDelayBelowMin() public {
+        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, tl.MIN_DELAY() - 1);
+        bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.CallFailed.selector); // inner InvalidConfig
+        tl.execute(address(tl), 0, data, SALT);
+    }
+
+    function test_RevertWhen_SetDelayAboveMax() public {
+        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, tl.MAX_DELAY() + 1);
+        bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.CallFailed.selector); // inner InvalidConfig
+        tl.execute(address(tl), 0, data, SALT);
+    }
+
+    function test_SetDelayAtMinBoundarySucceeds() public {
+        uint256 newDelay = tl.MIN_DELAY();
+        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, newDelay);
+        bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(tl), 0, data, SALT);
+        assertEq(tl.delay(), newDelay);
     }
 
     function test_RevertWhen_RemoveOwnerBreaksThreshold() public {

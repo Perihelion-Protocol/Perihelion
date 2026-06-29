@@ -126,6 +126,70 @@ contract FalseReturningERC20 is IERC20 {
     }
 }
 
+/// @dev RevertOnZeroERC20: reverts on transfer/transferFrom when amount == 0,
+///      mimicking tokens that reject zero-value transfers (e.g., some USDT-like
+///      implementations on certain networks).
+contract RevertOnZeroERC20 is IERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function _checkNonZero(uint256 amount) private pure {
+        if (amount == 0) revert("zero transfer");
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        _checkNonZero(amount);
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        _checkNonZero(amount);
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+/// @dev Token that returns false on transfer but succeeds on transferFrom.
+///      Tests the release/refund path specifically — lock via transferFrom works,
+///      but the subsequent release/refund via transfer fails.
+contract ReleaseFalseReturningERC20 is IERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address, uint256) external returns (bool) {
+        return false; // Always reject on transfer (release/refund)
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
 /// @dev Records the last outbound LayerZero send and can replay inbound messages
 ///      back into the escrow as if it were the canonical endpoint.
 contract MockEndpoint is ILayerZeroEndpoint {
@@ -209,6 +273,8 @@ contract PerihelionEscrowTest is Test {
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferCancelled(address indexed previousOwner);
+    event Skimmed(address indexed token, address indexed to, uint256 amount);
 
     function setUp() public {
         endpoint = new MockEndpoint();
@@ -1108,5 +1174,490 @@ contract PerihelionEscrowTest is Test {
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig);
         assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    // --- Skim surplus recovery -----------------------------------------------
+
+    function test_SkimRecoversSurplus() public {
+        uint256 surplus = 42;
+        token.mint(address(escrow), surplus);
+        assertEq(token.balanceOf(address(escrow)), surplus);
+
+        vm.expectEmit(true, true, false, true);
+        emit Skimmed(address(token), owner, surplus);
+        escrow.skim(address(token), owner, surplus);
+        assertEq(token.balanceOf(owner), surplus);
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
+    function test_RevertWhen_SkimToZeroAddress() public {
+        vm.expectRevert(PerihelionEscrow.ZeroAddress.selector);
+        escrow.skim(address(token), address(0), 100);
+    }
+
+    function test_RevertWhen_SkimNotOwner() public {
+        uint256 surplus = 42;
+        token.mint(address(escrow), surplus);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.skim(address(token), solver, surplus);
+    }
+
+    // --- CancelOwnershipTransfer -----------------------------------------------
+
+    function test_CancelOwnershipTransfer() public {
+        escrow.transferOwnership(solver);
+        assertEq(escrow.pendingOwner(), solver);
+
+        vm.expectEmit(true, true, false, true);
+        emit OwnershipTransferCancelled(owner);
+        escrow.cancelOwnershipTransfer();
+        assertEq(escrow.pendingOwner(), address(0));
+    }
+
+    function test_RevertWhen_CancelWithoutPending() public {
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.cancelOwnershipTransfer();
+    }
+
+    function test_RevertWhen_CancelNotOwner() public {
+        escrow.transferOwnership(solver);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.cancelOwnershipTransfer();
+    }
+
+    // --- Weird ERC-20 test matrix: release/refund paths ----------------------
+    //
+    // The lock path is tested above with NoReturnERC20, FalseReturningERC20, and
+    // FeeERC20. Here we verify that the release and refund paths also handle
+    // these token shapes correctly.
+
+    function test_ReleaseWithNoReturnToken() public {
+        NoReturnERC20 noReturn = new NoReturnERC20();
+        noReturn.mint(user, 1_000_000);
+        vm.prank(user);
+        noReturn.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(noReturn);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(noReturn.balanceOf(address(escrow)), 100_000);
+
+        _confirm(h, solver, 1);
+        assertEq(noReturn.balanceOf(solver), 100_000);
+        assertEq(noReturn.balanceOf(address(escrow)), 0);
+    }
+
+    function test_RefundWithNoReturnToken() public {
+        NoReturnERC20 noReturn = new NoReturnERC20();
+        noReturn.mint(user, 1_000_000);
+        vm.prank(user);
+        noReturn.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(noReturn);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        _cancel(h, 1);
+        assertEq(noReturn.balanceOf(user), 1_000_000);
+    }
+
+    function test_RevertWhen_ReleaseWithFalseReturningToken() public {
+        ReleaseFalseReturningERC20 falseToken = new ReleaseFalseReturningERC20();
+        falseToken.mint(user, 1_000_000);
+        vm.prank(user);
+        falseToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(falseToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(falseToken.balanceOf(address(escrow)), 100_000);
+
+        vm.expectRevert(PerihelionEscrow.TransferFailed.selector);
+        _confirm(h, solver, 1);
+    }
+
+    function test_RevertWhen_RefundWithFalseReturningToken() public {
+        ReleaseFalseReturningERC20 falseToken = new ReleaseFalseReturningERC20();
+        falseToken.mint(user, 1_000_000);
+        vm.prank(user);
+        falseToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(falseToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        vm.expectRevert(PerihelionEscrow.TransferFailed.selector);
+        _cancel(h, 1);
+    }
+
+    function test_LockWithRevertOnZeroToken() public {
+        RevertOnZeroERC20 rzToken = new RevertOnZeroERC20();
+        rzToken.mint(user, 1_000_000);
+        vm.prank(user);
+        rzToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(rzToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(rzToken.balanceOf(address(escrow)), 100_000);
+        (,,, uint256 lAmount,,,) = escrow.locks(h);
+        assertEq(lAmount, 100_000);
+    }
+
+    function test_ReleaseWithRevertOnZeroToken() public {
+        RevertOnZeroERC20 rzToken = new RevertOnZeroERC20();
+        rzToken.mint(user, 1_000_000);
+        vm.prank(user);
+        rzToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(rzToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        _confirm(h, solver, 1);
+        assertEq(rzToken.balanceOf(solver), 100_000);
+    }
+
+    /// @dev Fee-on-transfer applies on both lock and release transfers: the
+    ///      fee is taken from the transferred amount each time. With a 1% fee,
+    ///      locking 100_000 delivers 99_000 to the escrow, and releasing 99_000
+    ///      delivers 99_000 - 990 = 98_010 to the solver.
+    function test_ReleaseWithFeeOnTransferToken() public {
+        FeeERC20 feeToken = new FeeERC20(100); // 1% fee
+        feeToken.mint(user, 1_000_000);
+        vm.prank(user);
+        feeToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(feeToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(feeToken.balanceOf(address(escrow)), 99_000);
+
+        _confirm(h, solver, 1);
+        assertEq(feeToken.balanceOf(solver), 98_010);
+    }
+
+    // --- Nonce bitmap: out-of-order delivery --------------------------------
+
+    /// @notice Under LayerZero lazy-nonce model, messages can be delivered out
+    ///         of order. A lower nonce arriving after a higher one must be
+    ///         accepted if not yet consumed. This test verifies that nonce 5,
+    ///         then nonce 3 (out of order), then nonce 5 again (replay) behave
+    ///         correctly.
+    function test_NonceOutOfOrderDelivery() public {
+        bytes32 h = _lock();
+
+        // Deliver nonce 5 first.
+        bytes memory confirm5 = _fillConfirmed(h, solver);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 5, confirm5);
+        assertEq(token.balanceOf(solver), 100_000);
+
+        // Lock another intent for the next test cycle.
+        token.mint(user, 1_000_000);
+        vm.prank(user);
+        token.approve(address(escrow), type(uint256).max);
+        PerihelionEscrow.Intent memory intent2 = _intent();
+        intent2.nonce = 2;
+        bytes memory sig2 = _sign(intent2);
+        bytes32 h2 = escrow.hashIntent(intent2);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent2, sig2);
+
+        // Deliver nonce 3 (out of order, after 5) — must succeed.
+        bytes memory cancel3 = _cancelIntent(h2);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 3, cancel3);
+        (, , , , , , bool refunded) = escrow.locks(h2);
+        assertTrue(refunded);
+
+        // Deliver nonce 5 again (replay) — must be rejected.
+        bytes memory cancel5 = _cancelIntent(h);
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 5, cancel5);
+    }
+
+    /// @notice Nonce 0 is always rejected (default value, never legitimate).
+    function test_RevertWhen_NonceZero() public {
+        bytes32 h = _lock();
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 0, _fillConfirmed(h, solver));
+    }
+}
+
+// =============================================================================
+// #32: Malicious-token reentrancy regression tests
+// =============================================================================
+//
+// A reentrant token attempts to call lock / cancelExpired / lzReceive from
+// inside its transfer or transferFrom callback. All re-entries must revert
+// with Reentrancy(), proving the contract-wide mutex (I-RE invariant) holds
+// across every cross-function path.
+// =============================================================================
+
+/// @dev ERC-20 whose transfer() re-enters a configured target on the escrow.
+///      The escrow calls transfer() when releasing/refunding funds.
+contract ReentrantToken is IERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    enum AttackTarget { Lock, CancelExpired, LzReceive }
+
+    PerihelionEscrow public escrow;
+    AttackTarget public target;
+    // payload for the re-entry call
+    bytes public attackPayload;
+    bool public attacking;
+
+    function setEscrow(address _escrow) external { escrow = PerihelionEscrow(_escrow); }
+    function setTarget(AttackTarget _t) external { target = _t; }
+    function setPayload(bytes calldata p) external { attackPayload = p; }
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        _maybeAttack();
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        _maybeAttack();
+        return true;
+    }
+
+    function _maybeAttack() internal {
+        if (!attacking || attackPayload.length == 0) return;
+        attacking = false; // avoid infinite loop
+        if (target == AttackTarget.Lock) {
+            (bool ok,) = address(escrow).call{ value: 0.01 ether }(attackPayload);
+            require(!ok, "ReentrantToken: lock reentry should have failed");
+        } else if (target == AttackTarget.CancelExpired) {
+            (bool ok,) = address(escrow).call(attackPayload);
+            require(!ok, "ReentrantToken: cancelExpired reentry should have failed");
+        } else {
+            (bool ok,) = address(escrow).call(attackPayload);
+            require(!ok, "ReentrantToken: lzReceive reentry should have failed");
+        }
+    }
+}
+
+contract MaliciousTokenReentrancyTest is Test {
+    PerihelionEscrow internal escrow;
+    ReentrantToken internal rtoken;
+    MockEndpoint internal endpoint;
+
+    uint32 internal constant STELLAR_EID = 30_316;
+    bytes32 internal constant STELLAR_PEER = bytes32(uint256(0x57E11A));
+
+    address internal solver = address(0x5012E5);
+    uint256 internal userPk = 0xDEAD;
+    address internal user;
+
+    bytes1 internal constant V = 0x01;
+    bytes1 internal constant T_FILL_CONFIRMED = 0x02;
+    bytes1 internal constant T_CANCEL_INTENT = 0x03;
+
+    function setUp() public {
+        endpoint = new MockEndpoint();
+        escrow = new PerihelionEscrow(address(endpoint), STELLAR_EID);
+        escrow.setPeer(STELLAR_PEER);
+
+        rtoken = new ReentrantToken();
+        rtoken.setEscrow(address(escrow));
+
+        user = vm.addr(userPk);
+        rtoken.mint(user, 1_000_000);
+        vm.prank(user);
+        rtoken.approve(address(escrow), type(uint256).max);
+
+        vm.deal(solver, 10 ether);
+        vm.deal(address(this), 10 ether);
+    }
+
+    function _intent() internal view returns (PerihelionEscrow.Intent memory) {
+        return PerihelionEscrow.Intent({
+            user: user,
+            destination: "GUSERSTELLAR",
+            sourceChainId: block.chainid,
+            sourceAsset: address(rtoken),
+            sourceAmount: 100_000,
+            destAsset: "USDC:GA5Z",
+            minDestAmount: 990_000,
+            deadline: block.timestamp + 600,
+            nonce: 1,
+            preferredSolver: address(0)
+        });
+    }
+
+    function _sign(PerihelionEscrow.Intent memory intent) internal view returns (bytes memory) {
+        bytes32 digest = escrow.hashIntent(intent);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _fillConfirmed(bytes32 intentHash, address solverEvm)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encodePacked(
+            V, T_FILL_CONFIRMED,
+            intentHash,
+            bytes32(uint256(uint160(solverEvm))),
+            uint128(100_000),
+            uint64(12_345)
+        );
+    }
+
+    // Lock the intent, then trigger a FillConfirmed so transfer() fires and attacks.
+    function _lockAndFillConfirm(ReentrantToken.AttackTarget target, bytes memory payload)
+        internal
+        returns (bytes32 h)
+    {
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+        h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        rtoken.setTarget(target);
+        rtoken.setPayload(payload);
+        rtoken.attacking = true;
+
+        // deliver FillConfirmed — transfer() fires → re-entry attempt → should revert
+        endpoint.deliver(
+            escrow, STELLAR_EID, STELLAR_PEER, 1,
+            _fillConfirmed(h, solver)
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // transfer() re-entry during FillConfirmed release → tries to re-enter lock
+    // -------------------------------------------------------------------------
+    function test_Reentry_FillConfirmed_TriesLock() public {
+        PerihelionEscrow.Intent memory intent2 = _intent();
+        intent2.nonce = 2;
+        bytes memory lockPayload = abi.encodeWithSelector(
+            PerihelionEscrow.lock.selector, intent2, _sign(intent2)
+        );
+
+        // _lockAndFillConfirm must succeed (attacker's re-entry into lock reverted internally)
+        _lockAndFillConfirm(ReentrantToken.AttackTarget.Lock, lockPayload);
+        // Solver received funds → first fill went through cleanly
+        assertEq(rtoken.balanceOf(solver), 100_000);
+    }
+
+    // transfer() re-entry during FillConfirmed release → tries to re-enter lzReceive
+    function test_Reentry_FillConfirmed_TriesLzReceive() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        bytes memory lzPayload = abi.encodeWithSelector(
+            PerihelionEscrow.lzReceive.selector,
+            Origin({ srcEid: STELLAR_EID, sender: STELLAR_PEER, nonce: 2 }),
+            bytes32(0),
+            _fillConfirmed(h, solver),
+            address(0),
+            ""
+        );
+
+        rtoken.setTarget(ReentrantToken.AttackTarget.LzReceive);
+        rtoken.setPayload(lzPayload);
+        rtoken.attacking = true;
+
+        // FillConfirmed delivery succeeds; re-entry into lzReceive is blocked
+        vm.prank(address(endpoint));
+        escrow.lzReceive(
+            Origin({ srcEid: STELLAR_EID, sender: STELLAR_PEER, nonce: 1 }),
+            bytes32(0),
+            _fillConfirmed(h, solver),
+            address(0),
+            ""
+        );
+        assertEq(rtoken.balanceOf(solver), 100_000);
+    }
+
+    // transfer() re-entry during cancelExpired refund → tries to re-enter cancelExpired again
+    function test_Reentry_CancelExpired_TriesCancelExpiredAgain() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        vm.warp(intent.deadline + escrow.confirmationGrace());
+
+        bytes memory cancelPayload = abi.encodeWithSelector(
+            PerihelionEscrow.cancelExpired.selector, h
+        );
+        rtoken.setTarget(ReentrantToken.AttackTarget.CancelExpired);
+        rtoken.setPayload(cancelPayload);
+        rtoken.attacking = true;
+
+        // cancelExpired succeeds; re-entry into cancelExpired is blocked by mutex
+        escrow.cancelExpired(h);
+        assertEq(rtoken.balanceOf(user), 1_000_000); // user fully refunded once
+    }
+
+    // transferFrom() re-entry during lock pull → tries to re-enter lock with same intent
+    function test_Reentry_Lock_TriesLockAgain() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        bytes memory lockPayload = abi.encodeWithSelector(
+            PerihelionEscrow.lock.selector, intent, sig
+        );
+        rtoken.setTarget(ReentrantToken.AttackTarget.Lock);
+        rtoken.setPayload(lockPayload);
+        rtoken.attacking = true;
+
+        // First lock succeeds; re-entry into lock is blocked by mutex
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(rtoken.balanceOf(address(escrow)), 100_000);
     }
 }

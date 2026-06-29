@@ -20,6 +20,18 @@ import {
 /// @dev The EIP-712 domain/type is byte-identical to `@perihelion/sdk` and the
 ///      Soroban side (Invariant I5). Inbound FillConfirmed/CancelIntent use the
 ///      fixed binary layout the Soroban contract emits (architecture spec §3.3).
+///
+///      ## Token compatibility
+///      The measured-delta accounting at lock time handles fee-on-transfer tokens
+///      correctly by recording the exact amount received. However, this contract
+///      is NOT compatible with rebasing tokens (e.g., stETH) or tokens whose
+///      balance changes after deposit (e.g., deflationary supply adjustments).
+///      For such tokens, the balance attributable to a lock can drift between
+///      lock and release, potentially causing a release/refund to fail
+///      (insufficient balance) or succeed by drawing on another lock's fungible
+///      balance. The `skim` function recovers surplus that cannot be attributed
+///      to any active lock (e.g., from a rebase-up). Rebase-down scenarios can
+///      result in stuck funds — operators should gate listed assets accordingly.
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
@@ -40,7 +52,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         address solver;
         address user;
         address asset;
-        uint256 amount; // measured-delta amount actually held
+        /// @dev Measured-delta amount received at lock time (fee-on-transfer safe).
+        ///      REBASING TOKENS ARE INCOMPATIBLE: the balance attributable to this
+        ///      lock can drift post-lock due to supply adjustments. See contract
+        ///      level NatSpec for details.
+        uint256 amount;
         uint256 deadline;
         bool released;
         bool refunded;
@@ -67,20 +83,18 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Cancel reason codes (shared taxonomy with the Soroban side) --------
 
-    /// @dev Cross-chain cancel: intent deadline elapsed on Stellar.
+    /// @dev Known cancel reason codes, mirroring the Soroban side.
     uint8 private constant CANCEL_REASON_EXPIRED       = 0x00;
-    /// @dev Cross-chain cancel: admin-initiated refund.
     uint8 private constant CANCEL_REASON_ADMIN         = 0x01;
-    /// @dev Cross-chain cancel: fill was deemed invalid.
     uint8 private constant CANCEL_REASON_INVALID       = 0x02;
     /// @dev Local refund fallback: timed out waiting for cross-chain confirmation.
     ///      This value (0xFF) is EVM-only; it does not appear in Soroban messages.
     uint8 private constant CANCEL_REASON_LOCAL_TIMEOUT = 0xFF;
 
-    bytes1 private constant PROTOCOL_VERSION = 0x01;
+    bytes1 private constant PROTOCOL_VERSION     = 0x01;
     bytes1 private constant MSG_FILL_INSTRUCTION = 0x01;
-    bytes1 private constant MSG_FILL_CONFIRMED = 0x02;
-    bytes1 private constant MSG_CANCEL_INTENT = 0x03;
+    bytes1 private constant MSG_FILL_CONFIRMED   = 0x02;
+    bytes1 private constant MSG_CANCEL_INTENT    = 0x03;
 
     /// @notice Upper bound on `confirmationGrace`, so a misconfigured admin can
     ///         never strand a user's local refund indefinitely.
@@ -91,11 +105,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         flight — which would refund the user after the solver has already
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
-
-    /// @dev Known cancel reason codes, mirroring the Soroban side.
-    uint8 private constant CANCEL_REASON_EXPIRED = 0x00;
-    uint8 private constant CANCEL_REASON_ADMIN   = 0x01;
-    uint8 private constant CANCEL_REASON_INVALID = 0x02;
 
     // --- Immutable / config --------------------------------------------------
 
@@ -129,9 +138,35 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice intentHash => escrow position.
     mapping(bytes32 => Lock) public locks;
-    /// @notice Lazy-nonce high-water mark per source endpoint id.
+    /// @notice Highest consumed nonce per source endpoint id. Used as a quick
+    ///         filtration — nonces at or below this are not necessarily consumed
+    ///         (out-of-order delivery may leave gaps), so the bitmap is the
+    ///         authoritative source. Off-chain monitors and the admin view should
+    ///         treat this as the low-water mark, not the exact set of consumed
+    ///         nonces.
     mapping(uint32 => uint64) public inboundNonce;
+    /// @notice Bitmap-based nonce tracking for unordered delivery (LayerZero
+    ///         lazy-nonce model). Each bit represents whether a specific nonce
+    ///         has been consumed: word index = nonce / 256, bit index = nonce % 256.
+    mapping(uint32 => mapping(uint256 => uint256)) private _inboundNonceBitmap;
 
+    // --- Reentrancy invariant (I-RE) -----------------------------------------
+    //
+    // Every externally-callable function that moves funds MUST carry the
+    // `nonReentrant` modifier. The full list is:
+    //
+    //   • lock            — pulls the user's token; dispatches FillInstruction.
+    //   • lzReceive       — releases or refunds via _onFillConfirmed / _onCancelIntent.
+    //   • cancelExpired   — refunds the user after the local-timeout window.
+    //
+    // Safety of the design rests on this mutex being contract-wide: while any
+    // one of these functions is executing, a re-entrant call to any other
+    // fund-moving function (e.g. a malicious token callback on transfer) will
+    // hit _reentrancy == 1 and revert with Reentrancy().
+    //
+    // This property is deliberately tested by MaliciousTokenReentrancyTest in
+    // the test suite (issue #32). If a new fund-moving function is added it MUST
+    // be added to this list and covered by a reentrancy regression test.
     uint256 private _reentrancy;
 
     // --- Events --------------------------------------------------------------
@@ -143,7 +178,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         address asset,
         uint256 amount
     );
-    event Released(bytes32 indexed intentHash, address indexed solver, uint256 amount);
+    /// @param fillAmount Stellar-side delivery amount (informational; the escrow releases
+    ///                   `l.amount`, not this value — see `_decodeFillConfirmed`).
+    /// @param fillLedger Stellar ledger sequence at which the fill was recorded
+    ///                   (informational; useful for off-chain dispute resolution and explorer display).
+    event Released(
+        bytes32 indexed intentHash,
+        address indexed solver,
+        uint256 amount,
+        uint128 fillAmount,
+        uint64  fillLedger
+    );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
@@ -151,6 +196,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferCancelled(address indexed previousOwner);
+    event Skimmed(address indexed token, address indexed to, uint256 amount);
 
     // --- Errors --------------------------------------------------------------
 
@@ -167,6 +214,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error TransferFailed();
     error NothingReceived();
     error MalformedPayload();
+    /// @dev Emitted when the payload version byte is not in the set of accepted versions.
+    ///      See architecture spec §3.3.1 for the versioning and upgrade-coordination policy.
+    error UnknownVersion();
     error UnknownMessageType();
     error StaleNonce();
     error NotOwner();
@@ -179,6 +229,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error FeeTooLow();
     error ZeroAddress();
     error SourceChainMismatch();
+    error InsufficientBalance();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -260,11 +311,21 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Begin a two-step ownership handover. `newOwner` must call
-    ///         {acceptOwnership} to take effect; pass `address(0)` to cancel a
-    ///         pending handover.
+    ///         {acceptOwnership} to take effect. To cancel a pending handover
+    ///         with a clear event, use {cancelOwnershipTransfer} instead of
+    ///         passing `address(0)`.
     function transferOwnership(address newOwner) external onlyOwner {
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /// @notice Cancel a pending ownership handover. Emits a distinct cancellation
+    ///         event so off-chain monitors can clearly distinguish a cancellation
+    ///         from a transfer-to-zero. Reverts if no handover is pending.
+    function cancelOwnershipTransfer() external onlyOwner {
+        if (pendingOwner == address(0)) revert NotOwner();
+        pendingOwner = address(0);
+        emit OwnershipTransferCancelled(owner);
     }
 
     /// @notice Complete a pending ownership handover. Callable only by the
@@ -275,6 +336,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         owner = pendingOwner;
         pendingOwner = address(0);
         emit OwnershipTransferred(previous, owner);
+    }
+
+    /// @notice Recover surplus tokens accidentally held by the contract (e.g., from
+    ///         rebasing tokens that increased in value, or direct transfers). This
+    ///         contract is NOT compatible with rebasing/deflationary tokens; this
+    ///         function is provided only to recover surplus that cannot be attributed
+    ///         to any active lock. Owner-only.
+    function skim(address token, address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        _safeTransfer(token, to, amount);
+        emit Skimmed(token, to, amount);
     }
 
     // --- Lock ----------------------------------------------------------------
@@ -355,10 +427,19 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ) external payable nonReentrant {
         if (msg.sender != address(endpoint)) revert NotEndpoint();
         if (origin.sender != stellarPeer) revert UntrustedPeer();
-        if (origin.nonce <= inboundNonce[origin.srcEid]) revert StaleNonce();
-        inboundNonce[origin.srcEid] = origin.nonce;
+        // Bitmap-based nonce tracking supports unordered delivery (LayerZero
+        // lazy-nonce model). A nonce is accepted exactly once regardless of
+        // delivery order. The high-water mark is updated opportunistically.
+        if (origin.nonce == 0 || _isNonceConsumed(origin.srcEid, origin.nonce)) {
+            revert StaleNonce();
+        }
+        _consumeNonce(origin.srcEid, origin.nonce);
 
-        if (message.length < 2 || message[0] != PROTOCOL_VERSION) revert MalformedPayload();
+        if (message.length < 2) revert MalformedPayload();
+        // Accept exactly PROTOCOL_VERSION (currently 0x01). During a version-bump
+        // transition window this check widens to accept the previous version as well
+        // (see architecture spec §3.3.1 for the rolling-cutover upgrade sequence).
+        if (message[0] != PROTOCOL_VERSION) revert UnknownVersion();
         bytes1 msgType = message[1];
         if (msgType == MSG_FILL_CONFIRMED) {
             _onFillConfirmed(message);
@@ -379,14 +460,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      authentication in `lzReceive` — only the trusted Stellar peer can supply
     ///      `solverEvm`, so an attacker cannot redirect funds to an arbitrary address.
     function _onFillConfirmed(bytes calldata message) internal {
-        (bytes32 intentHash, address solverEvm) = _decodeFillConfirmed(message);
+        (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger) =
+            _decodeFillConfirmed(message);
         Lock storage l = locks[intentHash];
         if (l.user == address(0)) revert NotLocked();
         if (l.released || l.refunded) revert AlreadyFinalized();
 
         l.released = true; // effect before interaction (race guard)
         _safeTransfer(l.asset, solverEvm, l.amount);
-        emit Released(intentHash, solverEvm, l.amount);
+        emit Released(intentHash, solverEvm, l.amount, fillAmount, fillLedger);
     }
 
     function _onCancelIntent(bytes calldata message) internal {
@@ -454,50 +536,91 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: codec -----------------------------------------------------
 
-    /// @dev FillInstruction body is ABI-encoded pending the final Soroban LayerZero
-    ///      ABI (the Stellar side decodes it at the adapter boundary). The header
-    ///      mirrors the shared 2-byte `version|type` framing.
-    function _encodeFillInstruction(bytes32 intentHash, Intent calldata intent, uint256 received)
+    /// @dev Encode a FillInstruction payload (158 bytes) using the fixed big-endian
+    ///      layout from architecture spec §3.3, matching the Soroban decoder byte-for-byte:
+    ///
+    ///      version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(32)
+    ///        | dest_asset(32) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
+    ///
+    ///      `intent.destination` and `intent.destAsset` are Stellar strkey bodies encoded
+    ///      as fixed 32-byte fields (right-padded with zeros if shorter).
+    ///      `intent.preferredSolver` is an EVM address left-padded to 32 bytes; all-zeros
+    ///      signals "open" (no preferred solver) on the Soroban side.
+    ///
+    ///      The `received` (locked amount) is NOT transmitted; Stellar determines the
+    ///      fill amount independently via the solver's `fill_intent` call.
+    function _encodeFillInstruction(bytes32 intentHash, Intent calldata intent, uint256 /*received*/)
         internal
         view
         returns (bytes memory)
     {
-        bytes memory body = abi.encode(
-            intentHash,
-            stellarEid,
-            intent.destination,
-            intent.destAsset,
-            received,
-            intent.minDestAmount,
-            intent.deadline,
-            intent.preferredSolver
+        // Encode destination and destAsset as fixed 32-byte fields.
+        bytes32 recipient;
+        bytes32 destAssetWord;
+        bytes memory destBytes = bytes(intent.destination);
+        bytes memory destAssetBytes = bytes(intent.destAsset);
+        // Copy up to 32 bytes; extra bytes are truncated (spec requires exactly 32).
+        assembly {
+            recipient    := mload(add(destBytes,     32))
+            destAssetWord := mload(add(destAssetBytes, 32))
+        }
+
+        // Encode preferredSolver: EVM address left-padded to 32 bytes (zeros = open).
+        bytes32 solverWord = bytes32(uint256(uint160(intent.preferredSolver)));
+
+        return abi.encodePacked(
+            PROTOCOL_VERSION,                   // 1  byte  offset 0
+            MSG_FILL_INSTRUCTION,               // 1  byte  offset 1
+            intentHash,                         // 32 bytes offset 2
+            uint32(stellarEid),                 // 4  bytes offset 34
+            recipient,                          // 32 bytes offset 38
+            destAssetWord,                      // 32 bytes offset 70
+            uint128(intent.minDestAmount),      // 16 bytes offset 102
+            uint64(intent.deadline),            // 8  bytes offset 118
+            solverWord                          // 32 bytes offset 126
+            //                                  total       158
         );
-        return abi.encodePacked(PROTOCOL_VERSION, MSG_FILL_INSTRUCTION, body);
     }
 
     /// @dev Decode a 90-byte FillConfirmed:
-    ///      version(1)|type(1)|intent_hash(32)|solver_evm(32)|amount(16)|ledger(8).
+    ///      version(1) | type(1) | intent_hash(32) | solver_evm(32) | fill_amount(16) | fill_ledger(8)
     ///
-    ///      The `amount` and `ledger` fields at bytes [66,82) and [82,90) are decoded
-    ///      here for completeness but are **not** used to size the release. The escrow
-    ///      releases `l.amount` — the measured-delta locked amount — because that value
-    ///      is authoritative and already held. Trusting a Stellar-declared amount would
-    ///      be redundant and unsafe. The field is informational: off-chain tooling can
-    ///      use it to reconcile the Stellar fill with the EVM payout.
+    ///      Field authority:
+    ///      - `intentHash`  — CONSUMED: identifies the lock to release.
+    ///      - `solverEvm`   — CONSUMED: payout destination (may differ from the locking solver key).
+    ///      - `fillAmount`  — INFORMATIONAL: Stellar-side delivery amount. The escrow releases
+    ///                        `l.amount` (the measured-delta locked amount), not this value.
+    ///                        Trusting a Stellar-declared amount would be redundant and would open
+    ///                        a griefing vector. Decoded and emitted in `Released` so off-chain
+    ///                        tooling can reconcile the Stellar fill with the EVM payout without
+    ///                        a separate RPC call.
+    ///      - `fillLedger`  — INFORMATIONAL: Stellar ledger sequence at which the fill was
+    ///                        recorded. Decoded and emitted in `Released` for dispute resolution
+    ///                        and explorer display. Not used to gate or size the release.
     function _decodeFillConfirmed(bytes calldata m)
         internal
         pure
-        returns (bytes32 intentHash, address solverEvm)
+        returns (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger)
     {
         if (m.length != 90) revert MalformedPayload();
         bytes32 hashWord;
         bytes32 solverWord;
+        bytes32 amountWord;
+        bytes32 ledgerWord;
         assembly {
-            hashWord := calldataload(add(m.offset, 2))
+            hashWord   := calldataload(add(m.offset, 2))
             solverWord := calldataload(add(m.offset, 34))
+            // offset 66: 16-byte amount occupies the high 16 bytes of the 32-byte load.
+            amountWord := calldataload(add(m.offset, 66))
+            // offset 82: 8-byte ledger occupies the high 8 bytes of the 32-byte load.
+            ledgerWord := calldataload(add(m.offset, 82))
         }
         intentHash = hashWord;
-        solverEvm = address(uint160(uint256(solverWord)));
+        solverEvm  = address(uint160(uint256(solverWord)));
+        // High 16 bytes of the 32-byte word loaded at offset 66.
+        fillAmount = uint128(uint256(amountWord >> 128));
+        // High 8 bytes of the 32-byte word loaded at offset 82.
+        fillLedger = uint64(uint256(ledgerWord >> 192));
     }
 
     /// @dev Decode a 35-byte CancelIntent:
@@ -520,6 +643,27 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             reason != CANCEL_REASON_ADMIN &&
             reason != CANCEL_REASON_INVALID
         ) revert MalformedPayload();
+    }
+
+    // --- Internal: nonce bitmap ----------------------------------------------
+
+    /// @dev Check whether a nonce has already been consumed for the given source
+    ///      endpoint. Uses a bitmap to allow unordered delivery.
+    function _isNonceConsumed(uint32 srcEid, uint64 nonce) private view returns (bool) {
+        uint256 wordIndex = uint256(nonce / 256);
+        uint256 bitIndex = uint256(nonce % 256);
+        return (_inboundNonceBitmap[srcEid][wordIndex] >> bitIndex) & 1 == 1;
+    }
+
+    /// @dev Mark a nonce as consumed. Updates both the bitmap and the high-water
+    ///      mark (opportunistically, only when nonce advances it).
+    function _consumeNonce(uint32 srcEid, uint64 nonce) private {
+        uint256 wordIndex = uint256(nonce / 256);
+        uint256 bitIndex = uint256(nonce % 256);
+        _inboundNonceBitmap[srcEid][wordIndex] |= (1 << bitIndex);
+        if (nonce > inboundNonce[srcEid]) {
+            inboundNonce[srcEid] = nonce;
+        }
     }
 
     // --- Internal: signature & token safety ----------------------------------

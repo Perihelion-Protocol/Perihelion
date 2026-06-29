@@ -103,6 +103,7 @@ contract PerihelionTimelock {
         if (owners_.length == 0 || threshold_ == 0 || threshold_ > owners_.length) {
             revert InvalidConfig();
         }
+        if (delay_ < MIN_DELAY || delay_ > MAX_DELAY) revert InvalidConfig();
         for (uint256 i = 0; i < owners_.length; i++) {
             address o = owners_[i];
             if (o == address(0) || isOwner[o]) revert InvalidConfig();
@@ -258,6 +259,7 @@ contract PerihelionTimelock {
     }
 
     function setDelay(uint256 delay_) external onlySelf {
+        if (delay_ < MIN_DELAY || delay_ > MAX_DELAY) revert InvalidConfig();
         delay = delay_;
         emit DelaySet(delay_);
     }
