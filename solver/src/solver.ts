@@ -5,6 +5,7 @@
 
 import {
   PerihelionClient,
+  parseIntentRecordArray,
   verifyIntent,
   type IntentRecord,
   type SignedIntent,
@@ -99,7 +100,7 @@ export class Solver {
   private async fetchPending(): Promise<IntentRecord[]> {
     const res = await fetch(`${this.config.mempoolUrl}/intents?status=pending`);
     if (!res.ok) throw new Error(`mempool poll failed: ${res.status}`);
-    return (await res.json()) as IntentRecord[];
+    return parseIntentRecordArray(await res.json());
   }
 }
 

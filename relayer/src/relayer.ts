@@ -88,9 +88,18 @@ export class Relayer {
     const confirmedHead = head - this.config.confirmations;
     const results: RelayResult[] = [];
 
+    // Only advance the cursor past blocks that were fully handled (delivered,
+    // or already-delivered per the idempotency check). A delivery failure
+    // caps the cursor at that block so it's retried next tick.
+    let cursorTarget = confirmedHead + 1;
+
     for (const pending of messages) {
       if (pending.srcBlock > confirmedHead) continue; // not yet final
-      results.push(await this.relayOne(pending));
+      const result = await this.relayOne(pending);
+      results.push(result);
+      if (result.error !== undefined) {
+        cursorTarget = Math.min(cursorTarget, pending.srcBlock);
+      }
     }
 
     // Advance the cursor past everything we've now confirmed, and persist it
