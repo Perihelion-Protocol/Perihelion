@@ -6,6 +6,17 @@ import type { Hex } from "@perihelion/sdk";
 export type EndpointId = number;
 
 /**
+ * Discriminated message type carried in every bridge message.
+ * Used as part of the composite dedup key so that distinct protocol messages
+ * that share the same intentHash are never conflated.
+ *
+ * - FillInstruction  — EVM → Stellar: instruct Soroban to release solver assets.
+ * - FillConfirmed   — Stellar → EVM: confirm that assets were released.
+ * - CancelIntent    — either direction: abort and allow a refund.
+ */
+export type MessageType = "FillInstruction" | "FillConfirmed" | "CancelIntent";
+
+/**
  * A cross-chain message carrying proof that a solver locked source funds for an
  * intent, instructing the destination chain to release the settlement assets.
  */
@@ -16,6 +27,8 @@ export interface BridgeMessage {
   readonly dstEid: EndpointId;
   /** keccak256 commitment of the intent (its protocol-wide id). */
   readonly intentHash: Hex;
+  /** Discriminates distinct protocol messages that share the same intentHash. */
+  readonly messageType: MessageType;
   /** Solver that locked the source funds and is owed the destination assets. */
   readonly solver: Hex;
   /** Destination recipient — the user's Stellar address. */
@@ -35,6 +48,11 @@ export interface PendingMessage {
   readonly srcTxHash: string;
   /** Block number the message was emitted in (for confirmation depth). */
   readonly srcBlock: number;
+  /**
+   * Block hash of srcBlock. Tracked for reorg detection: if the relayer later
+   * reads a block at the same height with a different hash, a reorg occurred.
+   */
+  readonly srcBlockHash?: string;
 }
 
 /** Outcome of attempting to relay a single message. */
@@ -44,4 +62,29 @@ export interface RelayResult {
   /** Destination-chain tx hash, when delivered. */
   readonly dstTxHash?: string;
   readonly error?: string;
+}
+
+/**
+ * Composite key that uniquely identifies a bridge message across all protocol
+ * legs and directions. Using intentHash alone would conflate distinct messages
+ * (e.g. FillInstruction and FillConfirmed) that share the same intentHash.
+ *
+ * Fields:
+ *   srcEid       — LayerZero source endpoint id
+ *   dstEid       — LayerZero destination endpoint id
+ *   intentHash   — EIP-712 keccak256 commitment of the intent
+ *   messageType  — protocol message discriminator
+ *   nonce        — per-source monotonic counter
+ */
+export interface MessageKey {
+  readonly srcEid: EndpointId;
+  readonly dstEid: EndpointId;
+  readonly intentHash: Hex;
+  readonly messageType: MessageType;
+  readonly nonce: number;
+}
+
+/** Serialize a MessageKey to a stable, opaque string for use as a map key. */
+export function messageKeyString(k: MessageKey): string {
+  return `${k.srcEid}:${k.dstEid}:${k.intentHash}:${k.messageType}:${k.nonce}`;
 }
