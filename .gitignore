@@ -24,9 +24,17 @@ contracts/evm/lib/
 # Slither
 crytic-export/
 
+# Coverage / test artifacts
+coverage/
+lcov.info
+*.lcov
+
 # Editor / OS
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
 *.log
+*.swp
+*.swo

@@ -32,7 +32,7 @@ use messages::{encode_cancel_intent, encode_fill_confirmed};
 
 /// Hard ceiling for TTL extension. Mirrors the representative network
 /// `max_entry_ttl`; clamp every extension to this. Should track network config.
-const MAX_TTL: u32 = 3_110_400;
+pub const MAX_TTL: u32 = 3_110_400;
 /// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
 /// absorb late confirmations and the refund window.
 const GRACE_LEDGERS: u32 = 120_960;
@@ -579,10 +579,90 @@ impl Perihelion {
     }
 
     /// Fetch the full intent record, if registered.
+    ///
+    /// **Retention asymmetry (issue #29):** `get_intent` reads the full
+    /// `IntentRecord` from persistent storage, which is retained only to
+    /// `ttl_for_deadline(deadline)` (the intent's deadline + GRACE_LEDGERS,
+    /// clamped to MAX_TTL). The terminal idempotency markers `Settled` and
+    /// `Cancelled` are bumped to a full `MAX_TTL` on every terminal
+    /// transition, so they outlive the record.
+    ///
+    /// Consequence: after the grace window the record may be archived while
+    /// `is_settled` / `is_cancelled` still return `true`. A consumer that
+    /// treats `get_intent == None` as "intent never existed / still pending"
+    /// will be wrong for aged, settled/cancelled intents.
+    ///
+    /// **For authoritative terminal state use [`status`], which consults the
+    /// durable markers first and falls back to the record only if no marker is
+    /// set.** Never rely on `get_intent == None` alone to conclude an intent is
+    /// unsettled; always call `status` or check the markers directly.
     pub fn get_intent(env: Env, intent_hash: BytesN<32>) -> Option<IntentRecord> {
         env.storage()
             .persistent()
             .get(&DataKey::Intent(intent_hash))
+    }
+
+    /// Combined, authoritative intent status view (issue #29).
+    ///
+    /// Consults the durable idempotency markers first (they survive record
+    /// archival), then falls back to the live `IntentRecord`. Returns:
+    ///
+    /// - `IntentStatus::Filled` / `ConfirmationSent` — `Settled` marker is set;
+    ///   the intent was filled. (The record may already be archived.)
+    /// - `IntentStatus::Cancelled` — `Cancelled` marker is set.
+    /// - The `IntentRecord::status` value — if the record is still live and no
+    ///   terminal marker exists yet (e.g. `Locked`, `Filled` before dispatch).
+    /// - `None` — neither a marker nor a live record exists. The intent hash
+    ///   was never registered on this contract, or the record was archived
+    ///   before a terminal marker was written (should not occur under normal
+    ///   operation, but callers must handle it).
+    ///
+    /// **Integrators: always call `status` for terminal-state queries.** Do not
+    /// use `get_intent == None` as a proxy for "unknown or pending".
+    pub fn status(env: Env, intent_hash: BytesN<32>) -> Option<IntentStatus> {
+        let p = env.storage().persistent();
+        // Markers are the source of truth for terminal state — check them first.
+        if p.has(&DataKey::Settled(intent_hash.clone())) {
+            return Some(IntentStatus::ConfirmationSent);
+        }
+        if p.has(&DataKey::Cancelled(intent_hash.clone())) {
+            return Some(IntentStatus::Cancelled);
+        }
+        // Fall back to the live record for pre-terminal states.
+        p.get::<DataKey, IntentRecord>(&DataKey::Intent(intent_hash))
+            .map(|r| r.status)
+    }
+
+    /// Quote the LayerZero native fee required to dispatch an outbound message
+    /// to `dst_eid` (the source-chain EVM escrow). Solvers and keepers MUST
+    /// call this before `fill_intent` / `cancel_expired_intent` and pass the
+    /// returned value (with a small buffer for fee fluctuation) as `lz_fee`.
+    ///
+    /// Passing a `lz_fee` below the quoted amount will return
+    /// `InsufficientLzFee` from `dispatch`, before any irreversible effect
+    /// (token delivery or cancellation) is performed.
+    ///
+    /// The `message` parameter is a pre-encoded LayerZero payload. Passing a
+    /// zero-length message is valid for a rough worst-case estimate; the actual
+    /// fee depends on the encoded message length, which is fixed per message
+    /// type (FillConfirmed: 90 bytes, CancelIntent: 35 bytes).
+    pub fn quote_lz_fee(
+        env: Env,
+        dst_eid: u32,
+        message: soroban_sdk::Bytes,
+    ) -> Result<i128, PerihelionError> {
+        let receiver: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Peer(dst_eid))
+            .ok_or(PerihelionError::UntrustedPeer)?;
+        let endpoint = Self::require_endpoint(&env)?;
+        let params = MessagingParams {
+            dst_eid,
+            receiver,
+            message,
+        };
+        Ok(EndpointClient::new(&env, &endpoint).quote(&params))
     }
 
     /// Current trusted endpoint.
@@ -692,6 +772,10 @@ impl Perihelion {
             let new_base = nonce - 1;
             ps.set(&base_key, &new_base);
             ps.set(&bitmap_key, &1u64); // Only the new nonce is set in the bitmap.
+            // Replay-safety invariant: archival of either entry resets the
+            // high-water mark to zero, re-opening previously consumed nonces.
+            ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
+            ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
             return Ok(());
         }
 
@@ -705,7 +789,13 @@ impl Perihelion {
         }
 
         bitmap |= bit;
+        // Write base explicitly so extend_ttl can always find the key in storage.
+        ps.set(&base_key, &base);
         ps.set(&bitmap_key, &bitmap);
+        // Replay-safety invariant: archival of either entry resets the
+        // high-water mark to zero, re-opening previously consumed nonces.
+        ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
+        ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
         Ok(())
     }
 
@@ -919,6 +1009,14 @@ impl Perihelion {
             receiver,
             message,
         };
+        // Pre-check: quote the required fee and reject early if underpaid.
+        // This surfaces fee estimation failures as InsufficientLzFee rather
+        // than an opaque revert from inside the endpoint, enabling solver
+        // operators to distinguish underpayment from other dispatch errors.
+        let required = EndpointClient::new(env, &endpoint).quote(&params);
+        if lz_fee < required {
+            return Err(PerihelionError::InsufficientLzFee);
+        }
         EndpointClient::new(env, &endpoint).send(&params, payer, &lz_fee);
         Ok(())
     }
@@ -929,10 +1027,19 @@ impl Perihelion {
     /// count when actual close times are longer. This is the safe direction:
     /// a too-generous TTL wastes a small amount of rent but an under-estimate
     /// can archive the entry before the deadline passes.
+    ///
+    /// The division and `.min(MAX_TTL as u64)` clamp are performed in `u64`
+    /// **before** the cast to `u32` (issue #30). A plain `as u32` on a `u64`
+    /// value exceeding `u32::MAX` wraps modulo 2^32, producing a deceptively
+    /// small TTL for a far-future deadline. By clamping first we guarantee the
+    /// value is provably in `[0, MAX_TTL]` when narrowed.
     fn ttl_for_deadline(env: &Env, deadline: u64) -> u32 {
         let now = env.ledger().timestamp();
         let secs = deadline.saturating_sub(now);
-        let ledgers = (secs / MIN_SECS_PER_LEDGER) as u32;
-        ledgers.saturating_add(GRACE_LEDGERS).min(MAX_TTL)
+        let ledgers_u64 = (secs / MIN_SECS_PER_LEDGER)
+            .saturating_add(GRACE_LEDGERS as u64)
+            .min(MAX_TTL as u64);
+        // Safe: value is in [0, MAX_TTL] ⊆ [0, u32::MAX].
+        ledgers_u64 as u32
     }
 }

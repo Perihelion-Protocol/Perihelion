@@ -4,7 +4,7 @@ use super::*;
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
     testutils::{Address as _, Ledger as _},
-    token, Address, BytesN, Env,
+    token, Address, Bytes, BytesN, Env,
 };
 
 // --- Mock LayerZero endpoint --------------------------------------------------
@@ -37,6 +37,11 @@ impl MockEndpoint {
             .instance()
             .set(&symbol_short!("last"), &params);
         BytesN::from_array(&env, &[0u8; 32])
+    }
+
+    /// Returns 0 so that any non-negative lz_fee passes the pre-check in tests.
+    pub fn quote(_env: Env, _params: MessagingParams) -> i128 {
+        0
     }
 
     pub fn sent(env: Env) -> u32 {

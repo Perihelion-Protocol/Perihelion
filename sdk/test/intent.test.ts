@@ -14,6 +14,8 @@ import {
   verifyIntent,
 } from "../src/intent.js";
 import { PerihelionClient } from "../src/client.js";
+import { toSmallestUnits, fromSmallestUnits } from "../src/units.js";
+import { isStellarAddress, isStellarAsset } from "../src/stellar.js";
 
 const PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const account = privateKeyToAccount(PK);
@@ -23,18 +25,25 @@ const CHAIN_ID = 8453;
 const CONTRACT_ADDRESS = "0x1234567890123456789012345678901234567890" as const;
 const DOMAIN = perihelionDomain(CHAIN_ID, CONTRACT_ADDRESS);
 
-function sampleIntent() {
-  return buildIntent({
+// A valid G... Stellar account strkey (56 chars, base32 A-Z/2-7).
+const VALID_DESTINATION = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+
+function sampleParams() {
+  return {
     user: account.address,
-    destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+    destination: VALID_DESTINATION,
     sourceChainId: 8453,
-    sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const,
     sourceAmount: "1000000",
-    destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    destAsset: VALID_DEST_ASSET,
     minDestAmount: "9900000",
     deadline: 4102444800, // year 2100
     nonce: "42",
-  });
+  };
+}
+
+function sampleIntent() {
+  return buildIntent(sampleParams());
 }
 
 test("buildIntent defaults open solver and keeps explicit nonce", () => {
@@ -81,11 +90,11 @@ test("buildIntent warns when sourceAmount is below V_min", () => {
   try {
     buildIntent({
       user: account.address,
-      destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+      destination: VALID_DESTINATION,
       sourceChainId: 8453,
       sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       sourceAmount: "1000", // very small amount
-      destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      destAsset: VALID_DEST_ASSET,
       minDestAmount: "900",
       deadline: 4102444800,
     });
@@ -105,11 +114,11 @@ test("buildIntent does not warn when sourceAmount is above V_min", () => {
   try {
     buildIntent({
       user: account.address,
-      destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+      destination: VALID_DESTINATION,
       sourceChainId: 8453,
       sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       sourceAmount: "100000000", // well above default V_min
-      destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      destAsset: VALID_DEST_ASSET,
       minDestAmount: "99000000",
       deadline: 4102444800,
     });
@@ -129,11 +138,11 @@ test("buildIntent respects suppressWarning option", () => {
     buildIntent(
       {
         user: account.address,
-        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        destination: VALID_DESTINATION,
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: "1000",
-        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        destAsset: VALID_DEST_ASSET,
         minDestAmount: "900",
         deadline: 4102444800,
       },
@@ -155,11 +164,11 @@ test("buildIntent respects custom vMin option", () => {
     buildIntent(
       {
         user: account.address,
-        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        destination: VALID_DESTINATION,
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: "50000000", // 50 USD
-        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        destAsset: VALID_DEST_ASSET,
         minDestAmount: "49000000",
         deadline: 4102444800,
       },
