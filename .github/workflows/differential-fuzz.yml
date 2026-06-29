@@ -1,0 +1,145 @@
+name: Differential Fuzz
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Nightly extended run at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      extended:
+        description: 'Run extended fuzzing (10k cases)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  differential-fuzz-evm:
+    name: EVM Differential Fuzzing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run bounded differential fuzzing (100 cases)
+        if: github.event_name != 'schedule' && !inputs.extended
+        working-directory: contracts/evm
+        run: |
+          forge test --match-contract DifferentialFuzz --fuzz-runs 100 -vv
+
+      - name: Run extended differential fuzzing (10k cases)
+        if: github.event_name == 'schedule' || inputs.extended
+        working-directory: contracts/evm
+        run: |
+          forge test --match-contract DifferentialFuzz --fuzz-runs 10000 -vvv
+
+      - name: Upload fuzz failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evm-fuzz-failures
+          path: contracts/evm/test/**/*.failure.log
+
+  differential-fuzz-soroban:
+    name: Soroban Differential Fuzzing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            contracts/soroban/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Soroban CLI
+        run: cargo install --locked soroban-cli --version 21.0.0
+
+      - name: Run bounded differential fuzzing (100 cases)
+        if: github.event_name != 'schedule' && !inputs.extended
+        working-directory: contracts/soroban/settlement
+        run: |
+          PROPTEST_CASES=100 cargo test fuzz -- --test-threads=1 --nocapture
+
+      - name: Run extended differential fuzzing (10k cases)
+        if: github.event_name == 'schedule' || inputs.extended
+        working-directory: contracts/soroban/settlement
+        run: |
+          PROPTEST_CASES=10000 cargo test fuzz -- --test-threads=1 --nocapture
+
+      - name: Upload fuzz corpus
+        uses: actions/upload-artifact@v4
+        with:
+          name: soroban-fuzz-corpus
+          path: contracts/shared/wire-vectors/fuzz-corpus/
+
+      - name: Upload fuzz failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soroban-fuzz-failures
+          path: contracts/soroban/settlement/proptest-regressions/
+
+  cross-validate:
+    name: Cross-Language Validation
+    needs: [differential-fuzz-soroban]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Soroban corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: soroban-fuzz-corpus
+          path: contracts/shared/wire-vectors/fuzz-corpus/
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Validate Rust-generated payloads with Solidity decoder
+        working-directory: contracts/evm
+        run: |
+          # Run a custom test that reads corpus files and validates them
+          forge test --match-test testCrossValidateCorpus -vv
+
+  report:
+    name: Fuzz Report
+    needs: [differential-fuzz-evm, differential-fuzz-soroban, cross-validate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## Differential Fuzzing Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- EVM fuzzing: ${{ needs.differential-fuzz-evm.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Soroban fuzzing: ${{ needs.differential-fuzz-soroban.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Cross-validation: ${{ needs.cross-validate.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ needs.differential-fuzz-evm.result }}" == "failure" ]] || \
+             [[ "${{ needs.differential-fuzz-soroban.result }}" == "failure" ]] || \
+             [[ "${{ needs.cross-validate.result }}" == "failure" ]]; then
+            echo "❌ Differential fuzzing detected codec divergence!" >> $GITHUB_STEP_SUMMARY
+            echo "Review artifacts for failing test cases." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ All differential fuzzing checks passed!" >> $GITHUB_STEP_SUMMARY
+          fi

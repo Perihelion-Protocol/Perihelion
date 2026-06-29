@@ -6,8 +6,11 @@
 import {
   PerihelionClient,
   verifyIntent,
+  hashIntent,
+  perihelionDomain,
   type IntentRecord,
   type SignedIntent,
+  type Hex,
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
 import { evaluate, type PricingDeps } from "./quote.js";
@@ -30,19 +33,39 @@ export interface Logger {
 }
 
 /**
- * Per-intent retry state for transient failures.
- * Terminal outcomes remove the entry; transient failures increment the counter.
+ * LRU cache for signature verification results. Evicts oldest entries when the
+ * cache exceeds its size limit to prevent unbounded memory growth.
  */
-interface RetryState {
-  attempts: number;
-  nextRetryAt: number;
-}
+class VerificationCache {
+  private readonly cache = new Map<Hex, boolean>();
+  private readonly maxSize: number;
 
-const MAX_FILL_RETRIES = 3;
+  constructor(maxSize = 10_000) {
+    this.maxSize = maxSize;
+  }
 
-/** Exponential backoff in ms: 1s, 2s, 4s. */
-function retryBackoff(attempt: number): number {
-  return Math.min(1_000 * 2 ** attempt, 30_000);
+  get(hash: Hex): boolean | undefined {
+    const result = this.cache.get(hash);
+    if (result !== undefined) {
+      // Move to end (LRU)
+      this.cache.delete(hash);
+      this.cache.set(hash, result);
+    }
+    return result;
+  }
+
+  set(hash: Hex, valid: boolean): void {
+    // Evict oldest if at capacity
+    if (this.cache.size >= this.maxSize) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
+    this.cache.set(hash, valid);
+  }
+
+  size(): number {
+    return this.cache.size;
+  }
 }
 
 export class Solver {
@@ -53,7 +76,7 @@ export class Solver {
    * `retryState` and remain eligible for reconsideration.
    */
   private readonly seen = new Set<string>();
-  private readonly retryState = new Map<string, RetryState>();
+  private readonly verificationCache: VerificationCache;
   private running = false;
 
   constructor(
@@ -63,7 +86,12 @@ export class Solver {
     fetchImpl?: typeof fetch,
     private readonly pricingDeps: PricingDeps = {},
   ) {
-    this.client = new PerihelionClient({ mempoolUrl: config.mempoolUrl, fetch: fetchImpl });
+    this.client = new PerihelionClient({
+      mempoolUrl: config.mempoolUrl,
+      chainId: config.sourceChainId,
+      verifyingContract: config.escrowAddress,
+    });
+    this.verificationCache = new VerificationCache(config.verificationCacheSize);
   }
 
   /** Start the poll loop. Resolves when {@link stop} is called. */
@@ -105,7 +133,26 @@ export class Solver {
   private async consider(record: IntentRecord): Promise<void> {
     const { intent, signature, hash } = record;
 
-    if (!(await verifyIntent(intent, signature))) {
+    // Verify the mempool's hash matches our recomputation
+    const domain = perihelionDomain(this.config.sourceChainId, this.config.escrowAddress);
+    const recomputedHash = hashIntent(intent, domain);
+    if (recomputedHash.toLowerCase() !== hash.toLowerCase()) {
+      this.log.warn("rejecting intent: mempool hash mismatch", {
+        hash,
+        recomputedHash,
+      });
+      return;
+    }
+
+    // Check cache first to avoid redundant verification
+    let valid = this.verificationCache.get(hash);
+    if (valid === undefined) {
+      // Not cached — verify and cache the result
+      valid = await verifyIntent(intent, signature, domain);
+      this.verificationCache.set(hash, valid);
+    }
+
+    if (!valid) {
       this.log.warn("rejecting intent with invalid signature", { hash });
       // Terminal: invalid signature will never become valid.
       this.seen.add(hash);
