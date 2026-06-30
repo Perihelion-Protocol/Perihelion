@@ -71,4 +71,12 @@ We will not pursue or support legal action against researchers who:
 - report promptly and do not exploit the issue beyond what is necessary to
   demonstrate it.
 
+## Code review for security-sensitive paths
+
+Changes to fund-moving code, wire codecs, EIP-712 hashing, and replay guards
+require approval from `@Perihelion-Protocol/security-reviewers` in addition to
+the package owner. This is enforced automatically via `.github/CODEOWNERS` and
+branch protection. See [CONTRIBUTING.md](./CONTRIBUTING.md#security-review-policy)
+for the full list of sensitive paths and the rationale for each.
+
 Thank you for helping keep Perihelion and its users safe.

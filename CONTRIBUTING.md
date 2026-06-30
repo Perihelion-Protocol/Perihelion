@@ -76,5 +76,27 @@ npm test
 - **Security vulnerabilities:** do **not** open a public issue — follow
   [`SECURITY.md`](./SECURITY.md).
 
+## Security review policy
+
+Changes to the following paths carry heightened risk and require at least one
+approval from **`@Perihelion-Protocol/security-reviewers`** in addition to the
+normal package-owner review. This is enforced via CODEOWNERS and branch
+protection (`Require review from Code Owners` must be enabled in Settings →
+Branches → Protection rules for `main`).
+
+| Path | Why it is sensitive |
+| ---- | ------------------- |
+| `contracts/soroban/settlement/src/messages.rs` | Cross-chain wire codec — must stay byte-identical to the EVM side (Invariant I5). |
+| `contracts/soroban/settlement/src/lib.rs` | Core fund-movement logic: `fill_intent`, `cancel_expired_intent`, `lz_receive`, nonce/replay guard. |
+| `contracts/soroban/settlement/src/types.rs` | `IntentStatus` enum and `DataKey` variants — shared taxonomy with EVM. |
+| `contracts/evm/src/PerihelionEscrow.sol` | EVM fund-moving paths: `lock`, `lzReceive`, `cancelExpired`, EIP-712 hash, reentrancy guard. |
+| `contracts/evm/src/PerihelionTimelock.sol` | Admin timelock — governs all privileged upgrades and config changes. |
+| `contracts/shared/` | Shared wire-format test vectors used by differential fuzzing. |
+| `sdk/src/intent.ts` | `hashIntent` / `INTENT_TYPEHASH` — must be byte-identical to EVM (Invariant I5). |
+| `sdk/src/types.ts` | `IntentStatus` lifecycle vocabulary. |
+
+If you are unsure whether your change touches a security-sensitive path, err on
+the side of requesting a security reviewer in your PR.
+
 Thank you for helping build the shortest path between Stellar and every other
 chain. 🌌
