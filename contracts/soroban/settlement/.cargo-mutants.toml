@@ -1,0 +1,42 @@
+# cargo-mutants configuration for the Perihelion Soroban settlement contract.
+#
+# Run locally:
+#   cargo install cargo-mutants       # one-time
+#   cd contracts/soroban/settlement
+#   cargo mutants --timeout 120
+#
+# The nightly CI job (.github/workflows/mutation-testing.yml) runs this
+# automatically and uploads the mutants.out/ report as an artefact.
+#
+# See: https://mutants.rs/configuration.html
+
+# Hard timeout per mutant test run (seconds).  Settlement contract tests are
+# fast (<5 s normally), so 120 s is generous while still bounding wall-clock.
+timeout_multiplier = 3.0
+
+# Focus on the highest-risk modules first.  The codec (messages.rs) is the
+# primary serialisation boundary between EVM and Stellar — a silent mutation
+# there could corrupt intent identity.  The state-machine logic in lib.rs is
+# the settlement critical path.  fuzz.rs and test.rs are excluded because they
+# are test/fuzz scaffolding, not production logic.
+examine_globs = [
+    "src/lib.rs",
+    "src/messages.rs",
+    "src/types.rs",
+    "src/error.rs",
+    "src/ttl_archival.rs",
+]
+
+# Do not mutate test or fuzz modules — those are helpers, not production logic.
+exclude_globs = [
+    "src/test.rs",
+    "src/fuzz.rs",
+    "src/endpoint.rs",
+]
+
+# Minimum acceptable mutation score.  Below this threshold the CI job fails.
+# Start at 60 % and raise as the test suite is hardened.  Track progress in
+# docs/mutation-testing.md.
+# Note: cargo-mutants does not enforce this natively; the CI job script reads
+# mutants.out/outcomes.json and asserts the score.
+# minimum_score = 60
