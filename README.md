@@ -302,6 +302,7 @@ See the [`sdk/` README](./sdk/README.md) for the full API.
 | [Intent Specification](./docs/intent-spec.md)                           | The signable intent format and EIP-712 encoding                             |
 | [Deployment & Operations](./docs/deployment.md)                         | Production deployment, the timelock-multisig owner + guardian, and admin/incident runbooks |
 | [Differential Fuzzing](./docs/differential-fuzzing.md)                  | Wire format codec validation harness for detecting encoder/decoder divergence |
+| [Coverage Reporting](./docs/coverage.md)                                | How to produce and interpret lcov/Codecov coverage for all three languages  |
 | [Glossary](./docs/glossary.md)                                          | Definitions of every protocol term                                          |
 | [FAQ](./docs/faq.md)                                                    | Common questions about safety, solvers, and trust                           |
 | [Contributing Guide](./CONTRIBUTING.md)                                 | How to contribute and where the work lives                                  |
