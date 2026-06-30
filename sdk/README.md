@@ -13,6 +13,10 @@ npm install @perihelion/sdk viem
 
 ## Quick start
 
+> **Full walkthrough** — for a step-by-step guide that builds, signs, submits,
+> and tracks an intent against the local mock mempool, see the
+> **[Integration Quickstart](../docs/quickstart.md)**.
+
 ```ts
 import { PerihelionClient, buildIntent } from "@perihelion/sdk";
 

@@ -209,6 +209,10 @@ workspace for the Soroban contracts, and a Foundry project for the EVM contracts
 
 ## Getting Started
 
+> **New here?** Jump straight to the **[Integration Quickstart](./docs/quickstart.md)**
+> for a copy-pasteable, end-to-end walkthrough: install → build intent → sign →
+> submit → track settlement against a local mock mempool.
+
 ### Prerequisites
 
 | Tool                                                                 | Used for             | Required version |
@@ -297,6 +301,7 @@ See the [`sdk/` README](./sdk/README.md) for the full API.
 
 | Document                                                                | Description                                                                 |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| [Integration Quickstart](./docs/quickstart.md)                          | Copy-pasteable end-to-end walkthrough: install → sign → submit → settle     |
 | [Technical Architecture](./docs/TECHNICAL-ARCHITECTURE.md)              | Full production spec: contracts, LayerZero V2, solver economics, security, testing, rollout |
 | [Architecture Overview](./docs/architecture.md)                         | High-level settlement flow and trust model                                  |
 | [Intent Specification](./docs/intent-spec.md)                           | The signable intent format and EIP-712 encoding                             |
