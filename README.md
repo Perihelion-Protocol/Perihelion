@@ -298,6 +298,7 @@ See the [`sdk/` README](./sdk/README.md) for the full API.
 | Document                                                                | Description                                                                 |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | [Technical Architecture](./docs/TECHNICAL-ARCHITECTURE.md)              | Full production spec: contracts, LayerZero V2, solver economics, security, testing, rollout |
+| [Intent Lifecycle Diagram](./docs/TECHNICAL-ARCHITECTURE.md#intent-lifecycle-state-diagram) | Canonical state diagram mapping SDK / EVM / Soroban vocabularies, all transitions and terminal paths |
 | [Architecture Overview](./docs/architecture.md)                         | High-level settlement flow and trust model                                  |
 | [Intent Specification](./docs/intent-spec.md)                           | The signable intent format and EIP-712 encoding                             |
 | [Deployment & Operations](./docs/deployment.md)                         | Production deployment, the timelock-multisig owner + guardian, and admin/incident runbooks |
