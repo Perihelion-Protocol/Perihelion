@@ -37,8 +37,11 @@
 import type { RelayerConfig } from "./config.js";
 import type { CheckpointStore } from "./checkpoint.js";
 import { NoopCheckpointStore } from "./checkpoint.js";
-import type { PendingMessage, RelayResult } from "./types.js";
+import type { PendingMessage, RelayResult, MessageKey } from "./types.js";
+import { messageKeyString } from "./types.js";
 import { BackoffState } from "./backoff.js";
+import type { DeadLetterStore } from "./dead-letter.js";
+import { InMemoryDeadLetterStore } from "./dead-letter.js";
 
 /** Observes bridge messages emitted on the source chain. */
 export interface SourceWatcher {
@@ -114,10 +117,52 @@ interface BlockRecord {
   parentHash: string;
 }
 
+/**
+ * Readiness snapshot exposed by the health server.
+ * Populated after each tick by the relayer.
+ */
+export interface ReadinessState {
+  /** True if the last tick completed without throwing. */
+  lastTickOk: boolean;
+  /** Timestamp (ms since epoch) of the last successful tick, or 0 if none yet. */
+  lastTickAt: number;
+  /** Current cursor (last confirmed block the relayer processed). */
+  cursor: number;
+  /** Latest chain head seen in the most recent poll. */
+  head: number;
+  /** Lag = head − cursor. High lag means the relayer is falling behind. */
+  lag: number;
+}
+
 export class Relayer {
   private running = false;
   private cursor: number;
   private readonly backoff: BackoffState;
+
+  // --- Internal state -------------------------------------------------------
+
+  /** Retry attempt counters per message composite key. */
+  private readonly attempts = new Map<string, number>();
+
+  /** Counters exposed via the health/metrics endpoints. */
+  readonly metrics: RelayMetrics = {
+    delivered: 0,
+    failed: 0,
+    deadLettered: 0,
+    maxRetryDepth: 0,
+  };
+
+  /** Sliding window of recent block headers for reorg detection. */
+  private readonly blockWindow: BlockRecord[] = [];
+
+  /** Readiness state, updated after each tick. */
+  readonly readiness: ReadinessState = {
+    lastTickOk: false,
+    lastTickAt: 0,
+    cursor: 0,
+    head: 0,
+    lag: 0,
+  };
 
   constructor(
     private readonly config: RelayerConfig,
@@ -131,6 +176,7 @@ export class Relayer {
   ) {
     this.cursor = startBlock;
     this.backoff = new BackoffState(config);
+    this.readiness.cursor = startBlock;
   }
 
   /**
@@ -140,6 +186,7 @@ export class Relayer {
    */
   async resume(): Promise<void> {
     this.cursor = (await this.checkpoint.load()) ?? this.startBlock;
+    this.readiness.cursor = this.cursor;
   }
 
   /** Start the watch-and-relay loop. Resolves when {@link stop} is called. */
@@ -155,8 +202,11 @@ export class Relayer {
       try {
         await this.tick();
         this.backoff.recordSuccess();
+        this.readiness.lastTickOk = true;
+        this.readiness.lastTickAt = Date.now();
       } catch (err) {
         this.backoff.recordFailure();
+        this.readiness.lastTickOk = false;
         this.log.error("tick failed", {
           err: String(err),
           consecutiveFailures: this.backoff.consecutiveFailures,
@@ -172,12 +222,39 @@ export class Relayer {
 
   /** One watch-confirm-deliver cycle. Exposed for testing. */
   async tick(): Promise<RelayResult[]> {
-    const { messages, head } = await this.watcher.poll(this.cursor);
-    const confirmedHead = head - this.config.confirmations;
-    const results: RelayResult[] = [];
+    const { messages, head, headHash, parentHash } = await this.watcher.poll(this.cursor);
+
+    // Reorg detection — only when the watcher provides block hashes.
+    if (headHash !== undefined && parentHash !== undefined) {
+      const reorgDepth = this.detectReorg(head, headHash, parentHash);
+      if (reorgDepth > 0) {
+        if (reorgDepth > this.config.confirmations) {
+          this.log.error("DEEP_REORG", {
+            head,
+            reorgDepth,
+            confirmations: this.config.confirmations,
+            action: "Manual inspection required — blocks delivered during orphaned chain may need remediation",
+          });
+        } else {
+          this.log.warn("reorg detected, rolling back cursor", {
+            head,
+            reorgDepth,
+            prevCursor: this.cursor,
+          });
+          // Roll back cursor to re-process the reorged blocks.
+          this.cursor = Math.max(this.startBlock, head - reorgDepth);
+          this.readiness.cursor = this.cursor;
+        }
+      }
+      this.recordBlock({ number: head, hash: headHash, parentHash });
+    }
 
     const confirmedHead = head - this.config.confirmations;
     const results: RelayResult[] = [];
+
+    // Update readiness lag.
+    this.readiness.head = head;
+    this.readiness.lag = Math.max(0, head - this.cursor);
 
     for (const pending of messages) {
       if (pending.srcBlock > confirmedHead) continue; // not yet final
@@ -188,6 +265,7 @@ export class Relayer {
 
     // Advance the cursor past all confirmed blocks we've now processed.
     this.cursor = Math.max(this.cursor, confirmedHead + 1);
+    this.readiness.cursor = this.cursor;
     await this.checkpoint.save(this.cursor);
     return results;
   }

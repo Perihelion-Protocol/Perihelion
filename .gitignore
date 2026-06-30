@@ -18,6 +18,10 @@ __snapshots__/
 *.snap
 test-results/
 .nyc_output/
+# Vitest / Jest snapshot directories
+**/__snapshots__/
+# Node test runner tap output
+*.tap
 
 # Rust / Soroban
 target/
@@ -39,6 +43,14 @@ crytic-export/
 .perihelion-relayer-checkpoint.json
 *.checkpoint.json
 
+# Temporary / generated summary docs (not part of source)
+IMPLEMENTATION-SUMMARY.md
+PULL-REQUEST-SUMMARY.md
+DIFFERENTIAL-FUZZ-SUMMARY.md
+TTL-ARCHIVAL-TESTING.md
+solver/VERIFICATION_CACHE.md
+solver/MIGRATION.md
+
 # Editor / OS
 .DS_Store
 Thumbs.db
@@ -48,3 +60,8 @@ Thumbs.db
 *.log
 *.swp
 *.swo
+
+# Misc
+*.orig
+*.bak
+*.tmp
