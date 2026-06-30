@@ -1,0 +1,44 @@
+{
+  "findings": [
+    {
+      "detector": "reentrancy-no-eth",
+      "contract": "PerihelionEscrow",
+      "function": "lock",
+      "description": "Lock struct written after transferFrom pull",
+      "rationale": "Intentional: measured-delta accounting requires reading post-transfer balance before writing to storage. The nonReentrant modifier prevents reentrancy. See architecture spec §7."
+    },
+    {
+      "detector": "reentrancy-benign",
+      "contract": "PerihelionEscrow",
+      "function": "lock",
+      "description": "Emit Locked event after external call",
+      "rationale": "Event emission after token pull. Safe under nonReentrant."
+    },
+    {
+      "detector": "incorrect-equality",
+      "contract": "PerihelionEscrow",
+      "function": "lock",
+      "description": "received == 0 check after measured-delta",
+      "rationale": "Intentional: rejects tokens that deliver nothing (fully-taxed tokens). This is the desired guard condition, not a vulnerability."
+    },
+    {
+      "detector": "costly-loop",
+      "contract": "PerihelionTimelock",
+      "function": "removeOwner",
+      "description": "Array scan in removeOwner loop",
+      "rationale": "Owner set is a small admin set (expected <10 members). O(n) scan is acceptable. Loop exits immediately after removing the target via break."
+    },
+    {
+      "detector": "assembly",
+      "contract": "PerihelionEscrow",
+      "description": "Inline assembly in _decodeFillConfirmed, _decodeCancelIntent, _verify, _encodeFillInstruction",
+      "rationale": "Required for efficient calldata decoding of the fixed binary LayerZero message format and signature unpacking. All assembly is reviewed and tested."
+    },
+    {
+      "detector": "low-level-calls",
+      "contract": "PerihelionEscrow",
+      "description": "token.call() in _safeTransfer and _safeTransferFrom",
+      "rationale": "Pattern required for tokens that do not return bool (e.g. USDT). Both helpers check return value via the decoded bool and revert on failure."
+    }
+  ]
+}

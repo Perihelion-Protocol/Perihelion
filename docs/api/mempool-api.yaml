@@ -1,0 +1,406 @@
+openapi: 3.1.0
+
+info:
+  title: Perihelion Mempool API
+  version: 1.0.0
+  description: |
+    The Perihelion Mempool API is the HTTP surface through which clients
+    submit signed intents, query their lifecycle status, and list intents
+    by status.
+
+    ## Intent lifecycle
+
+    An intent moves through the following states after submission:
+
+    ```
+    pending → claimed → settling → settled
+           ↘                    ↘
+            expired              refunded
+    ```
+
+    | Status     | Meaning                                                      |
+    |------------|--------------------------------------------------------------|
+    | `pending`  | Signed, in the mempool, unclaimed by any solver              |
+    | `claimed`  | A solver has locked the source-chain funds                   |
+    | `settling` | Cross-chain LayerZero message is in flight                   |
+    | `settled`  | Assets released on Stellar; bridge complete                  |
+    | `refunded` | Solver-initiated refund after a failed or cancelled fill     |
+    | `expired`  | Deadline passed before any solver claimed the intent         |
+
+    ## Pagination
+
+    The current implementation returns **all** matching records in a single
+    response. Future versions may introduce cursor-based pagination via
+    `after` / `limit` query parameters; clients should be prepared for the
+    response shape to gain a top-level `nextCursor` field while the `items`
+    array remains backward-compatible.
+
+    ## Error responses
+
+    All error responses share the shape `{ "error": "<message>" }` and use
+    standard HTTP status codes.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server (default port)
+
+tags:
+  - name: Intents
+    description: Submit and query cross-chain bridge intents
+
+paths:
+
+  /intents:
+
+    post:
+      operationId: submitIntent
+      tags: [Intents]
+      summary: Submit a signed intent
+      description: |
+        Validates the EIP-712 signature over the intent, computes the canonical
+        `intent_hash`, and stores the record with status `pending`.
+
+        The server rejects the submission if the signature is invalid, any
+        required field is missing, or the intent hash already exists in the
+        mempool (409 Conflict).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignedIntent'
+            example:
+              intent:
+                user: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+                destination: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+                sourceChainId: 8453
+                sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                sourceAmount: "1000000"
+                destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+                minDestAmount: "9900000"
+                deadline: 1751280000
+                nonce: "0x000000000000000000000000000000000000000000000000000000006842fc00"
+                preferredSolver: "0x0000000000000000000000000000000000000000"
+              signature: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab1c"
+              hash: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+      responses:
+        '200':
+          description: Intent accepted and stored; returns the canonical intent hash.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitIntentResponse'
+              example:
+                hash: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+        '400':
+          description: |
+            Validation failure — missing required fields or invalid EIP-712
+            signature.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingFields:
+                  summary: Missing intent or signature
+                  value:
+                    error: "Missing intent or signature"
+                invalidSignature:
+                  summary: Invalid EIP-712 signature
+                  value:
+                    error: "Invalid signature"
+        '409':
+          description: |
+            Conflict — an intent with this hash already exists in the mempool.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Intent already exists"
+        '500':
+          description: Unexpected server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Internal server error"
+
+    get:
+      operationId: listIntents
+      tags: [Intents]
+      summary: List intents, optionally filtered by status
+      description: |
+        Returns all intent records in the mempool. Pass the optional `status`
+        query parameter to filter to a single lifecycle state.
+
+        **Pagination note:** the current implementation returns all matching
+        records in one response. Future versions may add cursor-based
+        pagination.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: |
+            Filter results to intents in this lifecycle state. When omitted,
+            all intents are returned regardless of status.
+          schema:
+            $ref: '#/components/schemas/IntentStatus'
+      responses:
+        '200':
+          description: Array of intent records (may be empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IntentRecord'
+
+  /intents/{hash}:
+
+    get:
+      operationId: getIntent
+      tags: [Intents]
+      summary: Get an intent record by hash
+      description: |
+        Retrieves the full `IntentRecord` for the given `intent_hash`,
+        including current lifecycle status and any solver/settlement metadata
+        that has been attached since submission.
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: |
+            The canonical EIP-712 `intent_hash` that identifies this intent,
+            as returned by `POST /intents` or computed locally by the SDK
+            `hashIntent` function.
+          schema:
+            $ref: '#/components/schemas/Hex'
+          example: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+      responses:
+        '200':
+          description: The intent record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntentRecord'
+        '404':
+          description: No intent with the given hash exists in the mempool.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Intent not found"
+
+components:
+  schemas:
+
+    # ─── Primitive types ────────────────────────────────────────────────────
+
+    Address:
+      type: string
+      description: |
+        An EVM address: 20 bytes encoded as a `0x`-prefixed hex string,
+        optionally EIP-55 checksummed.
+      pattern: '^0x[0-9a-fA-F]{40}$'
+      examples:
+        - "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+        - "0x0000000000000000000000000000000000000000"
+
+    Hex:
+      type: string
+      description: |
+        An arbitrary-length `0x`-prefixed hex string. Used for the intent hash,
+        signature, and nonce fields.
+      pattern: '^0x[0-9a-fA-F]+$'
+      examples:
+        - "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+
+    IntentStatus:
+      type: string
+      description: Lifecycle state of an intent in the mempool.
+      enum:
+        - pending
+        - claimed
+        - settling
+        - settled
+        - refunded
+        - expired
+
+    # ─── Core domain schemas ────────────────────────────────────────────────
+
+    Intent:
+      type: object
+      description: |
+        The canonical, signable description of what a user wants: spend a known
+        asset/amount on a source EVM chain and receive at least `minDestAmount`
+        of a target asset on Stellar before `deadline`.
+
+        All numeric amounts are **decimal strings** in the asset's smallest
+        unit to preserve full precision.
+      required:
+        - user
+        - destination
+        - sourceChainId
+        - sourceAsset
+        - sourceAmount
+        - destAsset
+        - minDestAmount
+        - deadline
+        - nonce
+        - preferredSolver
+      properties:
+        user:
+          $ref: '#/components/schemas/Address'
+          description: EVM address of the user funding the source leg (the EIP-712 signer).
+        destination:
+          type: string
+          description: |
+            Stellar address that will receive the settled assets. Either a
+            `G...` (account strkey) or `C...` (contract strkey), or `"native"`
+            for the native XLM asset destination.
+          examples:
+            - "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+        sourceChainId:
+          type: integer
+          description: |
+            EVM chain ID of the source network the user spends from.
+            Common values: `1` (Ethereum mainnet), `8453` (Base),
+            `42161` (Arbitrum One).
+          examples:
+            - 8453
+        sourceAsset:
+          $ref: '#/components/schemas/Address'
+          description: ERC-20 token address being spent on the source chain.
+        sourceAmount:
+          type: string
+          description: |
+            Amount of `sourceAsset` the user locks, in the asset's smallest
+            unit (decimal string, e.g. `"1000000"` for 1 USDC with 6 decimals).
+          pattern: '^[0-9]+$'
+          examples:
+            - "1000000"
+        destAsset:
+          type: string
+          description: |
+            Asset the user wants to receive on Stellar.
+            - `"native"` for XLM
+            - `"<CODE>:<ISSUER_G...>"` for an issued asset
+          examples:
+            - "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+            - "native"
+        minDestAmount:
+          type: string
+          description: |
+            Minimum acceptable amount of `destAsset` in its smallest unit
+            (slippage floor). The solver must deliver at least this amount or
+            the settlement is rejected.
+          pattern: '^[0-9]+$'
+          examples:
+            - "9900000"
+        deadline:
+          type: integer
+          description: |
+            Unix timestamp (seconds) after which the intent is void and
+            source-chain funds become refundable.
+          examples:
+            - 1751280000
+        nonce:
+          $ref: '#/components/schemas/Hex'
+          description: |
+            Unique value preventing replay or collision of otherwise-identical
+            intents. Typically a random 32-byte hex string.
+        preferredSolver:
+          $ref: '#/components/schemas/Address'
+          description: |
+            Optional solver address granted exclusive fill rights. Set to the
+            zero address (`0x0000...0000`) for an open, competitive auction.
+
+    SignedIntent:
+      type: object
+      description: |
+        An `Intent` together with its EIP-712 signature and the canonical
+        `intent_hash` that serves as the mempool and on-chain identifier.
+      required:
+        - intent
+        - signature
+        - hash
+      properties:
+        intent:
+          $ref: '#/components/schemas/Intent'
+        signature:
+          $ref: '#/components/schemas/Hex'
+          description: |
+            EIP-712 signature over the intent by `intent.user`. Must be a
+            valid 65-byte (`r`, `s`, `v`) compact hex string.
+        hash:
+          $ref: '#/components/schemas/Hex'
+          description: |
+            keccak256 EIP-712 commitment of the intent — the primary mempool
+            and on-chain identifier. Computed by the SDK `hashIntent` function
+            and verified server-side on submission.
+
+    IntentRecord:
+      allOf:
+        - $ref: '#/components/schemas/SignedIntent'
+        - type: object
+          description: |
+            A `SignedIntent` enriched with lifecycle metadata maintained by
+            the mempool server.
+          required:
+            - status
+            - createdAt
+          properties:
+            status:
+              $ref: '#/components/schemas/IntentStatus'
+            solver:
+              $ref: '#/components/schemas/Address'
+              description: |
+                EVM address of the solver that claimed the intent.
+                Present only after status reaches `claimed` or later.
+            settlementTx:
+              type: string
+              description: |
+                Stellar transaction hash of the settlement operation.
+                Present only after status reaches `settled`.
+              examples:
+                - "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+            createdAt:
+              type: integer
+              description: Unix timestamp (seconds) at which the record was created.
+              examples:
+                - 1751270400
+
+    # ─── Request / response envelopes ──────────────────────────────────────
+
+    SubmitIntentResponse:
+      type: object
+      description: Successful response body from `POST /intents`.
+      required:
+        - hash
+      properties:
+        hash:
+          $ref: '#/components/schemas/Hex'
+          description: |
+            The canonical `intent_hash` computed by the server.  Clients
+            should verify this matches their locally-computed hash before
+            storing the value.
+
+    ErrorResponse:
+      type: object
+      description: |
+        Standard error envelope returned for 4xx and 5xx responses.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Human-readable description of the error.
+          examples:
+            - "Missing intent or signature"
+            - "Invalid signature"
+            - "Intent not found"
+            - "Intent already exists"
+            - "Internal server error"

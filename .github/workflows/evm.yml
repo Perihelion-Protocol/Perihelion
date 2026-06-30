@@ -61,4 +61,49 @@ jobs:
         run: pip install slither-analyzer
 
       - name: Analyze
-        run: slither src/ --config-file slither.config.json
+        run: slither src/ --config-file slither.config.json --json slither-report.json
+
+      - name: Upload Slither report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slither-report
+          path: contracts/evm/slither-report.json
+          if-no-files-found: ignore
+
+  natspec:
+    name: NatSpec coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/evm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install forge-std
+        run: forge install foundry-rs/forge-std --no-git
+
+      - name: Generate NatSpec docs
+        run: forge doc --out /tmp/natspec-out 2>&1 | tee /tmp/natspec-warnings.txt
+
+      - name: Upload NatSpec docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: natspec-docs
+          path: /tmp/natspec-out/
+          if-no-files-found: ignore
+
+      - name: Check for missing NatSpec
+        run: |
+          # Fail if forge build emits warnings about missing @param or @return
+          # on public/external functions. The --force flag ensures a fresh build.
+          forge build --force 2>&1 | tee /tmp/build-out.txt
+          if grep -qE 'Warning.*@(param|return|notice)' /tmp/build-out.txt; then
+            echo "::error::NatSpec gaps detected in public/external functions:"
+            grep -E 'Warning.*@(param|return|notice)' /tmp/build-out.txt
+            exit 1
+          fi
+          echo "NatSpec check passed."

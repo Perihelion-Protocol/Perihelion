@@ -34,6 +34,7 @@ contracts/evm/lib/
 
 # Slither
 crytic-export/
+contracts/evm/slither-report.json
 
 # Relayer runtime files
 .perihelion-relayer-checkpoint.json
