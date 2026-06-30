@@ -19,6 +19,12 @@ export interface SolverConfig {
   readonly supportedDestAssets: readonly string[];
   /** Maximum number of verification results to cache (LRU eviction). Defaults to 10,000. */
   readonly verificationCacheSize?: number;
+  /**
+   * Maximum number of hashes to keep in the seen-set LRU cache.
+   * Entries are also evicted by TTL (past-deadline) every tick.
+   * Defaults to 50,000 (~7.5 MB worst-case).
+   */
+  readonly seenCacheSize?: number;
 }
 
 /** Build config from `process.env`, applying sensible defaults. */
@@ -35,5 +41,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
       .map((s) => s.trim())
       .filter(Boolean),
     verificationCacheSize: Number(env.PERIHELION_VERIFICATION_CACHE_SIZE ?? 10_000),
+    seenCacheSize: Number(env.PERIHELION_SEEN_CACHE_SIZE ?? 50_000),
   };
 }

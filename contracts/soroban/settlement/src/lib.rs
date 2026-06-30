@@ -47,30 +47,20 @@ use messages::{encode_cancel_intent, encode_fill_confirmed};
 //
 // Event shapes (topics tuple, data tuple):
 //
-// | Symbol                  | Topics                          | Data                                           |
-// |-------------------------|---------------------------------|------------------------------------------------|
-// | `initialized`           | ("initialized",)                 | (admin: Address, endpoint: Address)              |
-// | `endpoint_set`          | ("endpoint_set",)                | (old: Address, new: Address)                     |
-// | `peer_set`              | ("peer_set",)                    | (eid: u32, old: Option<BytesN<32>>, new: BytesN<32>) |
-// | `admin_transfer_started`| ("admin_transfer_started",)        | (old: Address, new: Address)                     |
-// | `admin_transfer_completed`| ("admin_transfer_completed",)    | (old: Address, new: Address)                     |
-// | `paused_set`            | ("paused_set",)                  | (paused: bool)                                   |
-// | `registered`            | ("registered", intent_hash)        | (src_eid: u32, deadline: u64)                    |
-// | `filled`                | ("filled", intent_hash)            | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32) |
-// | `confirmation_sent`       | ("confirmation_sent", intent_hash) | (solver: Address)                                |
-// | `cancelled`             | ("cancelled", intent_hash)         | (src_eid: u32, deadline: u64)                    |
-// | `cancelled_inbound`      | ("cancelled_inbound", intent_hash)  | (src_eid: u32)                                   |
-// | `cancel_ignored`        | ("cancel_ignored", intent_hash)    | (status: IntentStatus as u32)                    |
-//
-// Lifecycle event mapping to EVM:
-// - `registered` (Soroban) ↔ `Locked` (EVM): Both signal intent registration.
-//   EVM carries more context (solver, user, asset, amount); Soroban emits after
-//   storage is validated so off-chain systems can trust the record exists.
-// - `filled` (Soroban) ↔ `Released` (EVM): Both signal successful settlement.
-//   EVM event includes fillAmount and fillLedger for off-chain reconciliation.
-// - `cancelled` (Soroban) ↔ `Refunded` (EVM): Both signal cancellation.
-// - `cancelled_inbound` / `cancel_ignored` have no EVM equivalents: they are
-//   Soroban-only audit trails for race conditions on the inbound cancel path.
+// | Symbol                   | Topics                          | Data                                           |
+// |--------------------------|---------------------------------|------------------------------------------------|
+// | `initialized`            | ("initialized",)                 | (admin: Address, endpoint: Address)              |
+// | `endpoint_set`         | ("endpoint_set",)                | (old: Address, new: Address)                     |
+// | `peer_set`             | ("peer_set",)                    | (eid: u32, old: Option<BytesN<32>>, new: BytesN<32>) |
+// | `admin_transfer_started` | ("admin_transfer_started",)      | (old: Address, new: Address)                     |
+// | `admin_transfer_completed` | ("admin_transfer_completed",)  | (old: Address, new: Address)                     |
+// | `paused_set`           | ("paused_set",)                  | (paused: bool)                                   |
+// | `registered`           | ("registered", intent_hash)        | (src_eid: u32, deadline: u64)                    |
+// | `filled`               | ("filled", intent_hash)          | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32) |
+// | `confirmation_sent`    | ("confirmation_sent", intent_hash) | (solver: Address)                                |
+// | `cancelled`            | ("cancelled", intent_hash)       | (src_eid: u32, deadline: u64)                    |
+// | `cancelled_inbound`     | ("cancelled_inbound", intent_hash) | (src_eid: u32)                                  |
+// | `cancel_ignored`       | ("cancel_ignored", intent_hash)    | (status: IntentStatus)                           |
 
 /// Hard ceiling for TTL extension. Mirrors the representative network
 /// `max_entry_ttl`; clamp every extension to this. Should track network config.

@@ -1,0 +1,19 @@
+{
+  "name": "@perihelion/e2e-tests",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --experimental-test-coverage *.test.ts",
+    "test:happy": "node --test happy-path.test.ts",
+    "test:refund": "node --test refund-path.test.ts"
+  },
+  "dependencies": {
+    "@perihelion/sdk": "workspace:*",
+    "viem": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -9,6 +9,13 @@ test going red.
 
 All files hold one `0x`-prefixed hex string, no trailing newline.
 
+Amount fields in these vectors use the same smallest-unit and maximum-amount
+rules as the rest of the protocol. See
+[`docs/assets.md`](../../../docs/assets.md) for the canonical per-asset decimals
+and corridor conversion rule, and
+[`docs/intent-spec.md`](../../../docs/intent-spec.md#amount-field-specification)
+for the 16-byte wire-field bounds.
+
 ## `fill_instruction.hex` (158 bytes)
 
 `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(32) | dest_asset(32) | min_dest_amount(16) | deadline(8) | preferred_solver(32)`

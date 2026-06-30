@@ -1,0 +1,241 @@
+name: Mutation Testing
+
+# Runs on a periodic schedule (not on every push — mutation testing is expensive).
+# Also triggerable manually to inspect score at any point.
+#
+# Jobs:
+#   mutants-soroban   — cargo-mutants on the Soroban settlement contract (Rust)
+#   mutants-ts        — Stryker on the TypeScript packages (sdk, relayer, solver)
+#   mutants-evm       — vertigo-rs / forge-based mutation testing for EVM contracts
+
+on:
+  schedule:
+    # Nightly at 03:00 UTC (off-peak, avoids collision with the differential-fuzz job at 02:00)
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: 'Which stack to mutate (soroban | ts | evm | all)'
+        required: false
+        default: 'all'
+        type: choice
+        options: [soroban, ts, evm, all]
+
+concurrency:
+  group: mutation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Soroban / Rust: cargo-mutants
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  mutants-soroban:
+    name: cargo-mutants (Soroban)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' && (inputs.stack == 'soroban' || inputs.stack == 'all')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/soroban/target
+          key: ${{ runner.os }}-cargo-mutants-${{ hashFiles('contracts/soroban/**/Cargo.toml') }}
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked --version "24.7.1"
+
+      - name: Run cargo-mutants on settlement contract
+        working-directory: contracts/soroban/settlement
+        run: |
+          cargo mutants \
+            --timeout 120 \
+            --jobs 2 \
+            --output mutants.out \
+            2>&1 | tee mutation-report.txt
+        continue-on-error: true  # upload report even on threshold failure
+
+      - name: Summarise results
+        working-directory: contracts/soroban/settlement
+        run: |
+          echo "## Soroban Mutation Testing Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f mutants.out/outcomes.json ]; then
+            CAUGHT=$(python3 -c "
+          import json, sys
+          data = json.load(open('mutants.out/outcomes.json'))
+          total  = len(data)
+          caught = sum(1 for m in data if m.get('outcome') in ('caught', 'Caught'))
+          missed = total - caught
+          score  = round(caught / total * 100, 1) if total > 0 else 0
+          print(f'Total: {total}  Caught: {caught}  Missed: {missed}  Score: {score}%')
+          " 2>/dev/null || echo "Could not parse outcomes.json")
+            echo "cargo-mutants: $CAUGHT" >> $GITHUB_STEP_SUMMARY
+          fi
+          cat mutation-report.txt | tail -30 >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload cargo-mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soroban-mutants-report
+          path: contracts/soroban/settlement/mutants.out/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TypeScript: Stryker
+# ─────────────────────────────────────────────────────────────────────────────
+  mutants-ts:
+    name: Stryker (TypeScript)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' && (inputs.stack == 'ts' || inputs.stack == 'all')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript packages
+        run: npm run build
+
+      - name: Install Stryker
+        run: |
+          npm install --save-dev \
+            @stryker-mutator/core@8 \
+            @stryker-mutator/typescript-checker@8
+        # Install locally rather than globally so the version is pinned in CI.
+
+      - name: Run Stryker on SDK (highest priority)
+        run: |
+          npx stryker run \
+            --mutate "sdk/src/intent.ts,sdk/src/validate.ts,sdk/src/units.ts,sdk/src/stellar.ts" \
+            --testRunner command \
+            --commandRunner.command "node --test --import ./node_modules/tsx/dist/esm/index.cjs sdk/test/*.test.ts" \
+            --reporters json,clear-text \
+            --jsonReporter.fileName reports/mutation/sdk-mutation.json \
+            2>&1 | tee sdk-mutation-report.txt
+        continue-on-error: true
+
+      - name: Run Stryker on relayer + solver
+        run: |
+          npx stryker run \
+            --mutate "relayer/src/relayer.ts,relayer/src/soroban-delivery.ts,solver/src/quote.ts,solver/src/executor.ts" \
+            --testRunner command \
+            --commandRunner.command "node --test --import ./node_modules/tsx/dist/esm/index.cjs relayer/test/*.test.ts solver/test/*.test.ts" \
+            --reporters json,clear-text \
+            --jsonReporter.fileName reports/mutation/solver-mutation.json \
+            2>&1 | tee solver-mutation-report.txt
+        continue-on-error: true
+
+      - name: Summarise Stryker results
+        run: |
+          echo "## TypeScript Mutation Testing Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          for f in sdk-mutation-report.txt solver-mutation-report.txt; do
+            if [ -f "$f" ]; then
+              echo "### $f" >> $GITHUB_STEP_SUMMARY
+              grep -E "(Mutation score|mutants|Killed|Survived|Timeout)" "$f" | tail -10 >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Upload Stryker reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stryker-mutation-report
+          path: |
+            sdk-mutation-report.txt
+            solver-mutation-report.txt
+            reports/mutation/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EVM / Solidity: vertigo-rs (forge-based mutation testing)
+# ─────────────────────────────────────────────────────────────────────────────
+  mutants-evm:
+    name: vertigo-rs (EVM)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' && (inputs.stack == 'evm' || inputs.stack == 'all')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install forge-std
+        working-directory: contracts/evm
+        run: forge install foundry-rs/forge-std --no-git
+
+      - name: Install Rust (required by vertigo-rs)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install vertigo-rs
+        run: cargo install vertigo-rs --locked
+
+      - name: Build EVM contracts
+        working-directory: contracts/evm
+        run: forge build
+
+      - name: Run vertigo-rs mutation testing
+        working-directory: contracts/evm
+        run: |
+          vertigo run \
+            --match-contract PerihelionEscrow \
+            2>&1 | tee mutation-report.txt
+        continue-on-error: true
+
+      - name: Summarise EVM results
+        run: |
+          echo "## EVM Mutation Testing Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f contracts/evm/mutation-report.txt ]; then
+            tail -30 contracts/evm/mutation-report.txt >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload EVM mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evm-mutation-report
+          path: contracts/evm/mutation-report.txt
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Summary
+# ─────────────────────────────────────────────────────────────────────────────
+  mutation-summary:
+    name: Mutation Score Summary
+    needs: [mutants-soroban, mutants-ts, mutants-evm]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Final summary
+        run: |
+          echo "## Mutation Testing Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stack   | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Soroban | ${{ needs.mutants-soroban.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| TypeScript | ${{ needs.mutants-ts.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| EVM | ${{ needs.mutants-evm.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download artefacts for the full report (surviving mutants, triage list)." >> $GITHUB_STEP_SUMMARY
+          echo "See docs/mutation-testing.md for how to action surviving mutants." >> $GITHUB_STEP_SUMMARY

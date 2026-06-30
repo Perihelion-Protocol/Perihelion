@@ -1050,6 +1050,21 @@ contract PerihelionEscrowTest is Test {
         _confirm(h, solver, 1);
     }
 
+    /// @notice Inbound ordering: CancelIntent arrives first, then FillConfirmed.
+    ///         The CancelIntent must win and the subsequent FillConfirmed must
+    ///         be rejected with AlreadyFinalized (protocol I1/I2).
+    function test_RaceGuard_InboundCancelThenConfirm() public {
+        bytes32 h = _lock();
+
+        // Inbound CancelIntent delivered first.
+        _cancel(h, 1);
+        assertEq(token.balanceOf(user), 1_000_000);
+
+        // Subsequent FillConfirmed must be rejected by AlreadyFinalized.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
+        _confirm(h, solver, 2);
+    }
+
     /// @notice Second ordering: confirm wins, then local refund is attempted.
     ///         Should be rejected by AlreadyFinalized guard (I1/I2).
     function test_RaceGuard_ConfirmThenRefund() public {

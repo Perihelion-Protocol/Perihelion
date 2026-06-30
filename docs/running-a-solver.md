@@ -29,7 +29,7 @@ This document walks a new operator through setting up and running a **Perihelion
 ### 1. Clone the repository and install dependencies
 
 ```bash
-git clone https://github.com/Perihelion-Protocol/perihelion.git
+git clone https://github.com/Perihelion-Protocol/Perihelion.git
 cd perihelion
 
 npm install

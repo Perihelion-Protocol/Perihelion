@@ -43,5 +43,14 @@ test: ## Run all tests including differential fuzzing
 	@echo "Running all tests..."
 	cd contracts/evm && forge test
 	cd contracts/soroban/settlement && cargo test
+	npm run test --workspaces --if-present
+
+test-e2e: ## Run end-to-end integration tests
+	@echo "Running end-to-end tests..."
+	cd test && npm test
+
+test-e2e-watch: ## Run end-to-end tests in watch mode
+	@echo "Running end-to-end tests (watch mode)..."
+	cd test && npm run test:watch
 
 .DEFAULT_GOAL := help

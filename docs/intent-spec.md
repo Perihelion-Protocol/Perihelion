@@ -19,8 +19,9 @@ outcome and the constraints under which a solver may fill it.
 | `nonce`           | `uint256` | Unique value preventing replay/collision of identical intents    |
 | `preferredSolver` | `address` | Optional exclusive solver; `address(0)` = open to all            |
 
-All amounts are decimal strings in the asset's smallest unit, preserving
-precision across the EVM (typically 6–18 decimals) and Stellar (7 decimals).
+All amounts are decimal strings in the asset's smallest unit. The canonical
+per-asset decimals, corridor conversion rule, and human-unit ceilings are in
+[Asset Decimals and Corridors](./assets.md).
 
 ## Amount Field Specification
 
@@ -42,7 +43,9 @@ where cross-chain amount bugs live.
 > for destination amounts. The stricter ceiling for destinations comes from
 > Soroban's `i128` type: amounts in the range (i128::MAX, u128::MAX] decode
 > correctly from the wire but would appear negative to the settlement contract,
-> which then rejects them (see Conversion rules below).
+> which then rejects them (see Conversion rules below). Human-unit ceilings for
+> 6, 7, and 18 decimal assets are listed in
+> [Asset Decimals and Corridors](./assets.md#human-unit-ceilings).
 
 ### Conversion rules at each boundary
 

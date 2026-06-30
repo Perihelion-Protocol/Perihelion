@@ -16,6 +16,11 @@ on:
         type: boolean
         default: false
 
+# Cancel in-progress runs on the same branch/PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   FOUNDRY_PROFILE: ci
 
@@ -28,6 +33,14 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
+
+      - name: Cache Foundry build
+        uses: actions/cache@v4
+        with:
+          path: contracts/evm/out
+          key: ${{ runner.os }}-forge-out-${{ hashFiles('contracts/evm/src/**/*.sol', 'contracts/evm/test/**/*.sol', 'contracts/evm/foundry.toml') }}
 
       - name: Run bounded differential fuzzing (100 cases)
         if: github.event_name != 'schedule' && !inputs.extended
@@ -55,12 +68,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.81.0
           targets: wasm32-unknown-unknown
 
       - name: Cache Cargo
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -68,7 +82,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             contracts/soroban/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Install Soroban CLI
         run: cargo install --locked soroban-cli --version 21.0.0
@@ -113,6 +127,8 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
 
       - name: Validate Rust-generated payloads with Solidity decoder
         working-directory: contracts/evm

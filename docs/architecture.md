@@ -56,9 +56,12 @@ hash is stable across off-chain and on-chain code.
 
 ## Trust model
 
-- **Messaging** rides LayerZero's DVN verification. Where Stellar Protocol 24 ZK
-  proofs are available, the destination can verify source-chain state directly,
-  removing trust in the relayer entirely.
+- **Messaging** rides LayerZero's DVN verification (the current and sole
+  verification mechanism). Stellar Protocol 24 ZK proofs are a planned future
+  enhancement (see the Phase-3 roadmap in
+  [TECHNICAL-ARCHITECTURE.md §8.3](./TECHNICAL-ARCHITECTURE.md#83-phase-3--trust-minimized-verification-zk-proposed))
+  that would allow the destination to verify source-chain state directly,
+  removing trust in the relayer entirely. They are not yet integrated.
 - **Relayers are permissionless.** A faulty relayer can delay or censor, but
   cannot forge a delivery — the settlement contract authorizes only its
   configured endpoint and verifies the message independently.
