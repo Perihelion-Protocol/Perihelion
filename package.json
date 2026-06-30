@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/perihelion-protocol/perihelion.git"
+    "url": "https://github.com/Perihelion-Protocol/Perihelion.git"
   },
   "workspaces": [
     "sdk",
@@ -17,6 +17,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present"
   },

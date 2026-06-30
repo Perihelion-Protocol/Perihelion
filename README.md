@@ -8,7 +8,7 @@ An open-source, intent-based cross-chain bridge connecting Stellar to
 EVM-compatible networks — Ethereum, Base, Arbitrum, and beyond.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![CI](https://github.com/Perihelion-Protocol/perihelion/actions/workflows/ci.yml/badge.svg)](https://github.com/Perihelion-Protocol/perihelion/actions/workflows/ci.yml)
+[![CI](https://github.com/Perihelion-Protocol/Perihelion/actions/workflows/ci.yml/badge.svg)](https://github.com/Perihelion-Protocol/Perihelion/actions/workflows/ci.yml)
 [![Status: Early Development](https://img.shields.io/badge/status-early%20development-orange.svg)](#project-status)
 [![Soroban](https://img.shields.io/badge/Stellar-Soroban-black.svg)](https://soroban.stellar.org)
 [![Solidity](https://img.shields.io/badge/EVM-Solidity-363636.svg)](https://soliditylang.org)
@@ -225,8 +225,8 @@ workspace for the Soroban contracts, and a Foundry project for the EVM contracts
 
 ```bash
 # Clone
-git clone https://github.com/Perihelion-Protocol/perihelion.git
-cd perihelion
+git clone https://github.com/Perihelion-Protocol/Perihelion.git
+cd Perihelion
 
 # 1. TypeScript workspaces (sdk, solver, relayer)
 npm install
@@ -298,10 +298,12 @@ See the [`sdk/` README](./sdk/README.md) for the full API.
 | Document                                                                | Description                                                                 |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | [Technical Architecture](./docs/TECHNICAL-ARCHITECTURE.md)              | Full production spec: contracts, LayerZero V2, solver economics, security, testing, rollout |
+| [Intent Lifecycle Diagram](./docs/TECHNICAL-ARCHITECTURE.md#intent-lifecycle-state-diagram) | Canonical state diagram mapping SDK / EVM / Soroban vocabularies, all transitions and terminal paths |
 | [Architecture Overview](./docs/architecture.md)                         | High-level settlement flow and trust model                                  |
 | [Intent Specification](./docs/intent-spec.md)                           | The signable intent format and EIP-712 encoding                             |
 | [Deployment & Operations](./docs/deployment.md)                         | Production deployment, the timelock-multisig owner + guardian, and admin/incident runbooks |
 | [Differential Fuzzing](./docs/differential-fuzzing.md)                  | Wire format codec validation harness for detecting encoder/decoder divergence |
+| [Coverage Reporting](./docs/coverage.md)                                | How to produce and interpret lcov/Codecov coverage for all three languages  |
 | [Glossary](./docs/glossary.md)                                          | Definitions of every protocol term                                          |
 | [FAQ](./docs/faq.md)                                                    | Common questions about safety, solvers, and trust                           |
 | [Contributing Guide](./CONTRIBUTING.md)                                 | How to contribute and where the work lives                                  |
@@ -355,8 +357,8 @@ disclosure process in [`SECURITY.md`](./SECURITY.md).
 
 ## Community & Support
 
-- 🐛 **Bugs & features:** [open an issue](https://github.com/Perihelion-Protocol/perihelion/issues)
-- 💬 **Questions & design discussion:** [GitHub Discussions](https://github.com/Perihelion-Protocol/perihelion/discussions)
+- 🐛 **Bugs & features:** [open an issue](https://github.com/Perihelion-Protocol/Perihelion/issues)
+- 💬 **Questions & design discussion:** [GitHub Discussions](https://github.com/Perihelion-Protocol/Perihelion/discussions)
 - 📣 **Updates:** watch the repository for releases
 
 ## License

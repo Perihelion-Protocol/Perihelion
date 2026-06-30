@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: 💬 Questions & Design Discussion
-    url: https://github.com/Perihelion-Protocol/perihelion/discussions
+    url: https://github.com/Perihelion-Protocol/Perihelion/discussions
     about: Ask questions and discuss architecture in GitHub Discussions.
   - name: 🔒 Report a Security Vulnerability
-    url: https://github.com/Perihelion-Protocol/perihelion/security/advisories/new
+    url: https://github.com/Perihelion-Protocol/Perihelion/security/advisories/new
     about: Privately disclose a security issue — do not open a public issue.

@@ -26,4 +26,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Targeted `soroban-sdk` 22 to match the modern `Env::register` contract API.
 - Pinned Node global types (`types: ["node"]`) in the shared TS config.
 
-[Unreleased]: https://github.com/Perihelion-Protocol/perihelion/commits/main
+[Unreleased]: https://github.com/Perihelion-Protocol/Perihelion/commits/main
