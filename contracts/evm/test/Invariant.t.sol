@@ -181,9 +181,14 @@ contract PerihelionEscrowInvariantTest is Test {
         );
     }
 
-    /// Released and refunded are mutually exclusive for every intent ever locked:
-    /// at most one terminal transition wins (design invariants I1/I2).
-    function invariant_singleTerminalTransition() public view {
+    /// Invariant I1/I2 — Single terminal transition per intent
+    ///
+    /// I1/I2: For every locked intent, exactly one terminal transition may
+    /// occur: either `released` (solver paid) OR `refunded` (user refunded),
+    /// never both and never twice. This function asserts the protocol-level
+    /// single-terminal-transition safety property across every intent created
+    /// during the fuzz session.
+    function invariant_I1_I2_singleTerminalTransition() public view {
         uint256 n = handler.everCount();
         for (uint256 i = 0; i < n; i++) {
             bytes32 h = handler.everHashAt(i);
