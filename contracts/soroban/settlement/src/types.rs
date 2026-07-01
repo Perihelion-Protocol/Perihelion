@@ -42,6 +42,8 @@ pub enum DataKey {
     ConfirmationSent(BytesN<32>),
 
     // Persistent tier (transport bookkeeping).
+    /// Aggregate reputation metrics for a solver, keyed by solver address.
+    SolverReputation(Address),
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
     /// Tracks which nonces have been processed. The bitmap covers nonces in
     /// the range [base, base + 63] where base is stored separately.

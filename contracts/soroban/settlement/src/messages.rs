@@ -122,11 +122,12 @@ pub fn decode_message(
             let dummy = FillInstruction {
                 intent_hash: ci.intent_hash.clone(),
                 src_eid: 0,
-                recipient: Address::from_contract_id(env, &BytesN::from_array(env, &[0u8; 32])),
-                dest_asset: Address::from_contract_id(env, &BytesN::from_array(env, &[0u8; 32])),
+                recipient: Address::from_contract_id(env, [0u8; 32]),
+                dest_asset: Address::from_contract_id(env, [0u8; 32]),
                 min_dest_amount: 0,
                 deadline: 0,
                 preferred_solver: None,
+                reservation_window: 0,
             };
             Ok((msg_type, dummy, Some(ci)))
         }
@@ -172,7 +173,7 @@ fn decode_fill_instruction(
             .get(38 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
-    let recipient = Address::from_contract_id(env, &BytesN::from_array(env, &recipient_bytes));
+    let recipient = Address::from_contract_id(env, recipient_bytes);
 
     // Extract dest_asset (offset 70, 32 bytes)
     let mut dest_asset_bytes = [0u8; 32];
@@ -181,7 +182,7 @@ fn decode_fill_instruction(
             .get(70 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
-    let dest_asset = Address::from_contract_id(env, &BytesN::from_array(env, &dest_asset_bytes));
+    let dest_asset = Address::from_contract_id(env, dest_asset_bytes);
 
     // Extract min_dest_amount (offset 102, 16 bytes, big-endian)
     let mut min_dest_amount_bytes = [0u8; 16];
@@ -212,10 +213,7 @@ fn decode_fill_instruction(
     let preferred_solver = if preferred_solver_bytes == [0u8; 32] {
         None
     } else {
-        Some(Address::from_contract_id(
-            env,
-            &BytesN::from_array(env, &preferred_solver_bytes),
-        ))
+        Some(Address::from_contract_id(env, preferred_solver_bytes))
     };
 
     Ok(FillInstruction {
@@ -257,12 +255,15 @@ fn decode_cancel_intent(
     let reason_byte = message
         .get(34)
         .ok_or(PerihelionError::MalformedPayload)?;
-    if reason_byte != CANCEL_REASON_EXPIRED as u32
-        && reason_byte != CANCEL_REASON_ADMIN as u32
-        && reason_byte != CANCEL_REASON_INVALID as u32
+    if reason_byte != CANCEL_REASON_EXPIRED
+        && reason_byte != CANCEL_REASON_ADMIN
+        && reason_byte != CANCEL_REASON_INVALID
     {
         return Err(PerihelionError::MalformedPayload);
     }
 
-    Ok(CancelInstruction { intent_hash, reason: reason_byte })
+    Ok(CancelInstruction {
+        intent_hash,
+        reason: reason_byte as u32,
+    })
 }

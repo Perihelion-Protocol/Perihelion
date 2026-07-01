@@ -1,0 +1,18 @@
+{
+  "max_wasm_size_bytes": 220000,
+  "tolerance_percent": 10,
+  "entrypoints": {
+    "lz_receive": {
+      "max_cpu_instructions": 1200000,
+      "max_memory_bytes": 400000
+    },
+    "fill_intent": {
+      "max_cpu_instructions": 1800000,
+      "max_memory_bytes": 520000
+    },
+    "cancel_expired_intent": {
+      "max_cpu_instructions": 1100000,
+      "max_memory_bytes": 360000
+    }
+  }
+}

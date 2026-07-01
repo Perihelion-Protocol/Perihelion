@@ -87,8 +87,8 @@ proptest! {
 
         // Assert layout: version(1) | type(1) | hash(32) | solver(32) | amount(16) | ledger(8)
         assert_eq!(encoded.len(), 90, "FillConfirmed must be 90 bytes");
-        assert_eq!(encoded.get(0).unwrap(), PROTOCOL_VERSION as u32);
-        assert_eq!(encoded.get(1).unwrap(), MSG_FILL_CONFIRMED as u32);
+        assert_eq!(encoded.get(0).unwrap(), PROTOCOL_VERSION);
+        assert_eq!(encoded.get(1).unwrap(), MSG_FILL_CONFIRMED);
 
         // Decode hash (bytes 2..34)
         let mut decoded_hash = [0u8; 32];
@@ -177,8 +177,8 @@ proptest! {
 
         // Assert layout: version(1) | type(1) | hash(32) | reason(1)
         assert_eq!(encoded.len(), 35, "CancelIntent must be 35 bytes");
-        assert_eq!(encoded.get(0).unwrap(), PROTOCOL_VERSION as u32);
-        assert_eq!(encoded.get(1).unwrap(), MSG_CANCEL_INTENT as u32);
+        assert_eq!(encoded.get(0).unwrap(), PROTOCOL_VERSION);
+        assert_eq!(encoded.get(1).unwrap(), MSG_CANCEL_INTENT);
 
         // Decode hash (bytes 2..34)
         let mut decoded_hash = [0u8; 32];
