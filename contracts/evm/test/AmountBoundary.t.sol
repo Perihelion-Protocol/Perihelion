@@ -34,7 +34,7 @@ import { IERC20 } from "../src/IERC20.sol";
 ///   • contracts/soroban/settlement/src/test.rs — Soroban-side boundary tests
 
 contract AmountBoundaryHarness is PerihelionEscrow {
-    constructor(address ep, uint32 eid) PerihelionEscrow(ep, eid) {}
+    constructor(address ep, uint32 eid) PerihelionEscrow(ep, eid) { }
 
     function exposedHashIntent(Intent calldata intent) external view returns (bytes32) {
         return hashIntent(intent);
@@ -45,7 +45,7 @@ contract AmountBoundaryTest is Test {
     // u128::MAX = 2^128 - 1
     uint256 internal constant U128_MAX = type(uint128).max;
     // i128::MAX = 2^127 - 1 = u128::MAX >> 1
-    uint256 internal constant I128_MAX = uint256(type(int128).max);
+    uint256 internal constant I128_MAX = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF; // 2^127 - 1
 
     AmountBoundaryHarness internal harness;
 

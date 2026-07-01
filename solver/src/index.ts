@@ -11,6 +11,7 @@ import { loadExecutorConfig } from "./executor-config.js";
 import { Solver } from "./solver.js";
 import { Executor } from "./executor.js";
 import { SolverMetrics } from "./metrics.js";
+import { createLogger } from "./logger.js";
 import { createServer } from "node:http";
 
 async function main(): Promise<void> {
@@ -18,7 +19,11 @@ async function main(): Promise<void> {
   const executorConfig = loadExecutorConfig();
   const executor = new Executor(executorConfig);
   const metrics = new SolverMetrics();
-  const solver = new Solver(config, executor, console, metrics);
+
+  // Structured JSON logger — replaces console for production-grade output.
+  const log = createLogger();
+
+  const solver = new Solver(config, executor, log, metrics);
 
   // Minimal HTTP server for Prometheus scraping.
   const metricsPort = Number(process.env.PERIHELION_METRICS_PORT ?? 9090);
@@ -32,11 +37,11 @@ async function main(): Promise<void> {
     }
   });
   server.listen(metricsPort, () => {
-    console.info(`metrics endpoint listening on :${metricsPort}/metrics`);
+    log.info("metrics endpoint listening", { port: metricsPort, path: "/metrics" });
   });
 
   const shutdown = () => {
-    console.info("shutting down solver");
+    log.info("shutting down solver");
     solver.stop();
     server.close();
     process.exit(0);
@@ -48,6 +53,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err);
+  const log = createLogger();
+  log.error("fatal startup error", { err: String(err) });
   process.exit(1);
 });

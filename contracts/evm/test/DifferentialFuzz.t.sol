@@ -46,11 +46,11 @@ contract DifferentialFuzzTest is Test {
     ) public view {
         // Constrain amount to realistic range (0 to max Stellar stroops ~9e18).
         amount = uint128(bound(amount, 0, type(uint128).max));
-        
+
         // Encode manually to match the Rust encoder layout.
         bytes memory encoded = abi.encodePacked(
-            bytes1(0x01),      // PROTOCOL_VERSION
-            bytes1(0x02),      // MSG_FILL_CONFIRMED
+            bytes1(0x01), // PROTOCOL_VERSION
+            bytes1(0x02), // MSG_FILL_CONFIRMED
             intentHash,
             bytes32(uint256(uint160(solverEvm))), // left-padded 20-byte address
             amount,
@@ -76,9 +76,9 @@ contract DifferentialFuzzTest is Test {
         vm.assume(highBits != 0); // Must be non-zero to trigger rejection
 
         // Construct a malformed solver_evm word: high 12 bytes != 0.
-        bytes32 malformedSolver = bytes32(
-            (uint256(highBits) << 160) | uint256(uint160(0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA))
-        );
+        // Use a non-zero address that will still have high bits set
+        address solverAddr = address(0xaaaaaaaaaaaaaaaaaaaaaaaa);
+        bytes32 malformedSolver = bytes32((uint256(highBits) << 160) | uint256(uint160(solverAddr)));
 
         bytes memory payload = abi.encodePacked(
             bytes1(0x01), bytes1(0x02), intentHash, malformedSolver, amount, ledger
@@ -100,8 +100,12 @@ contract DifferentialFuzzTest is Test {
         truncateBytes = uint8(bound(truncateBytes, 1, 89));
 
         bytes memory full = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(solverEvm))), amount, ledger
+            bytes1(0x01),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(solverEvm))),
+            amount,
+            ledger
         );
         bytes memory truncated = new bytes(90 - truncateBytes);
         for (uint256 i = 0; i < truncated.length; i++) {
@@ -123,8 +127,12 @@ contract DifferentialFuzzTest is Test {
         vm.assume(extraBytes.length > 0 && extraBytes.length < 100); // Keep test bounded
 
         bytes memory payload = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(solverEvm))), amount, ledger,
+            bytes1(0x01),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(solverEvm))),
+            amount,
+            ledger,
             extraBytes
         );
 
@@ -143,8 +151,12 @@ contract DifferentialFuzzTest is Test {
         vm.assume(badVersion != 0x01); // Must differ from PROTOCOL_VERSION
 
         bytes memory payload = abi.encodePacked(
-            bytes1(badVersion), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(solverEvm))), amount, ledger
+            bytes1(badVersion),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(solverEvm))),
+            amount,
+            ledger
         );
 
         vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
@@ -163,8 +175,12 @@ contract DifferentialFuzzTest is Test {
         vm.assume(badType != 0x01 && badType != 0x02 && badType != 0x03);
 
         bytes memory payload = abi.encodePacked(
-            bytes1(0x01), bytes1(badType), intentHash,
-            bytes32(uint256(uint160(solverEvm))), amount, ledger
+            bytes1(0x01),
+            bytes1(badType),
+            intentHash,
+            bytes32(uint256(uint160(solverEvm))),
+            amount,
+            ledger
         );
 
         vm.expectRevert(PerihelionEscrow.UnknownMessageType.selector);
@@ -181,8 +197,8 @@ contract DifferentialFuzzTest is Test {
         reason = uint8(bound(reason, 0, 2));
 
         bytes memory encoded = abi.encodePacked(
-            bytes1(0x01),  // PROTOCOL_VERSION
-            bytes1(0x03),  // MSG_CANCEL_INTENT
+            bytes1(0x01), // PROTOCOL_VERSION
+            bytes1(0x03), // MSG_CANCEL_INTENT
             intentHash,
             reason
         );
@@ -194,15 +210,10 @@ contract DifferentialFuzzTest is Test {
     }
 
     /// @dev Mutation: reject unknown reason codes (outside [0, 2]).
-    function testFuzz_CancelIntentRejectsUnknownReason(
-        bytes32 intentHash,
-        uint8 badReason
-    ) public {
+    function testFuzz_CancelIntentRejectsUnknownReason(bytes32 intentHash, uint8 badReason) public {
         vm.assume(badReason > 2); // Valid: 0x00, 0x01, 0x02
 
-        bytes memory payload = abi.encodePacked(
-            bytes1(0x01), bytes1(0x03), intentHash, badReason
-        );
+        bytes memory payload = abi.encodePacked(bytes1(0x01), bytes1(0x03), intentHash, badReason);
 
         vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
         harness.decodeCancelIntent(payload);
@@ -217,9 +228,7 @@ contract DifferentialFuzzTest is Test {
         reason = uint8(bound(reason, 0, 2));
         truncateBytes = uint8(bound(truncateBytes, 1, 34));
 
-        bytes memory full = abi.encodePacked(
-            bytes1(0x01), bytes1(0x03), intentHash, reason
-        );
+        bytes memory full = abi.encodePacked(bytes1(0x01), bytes1(0x03), intentHash, reason);
         bytes memory truncated = new bytes(35 - truncateBytes);
         for (uint256 i = 0; i < truncated.length; i++) {
             truncated[i] = full[i];
@@ -238,9 +247,8 @@ contract DifferentialFuzzTest is Test {
         reason = uint8(bound(reason, 0, 2));
         vm.assume(extraBytes.length > 0 && extraBytes.length < 100);
 
-        bytes memory payload = abi.encodePacked(
-            bytes1(0x01), bytes1(0x03), intentHash, reason, extraBytes
-        );
+        bytes memory payload =
+            abi.encodePacked(bytes1(0x01), bytes1(0x03), intentHash, reason, extraBytes);
 
         vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
         harness.decodeCancelIntent(payload);
@@ -255,9 +263,8 @@ contract DifferentialFuzzTest is Test {
         vm.assume(badVersion != 0x01);
         reason = uint8(bound(reason, 0, 2));
 
-        bytes memory payload = abi.encodePacked(
-            bytes1(badVersion), bytes1(0x03), intentHash, reason
-        );
+        bytes memory payload =
+            abi.encodePacked(bytes1(badVersion), bytes1(0x03), intentHash, reason);
 
         vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
         harness.routeInbound(payload);
@@ -272,9 +279,7 @@ contract DifferentialFuzzTest is Test {
         vm.assume(badType != 0x01 && badType != 0x02 && badType != 0x03);
         reason = uint8(bound(reason, 0, 2));
 
-        bytes memory payload = abi.encodePacked(
-            bytes1(0x01), bytes1(badType), intentHash, reason
-        );
+        bytes memory payload = abi.encodePacked(bytes1(0x01), bytes1(badType), intentHash, reason);
 
         vm.expectRevert(PerihelionEscrow.UnknownMessageType.selector);
         harness.routeInbound(payload);
@@ -286,7 +291,11 @@ contract DifferentialFuzzTest is Test {
 contract DecoderHarness is PerihelionEscrow {
     constructor(address endpoint_, uint32 eid_) PerihelionEscrow(endpoint_, eid_) { }
 
-    function decodeFillConfirmed(bytes calldata m) external pure returns (bytes32, address, uint128, uint64) {
+    function decodeFillConfirmed(bytes calldata m)
+        external
+        pure
+        returns (bytes32, address, uint128, uint64)
+    {
         return _decodeFillConfirmed(m);
     }
 

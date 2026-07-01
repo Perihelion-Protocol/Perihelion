@@ -16,8 +16,9 @@
  * Decimal normalization
  * ─────────────────────
  * Source and destination decimals are passed in as explicit parameters rather
- * than hard-coded. The default stub uses 6→7 (EVM USDC → Stellar USDC) only as
- * a documented example; any other corridor must supply the correct decimals.
+ * than hard-coded. The canonical asset table and corridor conversion rule live
+ * in docs/assets.md; any production corridor must supply decimals that match
+ * that table.
  */
 
 import { isExpired, fromSmallestUnits, toSmallestUnits } from "@perihelion/sdk";
@@ -50,8 +51,8 @@ export type FeeEstimator = (intent: Intent) => Promise<bigint>;
 // ─── defaults ────────────────────────────────────────────────────────────────
 
 /**
- * Known decimal configurations for common assets.
- * Extend or replace with a live lookup in production.
+ * Known decimal configurations for common assets. Keep this aligned with
+ * docs/assets.md, or replace it with a live lookup in production.
  */
 const KNOWN_DECIMALS: Record<string, number> = {
   // Stellar (7dp)
@@ -131,14 +132,14 @@ export interface FillDecision {
  * profit_bps = (proceeds - deliveryCost - fees) * 10_000 / proceeds
  * where deliveryCost = minDestAmount (solver must deliver at least this).
  */
-// Decimal places for corridor assets.
-// EVM stablecoins (USDC, EURC, …) use 6dp; Stellar assets use 7dp.
+// Decimal places for the documented 1:1 stablecoin corridor in docs/assets.md.
+// EVM USDC/EURC-style stablecoins use 6dp; Stellar assets use 7dp.
 const SOURCE_DECIMALS = 6;
 const DEST_DECIMALS = 7;
 
 export async function priceDestAsset(intent: Intent): Promise<bigint> {
-  // Convert source smallest-units → human → dest smallest-units for 1:1 rate.
-  // This centralises the 6↔7 decimal corridor rather than baking in * 10n.
+  // Convert source smallest-units -> human -> dest smallest-units for 1:1 rate.
+  // This follows docs/assets.md instead of baking in an unexplained * 10n.
   const humanAmount = fromSmallestUnits(intent.sourceAmount, SOURCE_DECIMALS);
   return BigInt(toSmallestUnits(humanAmount, DEST_DECIMALS));
 

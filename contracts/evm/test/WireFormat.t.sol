@@ -8,7 +8,11 @@ import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 contract DecoderHarness is PerihelionEscrow {
     constructor(address endpoint_, uint32 eid_) PerihelionEscrow(endpoint_, eid_) { }
 
-    function decodeFillConfirmed(bytes calldata m) external pure returns (bytes32, address, uint128, uint64) {
+    function decodeFillConfirmed(bytes calldata m)
+        external
+        pure
+        returns (bytes32, address, uint128, uint64)
+    {
         return _decodeFillConfirmed(m);
     }
 

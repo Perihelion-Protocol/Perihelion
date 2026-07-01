@@ -89,14 +89,14 @@ contract PerihelionTimelockTest is Test {
         address[] memory owners = new address[](1);
         owners[0] = a;
         vm.expectRevert(PerihelionTimelock.InvalidConfig.selector);
-        new PerihelionTimelock(owners, 1, tl.MIN_DELAY() - 1);
+        new PerihelionTimelock(owners, 1, 86399); // 1 day - 1 second
     }
 
     function test_RevertWhen_ConstructorDelayAboveMax() public {
         address[] memory owners = new address[](1);
         owners[0] = a;
         vm.expectRevert(PerihelionTimelock.InvalidConfig.selector);
-        new PerihelionTimelock(owners, 1, tl.MAX_DELAY() + 1);
+        new PerihelionTimelock(owners, 1, 2592001); // 30 days + 1 second
     }
 
     // --- Happy path ----------------------------------------------------------
@@ -351,7 +351,8 @@ contract PerihelionTimelockTest is Test {
     }
 
     function test_RevertWhen_SetDelayBelowMin() public {
-        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, tl.MIN_DELAY() - 1);
+        bytes memory data =
+            abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, tl.MIN_DELAY() - 1);
         bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
         vm.prank(a);
         tl.propose(address(tl), 0, data, SALT);
@@ -364,7 +365,8 @@ contract PerihelionTimelockTest is Test {
     }
 
     function test_RevertWhen_SetDelayAboveMax() public {
-        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, tl.MAX_DELAY() + 1);
+        bytes memory data =
+            abi.encodeWithSelector(PerihelionTimelock.setDelay.selector, tl.MAX_DELAY() + 1);
         bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
         vm.prank(a);
         tl.propose(address(tl), 0, data, SALT);

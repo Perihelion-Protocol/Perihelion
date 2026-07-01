@@ -1,0 +1,75 @@
+{
+  "$schema": "perihelion-signature-vectors-v1",
+  "description": "Deterministic EIP-712 signature test vectors for the Perihelion intent format. Fixed key, fixed intent, fixed domain. Both the Solidity verifier (PerihelionEscrow._verify) and the TypeScript verifier (verifyIntent) must produce identical accept/reject for every entry.",
+  "domain": {
+    "name": "Perihelion",
+    "version": "1",
+    "chainId": 8453,
+    "verifyingContract": "0x1234567890123456789012345678901234567890"
+  },
+  "intent": {
+    "user": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "destination": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    "sourceChainId": 8453,
+    "sourceAsset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "sourceAmount": "1000000",
+    "destAsset": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    "minDestAmount": "9900000",
+    "deadline": 4102444800,
+    "nonce": "42",
+    "preferredSolver": "0x0000000000000000000000000000000000000000"
+  },
+  "intentHash": "0x2a13e474fbc11b64d8df1011811e93203dd1f6fd4de909aba0fb4aa87c974e9d",
+  "signer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "wrongSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "vectors": [
+    {
+      "id": "valid_canonical",
+      "description": "Canonical valid signature from the known signer",
+      "signature": "0x7c5e289af9831456d79a81b665e2e37d72e2289bb775354c8a9d9f161455539e7fe04b2ec0a4981de3777a340f01ed18575ad5a913566ac552ec3caa0728f9401b",
+      "expectedResult": "accept"
+    },
+    {
+      "id": "wrong_signer",
+      "description": "Valid EIP-712 signature but from a different private key than intent.user",
+      "signature": "0xd511a441af9c3d7db19c264418a1aa520f62804c69a3ca7c7a6be346471da9fe077eb58b366cb6c3af39c3ef083a92da51309a31d8d435d52ee954a1186e61e91b",
+      "expectedResult": "reject"
+    },
+    {
+      "id": "high_s_malleable",
+      "description": "High-s malleated signature: same signer but s > secp256k1 half-order. Must be rejected (EIP-2 / low-s enforcement).",
+      "signature": "0x7c5e289af9831456d79a81b665e2e37d72e2289bb775354c8a9d9f161455539e801fb4d13f5b67e21c8885cbf0fe12e66354073d9bf235766ce621e2c90d48011c",
+      "expectedResult": "reject"
+    },
+    {
+      "id": "truncated_64",
+      "description": "Signature truncated to 64 bytes (missing v byte). Must be rejected.",
+      "signature": "0x7c5e289af9831456d79a81b665e2e37d72e2289bb775354c8a9d9f161455539e7fe04b2ec0a4981de3777a340f01ed18575ad5a913566ac552ec3caa0728f940",
+      "expectedResult": "reject"
+    },
+    {
+      "id": "over_length_66",
+      "description": "Signature padded to 66 bytes with a trailing zero. Must be rejected.",
+      "signature": "0x7c5e289af9831456d79a81b665e2e37d72e2289bb775354c8a9d9f161455539e7fe04b2ec0a4981de3777a340f01ed18575ad5a913566ac552ec3caa0728f9401b00",
+      "expectedResult": "reject"
+    },
+    {
+      "id": "bad_v_value_29",
+      "description": "v = 29, which is not in {27, 28}. Must be rejected.",
+      "signature": "0x7c5e289af9831456d79a81b665e2e37d72e2289bb775354c8a9d9f161455539e7fe04b2ec0a4981de3777a340f01ed18575ad5a913566ac552ec3caa0728f9401d",
+      "expectedResult": "reject"
+    },
+    {
+      "id": "cross_chain_domain",
+      "description": "Valid signature but signed under chainId=1 (Ethereum mainnet) rather than chainId=8453 (Base). Must be rejected — domain mismatch.",
+      "signature": "0x3bace6f9e4987d6c9bd2e72c0fb765582ecd30a281d54576461fa14d355efecd7ed5130d04070211f4f651eb8eda8f5efd17768b3adc74b5a93adfa266340fb21c",
+      "expectedResult": "reject"
+    },
+    {
+      "id": "wrong_contract_domain",
+      "description": "Valid signature but signed under a different verifyingContract address. Must be rejected — domain mismatch.",
+      "signature": "0x167b385b560e161164d3c7f477a35ae0a537d9b60f68a9542462f206ec75aaa171babfd03de4e445997d66bd534355242f14dcafabf43204bb6685545e2291561c",
+      "expectedResult": "reject"
+    }
+  ]
+}

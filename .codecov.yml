@@ -1,0 +1,74 @@
+# Codecov configuration for Perihelion Protocol
+# Docs: https://docs.codecov.com/docs/codecov-yaml
+#
+# Thresholds are set to "auto" (ratchet) by default so coverage can only go up.
+# As overall coverage improves, replace `target: auto` with a specific floor
+# (e.g., `target: 80%`) to lock it in. See docs/coverage.md for details.
+
+coverage:
+  status:
+    # ── Project-level threshold ──────────────────────────────────────────────
+    # "auto" means: the required coverage is the current default branch
+    # coverage. Any PR that drops total coverage fails this check.
+    project:
+      default:
+        target: auto
+        threshold: 1%   # tolerate up to 1% variance from floating-point rounding
+        if_not_found: success   # pass on first upload (no baseline yet)
+        if_ci_failed: error
+
+    # ── Patch-level threshold ────────────────────────────────────────────────
+    # New lines introduced in a PR must be at least 70% covered.
+    patch:
+      default:
+        target: 70%
+        threshold: 5%
+        if_not_found: success
+        if_ci_failed: error
+
+# ── Per-package flags ─────────────────────────────────────────────────────────
+# Each flag maps to one language / package, enabling per-flag coverage graphs
+# and PR delta views in the Codecov UI.
+flags:
+  ts-sdk:
+    paths:
+      - sdk/
+    carryforward: true
+
+  ts-solver:
+    paths:
+      - solver/
+    carryforward: true
+
+  ts-relayer:
+    paths:
+      - relayer/
+    carryforward: true
+
+  soroban:
+    paths:
+      - contracts/soroban/
+    carryforward: true
+
+  evm:
+    paths:
+      - contracts/evm/
+    carryforward: true
+
+# ── PR comment layout ─────────────────────────────────────────────────────────
+comment:
+  layout: "reach,diff,flags,tree"
+  behavior: default
+  require_changes: false    # post comment even when coverage is unchanged
+  require_base: false       # post comment even on the first PR to a branch
+  require_head: true        # do not post without a head upload
+
+# ── Paths to exclude from coverage ───────────────────────────────────────────
+# Test files, generated artifacts, and scripts do not need coverage themselves.
+ignore:
+  - "contracts/evm/test/**"
+  - "contracts/soroban/settlement/src/test.rs"
+  - "contracts/soroban/settlement/src/fuzz.rs"
+  - "scripts/**"
+  - "**/dist/**"
+  - "**/node_modules/**"

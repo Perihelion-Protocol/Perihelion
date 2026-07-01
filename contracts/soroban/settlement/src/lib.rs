@@ -33,6 +33,35 @@ use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Symbol};
 
 use messages::{encode_cancel_intent, encode_fill_confirmed};
 
+// =============================================================================
+// EVENT SHAPE SPECIFICATION (issue #102)
+// =============================================================================
+//
+// Events are the off-chain integration surface for indexers, relayers, and
+// monitoring tooling. Each event shape below is a VERSIONED INTERFACE that must
+// be asserted by tests. Changes to event topics or payloads MUST be reflected
+// in both the constants below AND the corresponding EVM-side events.
+//
+// EVM equivalence: See `contracts/evm/src/PerihelionEscrow.sol` for matching
+// event definitions. Cross-chain wire vectors in `contracts/shared/wire-vectors/`.
+//
+// Event shapes (topics tuple, data tuple):
+//
+// | Symbol                   | Topics                          | Data                                           |
+// |--------------------------|---------------------------------|------------------------------------------------|
+// | `initialized`            | ("initialized",)                 | (admin: Address, endpoint: Address)              |
+// | `endpoint_set`         | ("endpoint_set",)                | (old: Address, new: Address)                     |
+// | `peer_set`             | ("peer_set",)                    | (eid: u32, old: Option<BytesN<32>>, new: BytesN<32>) |
+// | `admin_transfer_started` | ("admin_transfer_started",)      | (old: Address, new: Address)                     |
+// | `admin_transfer_completed` | ("admin_transfer_completed",)  | (old: Address, new: Address)                     |
+// | `paused_set`           | ("paused_set",)                  | (paused: bool)                                   |
+// | `registered`           | ("registered", intent_hash)        | (src_eid: u32, deadline: u64)                    |
+// | `filled`               | ("filled", intent_hash)          | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32) |
+// | `confirmation_sent`    | ("confirmation_sent", intent_hash) | (solver: Address)                                |
+// | `cancelled`            | ("cancelled", intent_hash)       | (src_eid: u32, deadline: u64)                    |
+// | `cancelled_inbound`     | ("cancelled_inbound", intent_hash) | (src_eid: u32)                                  |
+// | `cancel_ignored`       | ("cancel_ignored", intent_hash)    | (status: IntentStatus)                           |
+
 /// Hard ceiling for TTL extension. Mirrors the representative network
 /// `max_entry_ttl`; clamp every extension to this. Should track network config.
 pub const MAX_TTL: u32 = 3_110_400;

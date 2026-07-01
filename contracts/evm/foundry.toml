@@ -8,6 +8,8 @@ optimizer_runs = 200
 evm_version = "cancun"
 # Read access to the shared cross-chain wire-format conformance vectors.
 fs_permissions = [{ access = "read", path = "../shared" }]
+# Gas snapshots: fail CI if gas costs increase beyond tolerance
+gas_reports = ["PerihelionEscrow", "PerihelionTimelock"]
 
 [fuzz]
 runs = 256

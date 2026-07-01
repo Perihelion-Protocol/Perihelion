@@ -1,0 +1,89 @@
+# Lefthook pre-commit hook configuration
+# ─────────────────────────────────────
+# Install:  npx lefthook install
+# Skip all: SKIP=pre-commit git commit -m "msg"
+# Skip one: SKIP=cargo-clippy git commit -m "msg"
+# Docs:     https://github.com/evilmartians/lefthook
+
+min_version: 1.6.0
+
+pre-commit:
+  parallel: true
+  commands:
+    # ── Rust / Soroban ──────────────────────────────────────────
+    cargo-fmt:
+      run: |
+        STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- 'contracts/soroban/**/*.rs')
+        [ -z "$STAGED" ] && exit 0
+        cd contracts/soroban && cargo fmt --all &&
+        git add $STAGED
+      skip:
+        - merge
+        - rebase
+
+    cargo-clippy:
+      run: |
+        STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- 'contracts/soroban/**/*.rs')
+        [ -z "$STAGED" ] && exit 0
+        cd contracts/soroban && cargo clippy --all-targets -- -D warnings
+      skip:
+        - merge
+        - rebase
+
+    # ── Solidity / EVM ──────────────────────────────────────────
+    forge-fmt:
+      run: |
+        STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- 'contracts/evm/**/*.sol')
+        [ -z "$STAGED" ] && exit 0
+        cd contracts/evm && forge fmt &&
+        git add $STAGED
+      skip:
+        - merge
+        - rebase
+
+    # ── TypeScript ──────────────────────────────────────────────
+    ts-typecheck:
+      run: |
+        for dir in sdk relayer solver mempool; do
+          STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- "$dir/src/**/*.ts")
+          [ -z "$STAGED" ] && continue
+          (cd "$dir" && npx tsc --noEmit) || exit 1
+        done
+      skip:
+        - merge
+        - rebase
+
+    # ── Guard: build artifacts ──────────────────────────────────
+    no-commit-artifacts:
+      run: |
+        STAGED=$(git diff --cached --name-only)
+        if echo "$STAGED" | grep -qE '(^|/)node_modules/|^dist/|^target/|^contracts/evm/(out|cache|broadcast)/|^crytic-export/'; then
+          echo ""
+          echo "──────────────────────────────────────────────────────────────"
+          echo "  ERROR: Build artifacts detected in staged files!"
+          echo "  node_modules/, dist/, target/, out/, cache/, broadcast/,"
+          echo "  and crytic-export/ must not be committed."
+          echo "──────────────────────────────────────────────────────────────"
+          echo ""
+          exit 1
+        fi
+
+    # ── Guard: debug logging ────────────────────────────────────
+    no-debug-log:
+      run: |
+        STATUS=0
+        # Rust: dbg!() should never be committed
+        if git diff --cached -- 'contracts/soroban/**/*.rs' | grep '^+' | grep -q 'dbg!'; then
+          echo "  ERROR: dbg!() found in staged Rust code — remove before committing"
+          STATUS=1
+        fi
+        # TypeScript: console.log() debug calls in src/ (not test files)
+        for f in $(git diff --cached --name-only --diff-filter=ACMR -- 'sdk/src/**/*.ts' 'relayer/src/**/*.ts' 'solver/src/**/*.ts' 'mempool/src/**/*.ts'); do
+          if git diff --cached -- "$f" | grep '^+' | grep -q 'console\.log('; then
+            echo "  ERROR: console.log() added in $f — remove before committing"
+            STATUS=1
+          fi
+        done
+        [ "$STATUS" -eq 0 ] && exit 0
+        echo "  (Use a proper logger or remove debug statements)"
+        exit 1

@@ -29,6 +29,24 @@ cd contracts/soroban && cargo test
 cd contracts/evm && forge install foundry-rs/forge-std && forge test
 ```
 
+## Pre-commit hooks (optional but recommended)
+
+This repo uses [Lefthook](https://github.com/evilmartians/lefthook) to run CI-equivalent
+format and lint checks locally before you push. Install with:
+
+```bash
+npx lefthook install
+```
+
+After install, every `git commit` runs:
+
+- `cargo fmt` and `cargo clippy` on staged Rust changes
+- `forge fmt` on staged Solidity changes
+- `tsc --noEmit` on staged TypeScript changes
+- Guards that reject `node_modules/`, `dist/`, build artifacts, `dbg!()`, and `console.log()`
+
+Bypass with `git commit --no-verify` or `SKIP=<hook-name> git commit`.
+
 ## Conventions
 
 - **Keep the intent hash consistent.** Any change to the EIP-712 domain or type

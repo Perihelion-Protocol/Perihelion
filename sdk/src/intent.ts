@@ -172,7 +172,8 @@ export const DEFAULT_V_MIN = "10000000"; // 10 USD in 6-decimal units
  * EVM side for release sizing (it releases `l.amount` — the measured-delta locked
  * amount). The safe ceiling for end-to-end round-tripping is i128::MAX.
  *
- * See docs/intent-spec.md §Amount Field Specification for the full boundary table.
+ * See docs/intent-spec.md and docs/assets.md for the full boundary and
+ * per-asset decimal tables.
  */
 export const U128_MAX = 340282366920938463463374607431768211455n;
 export const I128_MAX = 170141183460469231731687303715884105727n;

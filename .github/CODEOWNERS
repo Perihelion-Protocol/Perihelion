@@ -1,24 +1,88 @@
 # Code owners for Perihelion Protocol
 # These owners are requested for review automatically when matching files change.
 # Replace the placeholder team/handles with real maintainers as the org grows.
+#
+# IMPORTANT: Rules are evaluated last-match-wins (bottom entries take precedence
+# over top entries for the same path), so security-sensitive path overrides are
+# listed AFTER the broad package rules that they supersede.
+#
+# Review policy for security-sensitive paths is documented in CONTRIBUTING.md
+# and SECURITY.md. Branch protection MUST require CODEOWNERS review
+# (Settings → Branches → Require review from Code Owners) for these rules to
+# be enforced on PRs.
 
-# Default: org maintainers own everything not otherwise specified.
-*                       @Perihelion-Protocol/maintainers
+# ── Default: org maintainers own everything not otherwise specified ──────────
+*                                                   @Perihelion-Protocol/maintainers
 
-# Soroban (Rust) contracts
-/contracts/soroban/     @Perihelion-Protocol/soroban-maintainers
+# ── TypeScript packages ──────────────────────────────────────────────────────
+/sdk/                                               @Perihelion-Protocol/ts-maintainers
+/solver/                                            @Perihelion-Protocol/ts-maintainers
+/relayer/                                           @Perihelion-Protocol/ts-maintainers
+/mempool/                                           @Perihelion-Protocol/ts-maintainers
 
-# EVM (Solidity) contracts
-/contracts/evm/         @Perihelion-Protocol/evm-maintainers
+# ── Soroban (Rust) contracts ─────────────────────────────────────────────────
+/contracts/soroban/                                 @Perihelion-Protocol/soroban-maintainers
 
-# TypeScript packages
-/sdk/                   @Perihelion-Protocol/ts-maintainers
-/solver/                @Perihelion-Protocol/ts-maintainers
-/relayer/               @Perihelion-Protocol/ts-maintainers
+# ── EVM (Solidity) contracts ─────────────────────────────────────────────────
+/contracts/evm/                                     @Perihelion-Protocol/evm-maintainers
 
-# Documentation & specifications
-/docs/                  @Perihelion-Protocol/maintainers
+# ── Shared cross-chain artifacts ─────────────────────────────────────────────
+/contracts/shared/                                  @Perihelion-Protocol/maintainers
 
-# Security-sensitive meta files
-/SECURITY.md            @Perihelion-Protocol/maintainers
-/.github/               @Perihelion-Protocol/maintainers
+# ── Documentation & specifications ───────────────────────────────────────────
+/docs/                                              @Perihelion-Protocol/maintainers
+
+# ── CI/CD workflows ──────────────────────────────────────────────────────────
+/.github/workflows/                                 @Perihelion-Protocol/maintainers
+
+# ── Security-sensitive meta files ─────────────────────────────────────────────
+/SECURITY.md                                        @Perihelion-Protocol/maintainers
+/.github/                                           @Perihelion-Protocol/maintainers
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECURITY-SENSITIVE PATHS — require @Perihelion-Protocol/security-reviewers
+#
+# These files contain fund-moving logic, cryptographic primitives, replay
+# guards, and cross-chain wire formats. A subtle change to any of them could
+# allow loss of user funds, double-settlement, or signature forgery. They
+# require at least one approval from the security-designated team in addition
+# to the package owner review. See CONTRIBUTING.md §Security review policy.
+# ════════════════════════════════════════════════════════════════════════════
+
+# Wire codec — cross-chain message encoding/decoding (Soroban side).
+# Malformed or inconsistent encoding breaks I5 (hash stability) and can
+# allow the EVM and Soroban contracts to disagree on intent identity.
+/contracts/soroban/settlement/src/messages.rs       @Perihelion-Protocol/security-reviewers
+
+# Core Soroban settlement logic — fill_intent, cancel_expired_intent,
+# lz_receive, nonce/replay guard (InboundNonceBitmap), and all storage
+# mutations that affect Locked/Filled/ConfirmationSent/Cancelled state.
+/contracts/soroban/settlement/src/lib.rs            @Perihelion-Protocol/security-reviewers
+
+# Soroban type definitions — IntentStatus enum, DataKey variants, and
+# the cancel-reason taxonomy shared with the EVM side.
+/contracts/soroban/settlement/src/types.rs          @Perihelion-Protocol/security-reviewers
+
+# EVM escrow — lock(), lzReceive() (_onFillConfirmed/_onCancelIntent),
+# cancelExpired(): all fund-moving paths. Also holds EIP-712 domain,
+# INTENT_TYPEHASH, and the reentrancy mutex.
+/contracts/evm/src/PerihelionEscrow.sol             @Perihelion-Protocol/security-reviewers
+
+# EVM timelock — governs all privileged admin operations (setPeer,
+# setConfirmationGrace, guardian management). Changes here affect the
+# trust/upgrade model of the entire protocol.
+/contracts/evm/src/PerihelionTimelock.sol           @Perihelion-Protocol/security-reviewers
+
+# Shared wire-format test vectors — ground truth for codec differential
+# fuzzing. Tampering with these vectors can mask encoder/decoder divergence
+# between the Soroban and EVM sides.
+/contracts/shared/                                  @Perihelion-Protocol/security-reviewers
+
+# SDK intent hashing — hashIntent() and INTENT_TYPEHASH/PERIHELION_DOMAIN
+# must stay byte-identical to the EVM escrow (Invariant I5). Changes break
+# the universal intent_hash across all components.
+/sdk/src/intent.ts                                  @Perihelion-Protocol/security-reviewers
+
+# SDK type definitions — IntentStatus lifecycle vocabulary and the Intent
+# interface; changes can desync the SDK from on-chain state machines.
+/sdk/src/types.ts                                   @Perihelion-Protocol/security-reviewers

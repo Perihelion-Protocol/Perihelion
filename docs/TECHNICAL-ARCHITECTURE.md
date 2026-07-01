@@ -31,7 +31,111 @@ referenced throughout by number.
 
 ---
 
+## Intent Lifecycle State Diagram
+
+> **This is the canonical reference.** It maps the three state vocabularies —
+> SDK `IntentStatus`, EVM `Lock` fields, and Soroban `IntentStatus` — to one
+> logical lifecycle, showing every transition including failure paths, race
+> resolutions, and the nonce-degradation scenario.
+>
+> Linked from the [README](../README.md#documentation) and the
+> [SDK docs](../sdk/README.md).
+
+### State machine (Mermaid)
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> pending       : User signs intent (off-chain)
+
+    pending     --> claimed   : Solver calls lock() on EVM escrow\n[FillInstruction dispatched via LayerZero]
+    pending     --> expired   : deadline passes, never claimed
+
+    claimed     --> settling  : Solver calls fill_intent() on Soroban\n[FillConfirmed dispatched via LayerZero]
+    claimed     --> refunded  : deadline + confirmationGrace passes on EVM\n→ anyone calls cancelExpired() [local timeout]
+    claimed     --> refunded  : deadline passes on Soroban\n→ cancel_expired_intent() → CancelIntent message → EVM refunds
+
+    settling    --> settled   : FillConfirmed received on EVM\n→ lzReceive() releases funds to solver
+    settling    --> refunded  : CancelIntent received on EVM\n(race: cancel arrived before FillConfirmed)
+
+    expired     --> [*]       : terminal — no funds at risk
+    settled     --> [*]       : terminal — user received assets on Stellar;\n                            solver repaid on EVM
+    refunded    --> [*]       : terminal — user refunded in full on EVM
+```
+
+### State vocabulary mapping
+
+| SDK `IntentStatus` | EVM `Lock` state | Soroban `IntentStatus` | Description |
+| ------------------ | ---------------- | ---------------------- | ----------- |
+| `pending` | — (no lock exists yet) | — (not registered) | Intent is signed and in the mempool; no on-chain state yet. |
+| `claimed` | `released=false`, `refunded=false`, `solver` set | `Locked` | Solver called `lock()` on EVM; user funds escrowed; `FillInstruction` in flight to Soroban. |
+| `settling` | `released=false`, `refunded=false` | `Filled` or `ConfirmationSent` | Solver called `fill_intent()` on Soroban; assets delivered to user on Stellar; `FillConfirmed` in flight back to EVM. |
+| `settled` | `released=true` | `ConfirmationSent` | `FillConfirmed` received on EVM; solver paid from escrow; both legs complete. |
+| `refunded` | `refunded=true` | `Cancelled` | Either the cancel path or local-timeout fired; user returned source funds in full. |
+| `expired` | — (no lock exists) | — (not registered, or `Cancelled` without a prior lock on EVM) | Deadline passed before any solver claimed; no funds were ever locked. |
+
+### Transitions
+
+| From | To | Trigger | Actor | Chain |
+| ---- | -- | ------- | ----- | ----- |
+| `pending` | `claimed` | Solver calls `lock(intent, signature)` on EVM escrow | Solver | EVM |
+| `pending` | `expired` | `deadline` block timestamp passes with no lock | — (time) | — |
+| `claimed` | `settling` | Solver calls `fill_intent(hash, amount)` on Soroban after receiving `FillInstruction` via LayerZero | Solver | Soroban |
+| `claimed` | `refunded` (cancel via Soroban) | `deadline` ledger passes on Soroban → anyone calls `cancel_expired_intent(hash)` → emits `CancelIntent` message → `lzReceive` refunds user on EVM | Anyone (permissionless) | Soroban → LayerZero → EVM |
+| `claimed` | `refunded` (local timeout) | `deadline + confirmationGrace` block timestamp passes on EVM without a `FillConfirmed` → anyone calls `cancelExpired(hash)` | Anyone (permissionless) | EVM |
+| `settling` | `settled` | `FillConfirmed` message arrives on EVM via LayerZero → `lzReceive` releases escrowed funds to solver | Relayer / LayerZero DVN | LayerZero → EVM |
+| `settling` | `refunded` (race) | `CancelIntent` message arrives on EVM before `FillConfirmed` → `lzReceive` refunds user | Relayer / LayerZero DVN | LayerZero → EVM |
+
+### Terminal paths summary
+
+| Terminal state | Path | Invariant upheld |
+| -------------- | ---- | ---------------- |
+| `settled` | Happy path: lock → fill → FillConfirmed → release | I1 (user made whole on Stellar), I2 (single settlement), I3 (solver repaid) |
+| `refunded` via cancel | Soroban deadline expires → `cancel_expired_intent` → `CancelIntent` → EVM refund | I1 (user refunded), I4 (permissionless) |
+| `refunded` via local timeout | EVM `deadline + confirmationGrace` expires → `cancelExpired` → EVM refund | I1 (user refunded), I4 (permissionless) |
+| `expired` | Deadline passes, no lock ever taken; no on-chain state | I1 trivially (no funds at risk) |
+
+### Race resolution
+
+**FillConfirmed vs CancelIntent arriving at EVM out of order:**
+Both `_onFillConfirmed` and `_onCancelIntent` check `Lock.released` and
+`Lock.refunded` before mutating state. If both messages arrive (possible under
+LayerZero unordered delivery), whichever lands second throws `AlreadyFinalized()`
+and reverts without any side effects. The first message wins; user funds are
+never double-moved.
+
+**`cancelExpired` races an in-flight FillConfirmed:**
+The `confirmationGrace` window (configurable, minimum 30 minutes, maximum 7 days)
+adds a buffer beyond `deadline` before `cancelExpired` opens. This window must
+exceed worst-case cross-chain latency (LayerZero relay + Stellar finality). A
+`cancelExpired` call that lands before the grace window opens reverts with
+`DeadlineNotPassed()`.
+
+**Soroban preferred-solver reservation:**
+If an intent has a `preferred_solver`, only that solver may fill during the
+`reservation_window` seconds after `FillInstruction` is received. After the
+window lapses (`reservation_expires`), any solver may fill — preventing a
+preferred solver from indefinitely blocking settlement.
+
+### Nonce-degradation path
+
+Soroban's `InboundNonceBitmap` and `InboundNonceBase` track LayerZero
+transport nonces to prevent message replay. If `InboundNonceBase` (a
+`Persistent` storage entry) is archived due to insufficient TTL, its value
+is treated as 0 on restore, resetting the bitmap window. This could re-allow
+a previously-consumed nonce to be accepted again. Mitigation: the contract
+extends the TTL of `InboundNonceBase` to `max_entry_ttl` on every write, and
+the keeper (§1.7) must monitor and bump it proactively. If degradation is
+detected (late message accepted after archival), the affected intent should be
+investigated for double-settlement risk — which is additionally guarded by the
+`Settled(hash)` terminal idempotency marker (a separate `Persistent` entry,
+also bumped to max TTL on write).
+
+---
+
 ## 1. Soroban Contract Architecture
+
 
 ### 1.1 Storage model — tier selection and rationale
 
@@ -1909,16 +2013,34 @@ This overwrites `PendingAdmin` without completing the handover.
 
 Every admin/config setter emits a structured event. The table below documents
 each event alongside its EVM analogue so a unified off-chain consumer can
-normalize events from both chains:
+normalize events from both chains.
 
-| Soroban event | EVM analogue | Payload |
-|---------------|--------------|---------|
-| `initialized(admin, endpoint)` | *(constructor — no explicit event)* | `(admin: Address, endpoint: Address)` |
-| `endpoint_set(old, new)` | *(no EVM equivalent — endpoint is immutable)* | `(old: Option<Address>, new: Address)` |
-| `peer_set(eid, old, new)` | `PeerSet(peer: bytes32)` | `(eid: u32, old: Option<BytesN<32>>, new: BytesN<32>)` |
-| `admin_transfer_started(old, new)` | `OwnershipTransferStarted(previousOwner, newOwner)` | `(old: Address, new: Address)` |
-| `admin_transfer_completed(old, new)` | `OwnershipTransferred(previousOwner, newOwner)` | `(old: Address, new: Address)` |
-| `paused_set(value)` | `PausedSet(paused: bool)` | `(paused: bool)` |
+#### Lifecycle Events (intent hashing and fill/cancel)
+
+| Soroban event | EVM analogue | Topics | Data |
+|---------------|------------|--------|------|
+| `registered(intent_hash)` | `Locked(intentHash, ...)` | `("registered", intent_hash)` | `(src_eid: u32, deadline: u64)` |
+| `filled(intent_hash)` | `Released(intentHash, ...)` | `("filled", intent_hash)` | `(solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32)` |
+| `cancelled(intent_hash)` | `Refunded(intentHash, ...)` | `("cancelled", intent_hash)` | `(src_eid: u32, deadline: u64)` |
+| `cancelled_inbound(intent_hash)` | — (inbound only) | `("cancelled_inbound", intent_hash)` | `(src_eid: u32)` |
+
+#### Config/Admin Events
+
+| Soroban event | EVM analogue | Topics | Data |
+|---------------|------------|--------|------|
+| `initialized(admin, endpoint)` | *(constructor — no explicit event)* | `("initialized",)` | `(admin: Address, endpoint: Address)` |
+| `endpoint_set(old, new)` | *(no EVM equivalent — endpoint is immutable)* | `("endpoint_set",)` | `(old: Option<Address>, new: Address)` |
+| `peer_set(eid, old, new)` | `PeerSet(peer: bytes32)` | `("peer_set",)` | `(eid: u32, old: Option<BytesN<32>>, new: BytesN<32>)` |
+| `admin_transfer_started(old, new)` | `OwnershipTransferStarted(previousOwner, newOwner)` | `("admin_transfer_started",)` | `(old: Address, new: Address)` |
+| `admin_transfer_completed(old, new)` | `OwnershipTransferred(previousOwner, newOwner)` | `("admin_transfer_completed",)` | `(old: Address, new: Address)` |
+| `paused_set(value)` | `PausedSet(paused: bool)` | `("paused_set",)` | `(paused: bool)` |
+
+#### Audit/Race Condition Events
+
+| Soroban event | EVM analogue | Topics | Data |
+|---------------|------------|--------|------|
+| `confirmation_sent(intent_hash)` | — (inbound only) | `("confirmation_sent", intent_hash)` | `(solver: Address)` |
+| `cancel_ignored(intent_hash)` | — (inbound only) | `("cancel_ignored", intent_hash)` | `(status: IntentStatus as u32)` |
 
 **Why events matter for bridge security.** Peer and endpoint rotations are the
 highest-sensitivity config changes: a malicious peer rotation redirects trust
@@ -1927,6 +2049,11 @@ events, an off-chain monitor must poll instance storage and diff it — this
 cannot reconstruct history once an entry is overwritten. Events make these
 changes observable in real time by any indexer, security watcher, or monitoring
 dashboard.
+
+**Note on `cancel_ignored`.** This event is emitted when a cancel instruction
+is received after an intent has already reached a terminal state (Filled or
+ConfirmationSent). The `status` field indicates what state the intent was in,
+enabling off-chain reconciliation to distinguish "never arrived" from "lost race".
 
 ---
 

@@ -1,6 +1,6 @@
 # Node
 node_modules/
-dist/
+**/dist/
 build/
 *.tsbuildinfo
 .env
@@ -18,6 +18,10 @@ __snapshots__/
 *.snap
 test-results/
 .nyc_output/
+# Vitest / Jest snapshot directories
+**/__snapshots__/
+# Node test runner tap output
+*.tap
 
 # Rust / Soroban
 target/
@@ -40,6 +44,14 @@ contracts/evm/slither-report.json
 .perihelion-relayer-checkpoint.json
 *.checkpoint.json
 
+# Temporary / generated summary docs (not part of source)
+IMPLEMENTATION-SUMMARY.md
+PULL-REQUEST-SUMMARY.md
+DIFFERENTIAL-FUZZ-SUMMARY.md
+TTL-ARCHIVAL-TESTING.md
+solver/VERIFICATION_CACHE.md
+solver/MIGRATION.md
+
 # Editor / OS
 .DS_Store
 Thumbs.db
@@ -49,3 +61,8 @@ Thumbs.db
 *.log
 *.swp
 *.swo
+
+# Misc
+*.orig
+*.bak
+*.tmp

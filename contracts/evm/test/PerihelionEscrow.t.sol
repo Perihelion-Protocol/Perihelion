@@ -4,7 +4,12 @@ pragma solidity ^0.8.24;
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 import { IERC20 } from "../src/IERC20.sol";
-import { Origin, MessagingParams, MessagingFee, ILayerZeroEndpoint } from "../src/interfaces/ILayerZero.sol";
+import {
+    Origin,
+    MessagingParams,
+    MessagingFee,
+    ILayerZeroEndpoint
+} from "../src/interfaces/ILayerZero.sol";
 
 /// @dev Minimal mintable ERC-20 for tests.
 contract MockERC20 is IERC20 {
@@ -203,7 +208,9 @@ contract MockEndpoint is ILayerZeroEndpoint {
     /// @dev Fee returned by quote(); 0 means any msg.value >= 0 passes.
     uint256 public mockFee;
 
-    function setMockFee(uint256 fee) external { mockFee = fee; }
+    function setMockFee(uint256 fee) external {
+        mockFee = fee;
+    }
 
     function send(MessagingParams calldata params, address refundAddress)
         external
@@ -219,11 +226,7 @@ contract MockEndpoint is ILayerZeroEndpoint {
         return bytes32(uint256(0xABCD));
     }
 
-    function quote(MessagingParams calldata, address)
-        external
-        view
-        returns (MessagingFee memory)
-    {
+    function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {
         return MessagingFee({ nativeFee: mockFee, lzTokenFee: 0 });
     }
 
@@ -268,8 +271,17 @@ contract PerihelionEscrowTest is Test {
         address asset,
         uint256 amount
     );
-    event Released(bytes32 indexed intentHash, address indexed solver, uint256 amount);
+    event Released(
+        bytes32 indexed intentHash,
+        address indexed solver,
+        uint256 amount,
+        uint128 fillAmount,
+        uint64 fillLedger
+    );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
+    event PeerSet(bytes32 peer);
+    event ConfirmationGraceSet(uint256 secondsGrace);
+    event GuardianSet(address indexed guardian);
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -486,7 +498,9 @@ contract PerihelionEscrowTest is Test {
     /// Build a string of `n` repeated 'A' bytes.
     function _str(uint256 n) private pure returns (string memory) {
         bytes memory b = new bytes(n);
-        for (uint256 i = 0; i < n; i++) b[i] = bytes1("A");
+        for (uint256 i = 0; i < n; i++) {
+            b[i] = bytes1("A");
+        }
         return string(b);
     }
 
@@ -548,7 +562,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Released(h, solver, 100_000);
+        emit Released(h, solver, 100_000, 100_000, 12_345);
         _confirm(h, solver, 1);
 
         assertEq(token.balanceOf(solver), 100_000);
@@ -633,7 +647,7 @@ contract PerihelionEscrowTest is Test {
     function test_RevertWhen_BadProtocolVersion() public {
         bytes32 h = _lock();
         bytes memory message = abi.encodePacked(bytes1(0x02), T_FILL_CONFIRMED, h);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        vm.expectRevert(PerihelionEscrow.UnknownVersion.selector);
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, message);
     }
 
@@ -704,6 +718,8 @@ contract PerihelionEscrowTest is Test {
     // --- Admin ---------------------------------------------------------------
 
     function test_SetPeer() public {
+        vm.expectEmit(false, false, false, false);
+        emit PeerSet(bytes32(uint256(0x1234)));
         bytes32 newPeer = bytes32(uint256(0x1234));
         escrow.setPeer(newPeer);
         assertEq(escrow.stellarPeer(), newPeer);
@@ -716,6 +732,8 @@ contract PerihelionEscrowTest is Test {
     }
 
     function test_SetConfirmationGrace() public {
+        vm.expectEmit(false, false, false, false);
+        emit ConfirmationGraceSet(1 hours);
         escrow.setConfirmationGrace(1 hours);
         assertEq(escrow.confirmationGrace(), 1 hours);
     }
@@ -733,8 +751,17 @@ contract PerihelionEscrowTest is Test {
     }
 
     function test_SetConfirmationGraceAtCap() public {
+        vm.expectEmit(false, false, false, false);
+        emit ConfirmationGraceSet(escrow.MAX_CONFIRMATION_GRACE());
         escrow.setConfirmationGrace(escrow.MAX_CONFIRMATION_GRACE());
         assertEq(escrow.confirmationGrace(), escrow.MAX_CONFIRMATION_GRACE());
+    }
+
+    function test_SetGuardianEvent() public {
+        vm.expectEmit(true, false, false, false);
+        emit GuardianSet(address(0x6A));
+        escrow.setGuardian(address(0x6A));
+        assertEq(escrow.guardian(), address(0x6A));
     }
 
     // --- Pause ---------------------------------------------------------------
@@ -977,22 +1004,17 @@ contract PerihelionEscrowTest is Test {
     ///         version(1)|type(1)|intent_hash(32)|solver_evm(32)|amount(16)|ledger(8)
     function test_FillConfirmedExactLayout() public {
         bytes32 h = _lock();
-        
+
         // Manually craft the exact 90-byte FillConfirmed
         bytes32 intentHash = h;
         address solverAddr = solver;
         uint128 amount = 100_000;
         uint64 ledger = 12_345;
-        
+
         bytes memory expected = abi.encodePacked(
-            V,
-            T_FILL_CONFIRMED,
-            intentHash,
-            bytes32(uint256(uint160(solverAddr))),
-            amount,
-            ledger
+            V, T_FILL_CONFIRMED, intentHash, bytes32(uint256(uint160(solverAddr))), amount, ledger
         );
-        
+
         assertEq(expected.length, 90);
         _confirm(h, solver, 1);
         assertEq(token.balanceOf(solver), 100_000);
@@ -1002,14 +1024,9 @@ contract PerihelionEscrowTest is Test {
     ///         version(1)|type(1)|intent_hash(32)|reason(1)
     function test_CancelIntentExactLayout() public {
         bytes32 h = _lock();
-        
-        bytes memory expected = abi.encodePacked(
-            V,
-            T_CANCEL_INTENT,
-            h,
-            uint8(0)
-        );
-        
+
+        bytes memory expected = abi.encodePacked(V, T_CANCEL_INTENT, h, uint8(0));
+
         assertEq(expected.length, 35);
         _cancel(h, 1);
         assertEq(token.balanceOf(user), 1_000_000);
@@ -1031,6 +1048,21 @@ contract PerihelionEscrowTest is Test {
         // Late FillConfirmed arrives; should be rejected.
         vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 1);
+    }
+
+    /// @notice Inbound ordering: CancelIntent arrives first, then FillConfirmed.
+    ///         The CancelIntent must win and the subsequent FillConfirmed must
+    ///         be rejected with AlreadyFinalized (protocol I1/I2).
+    function test_RaceGuard_InboundCancelThenConfirm() public {
+        bytes32 h = _lock();
+
+        // Inbound CancelIntent delivered first.
+        _cancel(h, 1);
+        assertEq(token.balanceOf(user), 1_000_000);
+
+        // Subsequent FillConfirmed must be rejected by AlreadyFinalized.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
+        _confirm(h, solver, 2);
     }
 
     /// @notice Second ordering: confirm wins, then local refund is attempted.
@@ -1074,11 +1106,11 @@ contract PerihelionEscrowTest is Test {
 
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent1, sig1);
-        
+
         // Different intent should succeed
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent2, sig2);
-        
+
         assertEq(token.balanceOf(address(escrow)), 200_000);
     }
 
@@ -1100,15 +1132,9 @@ contract PerihelionEscrowTest is Test {
     function test_RevertWhen_UntrustedPeerSendsMessage() public {
         bytes32 h = _lock();
         bytes32 untrustedPeer = bytes32(uint256(0xDEADBEEF));
-        
+
         vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
-        endpoint.deliver(
-            escrow,
-            STELLAR_EID,
-            untrustedPeer,
-            1,
-            _fillConfirmed(h, solver)
-        );
+        endpoint.deliver(escrow, STELLAR_EID, untrustedPeer, 1, _fillConfirmed(h, solver));
     }
 
     // --- Expired intent ----

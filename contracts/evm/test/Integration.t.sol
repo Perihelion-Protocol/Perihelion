@@ -3,7 +3,12 @@ pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
-import { Origin, MessagingParams, MessagingFee, ILayerZeroEndpoint } from "../src/interfaces/ILayerZero.sol";
+import {
+    Origin,
+    MessagingParams,
+    MessagingFee,
+    ILayerZeroEndpoint
+} from "../src/interfaces/ILayerZero.sol";
 import { MockERC20 } from "./PerihelionEscrow.t.sol";
 
 /// @dev A cross-chain relay that stands in for both the LayerZero transport and
@@ -37,11 +42,7 @@ contract StellarRelay is ILayerZeroEndpoint {
     }
 
     /// @inheritdoc ILayerZeroEndpoint
-    function quote(MessagingParams calldata, address)
-        external
-        pure
-        returns (MessagingFee memory)
-    {
+    function quote(MessagingParams calldata, address) external pure returns (MessagingFee memory) {
         return MessagingFee({ nativeFee: 0, lzTokenFee: 0 });
     }
 

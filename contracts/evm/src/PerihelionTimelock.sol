@@ -36,6 +36,13 @@ contract PerihelionTimelock {
     ///         cannot be executed arbitrarily far in the future.
     uint256 public constant GRACE_PERIOD = 14 days;
 
+    /// @notice Floor on `delay`: prevents a confirmed `setDelay` from
+    ///         self-neutralizing the timelock's reaction window.
+    uint256 public constant MIN_DELAY = 1 days;
+    /// @notice Ceiling on `delay`: prevents governance from bricking itself
+    ///         with an unworkably long delay.
+    uint256 public constant MAX_DELAY = 30 days;
+
     address[] private _owners;
     mapping(address => bool) public isOwner;
     uint256 public threshold;
@@ -91,10 +98,10 @@ contract PerihelionTimelock {
     }
 
     modifier nonReentrant() {
-        if (_reentrancy == 1) revert Reentrancy();
-        _reentrancy = 1;
+        if (_reentrancy != 1) revert Reentrancy();
+        _reentrancy = 2;
         _;
-        _reentrancy = 0;
+        _reentrancy = 1;
     }
 
     // --- Constructor ---------------------------------------------------------
@@ -118,6 +125,7 @@ contract PerihelionTimelock {
         }
         threshold = threshold_;
         delay = delay_;
+        _reentrancy = 1;
         emit ThresholdSet(threshold_);
         emit DelaySet(delay_);
     }

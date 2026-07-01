@@ -13,6 +13,10 @@ npm install @perihelion/sdk viem
 
 ## Quick start
 
+> **Full walkthrough** — for a step-by-step guide that builds, signs, submits,
+> and tracks an intent against the local mock mempool, see the
+> **[Integration Quickstart](../docs/quickstart.md)**.
+
 ```ts
 import { PerihelionClient, buildIntent } from "@perihelion/sdk";
 
@@ -48,7 +52,11 @@ console.log(result.status); // "settled"
 | `INTENT_TYPES` / `PERIHELION_DOMAIN` | EIP-712 type + domain for custom signers |
 
 See [`../docs/intent-spec.md`](../docs/intent-spec.md) for the full intent
-specification.
+specification, and the
+[Intent Lifecycle State Diagram](../docs/TECHNICAL-ARCHITECTURE.md#intent-lifecycle-state-diagram)
+for a complete mapping of SDK `IntentStatus` values to the on-chain states on
+both the EVM escrow and the Soroban settlement contract, including every
+transition, failure path, and race resolution.
 
 ## Develop
 

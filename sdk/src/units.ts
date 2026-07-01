@@ -1,9 +1,9 @@
 /**
  * Decimal-aware unit helpers for Perihelion intent amounts.
  *
- * Asset decimal conventions:
- *   - EVM source assets  (e.g. USDC on Base/Ethereum): 6 decimals
- *   - Stellar dest assets (e.g. USDC on Stellar):       7 decimals
+ * Asset decimal conventions are defined in docs/assets.md. In short, listed
+ * EVM stablecoin source assets use 6 decimals, ETH-like ERC-20 assets commonly
+ * use 18 decimals, and Stellar destination assets use 7 decimals.
  *
  * Use these helpers to convert human-readable amounts ("1.5") to/from the
  * smallest-unit decimal strings required by {@link Intent} fields, so callers

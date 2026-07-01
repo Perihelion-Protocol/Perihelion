@@ -14,7 +14,9 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "node --test --import tsx test/*.test.ts",
-    "clean": "rm -rf dist"
+    "test:coverage": "c8 --reporter=lcov --reporter=text --report-dir=coverage node --test --import tsx test/*.test.ts",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@perihelion/sdk": "*",
@@ -23,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "c8": "^10.1.2",
     "tsx": "^4.16.0",
     "typescript": "^5.4.0"
   }

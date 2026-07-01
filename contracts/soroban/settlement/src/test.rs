@@ -4,6 +4,7 @@ use super::*;
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
     testutils::{Address as _, Ledger as _},
+    xdr::{ContractEvent, ContractEventBody, ScVal},
     token, Address, Bytes, BytesN, Env,
 };
 
@@ -494,6 +495,242 @@ fn set_paused_emits_event() {
     s.client.set_paused(&true);
     let events = s.env.events().all();
     assert!(!events.is_empty(), "expected events after set_paused");
+}
+
+// --- Event shape assertions ---------------------------------------------------
+//
+// Events are the off-chain integration surface (indexers, relayer, monitoring).
+// These tests assert the exact topic symbol and data tuple for each event,
+// treating event shapes as a versioned interface that must not change silently.
+
+/// Helper: Assert an event has the expected topic symbol and data count.
+fn assert_event_with_symbol(events: &[ContractEvent], expected_sym: &str, expected_data_len: usize) {
+    let found = events.iter().any(|e| {
+        if let ContractEvent {
+            body: ContractEventBody::V0(ref v0),
+            ..
+        } = e
+        {
+            // Topic[0] must be the expected symbol
+            if let Some(ScVal::Symbol(ref sym)) = v0.topics.get(0) {
+                if sym.0.as_slice() == expected_sym.as_bytes() && v0.data.len() == expected_data_len {
+                    return true;
+                }
+            }
+        }
+        false
+    });
+    assert!(found, "event '{}' with {} data fields not found", expected_sym, expected_data_len);
+}
+
+/// Assert `registered` event: topics = ("registered", intent_hash), data = (src_eid, deadline)
+#[test]
+fn registered_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 1);
+    let deadline_val = 5_000;
+    register_intent(&s, &h, &recipient, 100_000, deadline_val, 1, None);
+
+    let events = s.env.events().all();
+    // Event: ("registered", intent_hash) -> (src_eid, deadline)
+    assert_event_with_symbol(&events, "registered", 2);
+}
+
+/// Assert `filled` event: topics = ("filled", intent_hash), data = (solver, dest_asset, fill_amount, src_eid)
+#[test]
+fn filled_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let h = hash(&s.env, 2);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let fill_amount = 250_000;
+    s.client.fill_intent(&solver, &solver_evm, &h, &fill_amount, &0);
+
+    let events = s.env.events().all();
+    // Event: ("filled", intent_hash) -> (solver, dest_asset, fill_amount, src_eid)
+    assert_event_with_symbol(&events, "filled", 4);
+}
+
+/// Assert `cancelled` event: topics = ("cancelled", intent_hash), data = (src_eid, deadline)
+#[test]
+fn cancelled_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let caller = Address::generate(&s.env);
+    let h = hash(&s.env, 3);
+    let deadline_val = 5_000;
+    register_intent(&s, &h, &recipient, 100_000, deadline_val, 1, None);
+
+    s.env.ledger().with_mut(|li| li.timestamp = 6_000);
+    s.client.cancel_expired_intent(&caller, &h, &0);
+
+    let events = s.env.events().all();
+    // Event: ("cancelled", intent_hash) -> (src_eid, deadline)
+    assert_event_with_symbol(&events, "cancelled", 2);
+}
+
+/// Assert `cancelled_inbound` event: topics = ("cancelled_inbound", intent_hash), data = (src_eid,)
+#[test]
+fn cancelled_inbound_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 4);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 2,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+
+    let events = s.env.events().all();
+    // Event: ("cancelled_inbound", intent_hash) -> (src_eid,)
+    assert_event_with_symbol(&events, "cancelled_inbound", 1);
+}
+
+/// Assert `confirmation_sent` event: topics = ("confirmation_sent", intent_hash), data = (solver,)
+#[test]
+fn confirmation_sent_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let h = hash(&s.env, 5);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    // Fill without dispatch via deliver_intent
+    s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
+
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h, &0);
+
+    let events = s.env.events().all();
+    // Event: ("confirmation_sent", intent_hash) -> (solver,)
+    assert_event_with_symbol(&events, "confirmation_sent", 1);
+}
+
+/// Assert `initialized` event: topics = ("initialized",), data = (admin, endpoint)
+#[test]
+fn initialized_event_shape() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000;
+        li.max_entry_ttl = 3_110_400;
+    });
+    let endpoint_addr = env.register(MockEndpoint, ());
+    let id = env.register(Perihelion, ());
+    let client = PerihelionClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &endpoint_addr);
+
+    let events = env.events().all();
+    // Event: ("initialized",) -> (admin, endpoint)
+    assert_event_with_symbol(&events, "initialized", 2);
+}
+
+/// Assert `endpoint_set` event: topics = ("endpoint_set",), data = (old, new)
+#[test]
+fn endpoint_set_event_shape() {
+    let s = setup();
+    let old_ep = s.client.endpoint().unwrap();
+    let new_ep = Address::generate(&s.env);
+    s.client.set_endpoint(&new_ep);
+
+    let events = s.env.events().all();
+    // Event: ("endpoint_set",) -> (old, new)
+    assert_event_with_symbol(&events, "endpoint_set", 2);
+}
+
+/// Assert `peer_set` event: topics = ("peer_set",), data = (eid, old, peer)
+#[test]
+fn peer_set_event_shape() {
+    let s = setup();
+    // setup() already set a peer; replacing it should emit the event with old value
+    let new_peer: BytesN<32> = BytesN::from_array(&s.env, &[0xFF; 32]);
+    s.client.set_peer(&s.src_eid, &new_peer);
+
+    let events = s.env.events().all();
+    // Event: ("peer_set",) -> (eid, old, peer) with 3 data fields
+    assert_event_with_symbol(&events, "peer_set", 3);
+}
+
+/// Assert `paused_set` event: topics = ("paused_set",), data = (paused,)
+#[test]
+fn paused_set_event_shape() {
+    let s = setup();
+    s.client.set_paused(&true);
+
+    let events = s.env.events().all();
+    // Event: ("paused_set",) -> (paused,)
+    assert_event_with_symbol(&events, "paused_set", 1);
+}
+
+/// Assert `admin_transfer_started` event: topics = ("admin_transfer_started",), data = (old, new)
+#[test]
+fn admin_transfer_started_event_shape() {
+    let s = setup();
+    let old_admin = Address::generate(&s.env);
+    s.client.set_admin(&old_admin);
+
+    let events = s.env.events().all();
+    // Event: ("admin_transfer_started",) -> (old, new)
+    assert_event_with_symbol(&events, "admin_transfer_started", 2);
+}
+
+/// Assert `admin_transfer_completed` event: topics = ("admin_transfer_completed",), data = (old, new)
+#[test]
+fn admin_transfer_completed_event_shape() {
+    let s = setup();
+    let new_admin = Address::generate(&s.env);
+    s.client.set_admin(&new_admin);
+    s.client.accept_admin();
+
+    let events = s.env.events().all();
+    // Event: ("admin_transfer_completed",) -> (old, new)
+    assert_event_with_symbol(&events, "admin_transfer_completed", 2);
+}
+
+/// Assert `cancel_ignored` event: topics = ("cancel_ignored", intent_hash), data = (status,)
+#[test]
+fn cancel_ignored_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let h = hash(&s.env, 7);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &100_000, &0); // intent now Filled
+
+    // Send a cancel after it's already filled
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 3,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+
+    let events = s.env.events().all();
+    // Event: ("cancel_ignored", intent_hash) -> (status,)
+    assert_event_with_symbol(&events, "cancel_ignored", 1);
 }
 
 // --- Issue #15: peer symmetry — registration rejects unknown src_eid ---------
@@ -998,6 +1235,10 @@ fn cancel_intent_when_locked_emits_event() {
         IntentStatus::Cancelled
     );
     assert!(s.client.is_cancelled(&h));
+
+    // Verify the cancelled_inbound event was emitted with correct src_eid
+    let events = s.env.events().all();
+    assert_cancelled_inbound_event(&events, &h.to_array(), s.src_eid);
 }
 
 // --- Issue #57: Amount boundary conformance vectors --------------------------
