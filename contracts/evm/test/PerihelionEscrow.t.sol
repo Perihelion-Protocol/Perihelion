@@ -1465,4 +1465,87 @@ contract PerihelionEscrowTest is Test {
         uint256 gasUsed = g - gasleft();
         assertLt(gasUsed, 750_000); // sanity ceiling; exact per-call saving in .gas-snapshot
     }
+
+    // --- Authorization failure tests: no state mutation -------------------------
+    // These tests verify that authorization failures reject without mutating any state.
+    // Critical for the trust boundary of lzReceive.
+
+    function test_NotEndpoint_NoNonceChange() public {
+        bytes32 h = _lock();
+        uint64 nonceBefore = escrow.inboundNonce(STELLAR_EID);
+
+        // Deliver directly from a non-endpoint address - must revert with NotEndpoint
+        vm.expectRevert(PerihelionEscrow.NotEndpoint.selector);
+        // Calling lzReceive directly without going through endpoint will fail
+        // The check happens at msg.sender != address(endpoint)
+        vm.prank(address(0));
+        escrow.lzReceive(
+            Origin({ srcEid: STELLAR_EID, sender: STELLAR_PEER, nonce: 1 }),
+            bytes32(0),
+            _fillConfirmed(h, solver),
+            address(0),
+            ""
+        );
+
+        // Verify nonce unchanged
+        assertEq(escrow.inboundNonce(STELLAR_EID), nonceBefore, "nonce must not change on NotEndpoint");
+    }
+
+    function test_UntrustedPeer_NoNonceChange() public {
+        bytes32 h = _lock();
+        uint64 nonceBefore = escrow.inboundNonce(STELLAR_EID);
+
+        vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
+        // Use wrong peer - must revert before consuming nonce
+        endpoint.deliver(escrow, STELLAR_EID, bytes32(uint256(0xBAD)), 1, _fillConfirmed(h, solver));
+
+        // Verify nonce unchanged (still 0)
+        assertEq(escrow.inboundNonce(STELLAR_EID), nonceBefore, "nonce must not change on UntrustedPeer");
+    }
+
+    function test_StaleNonce_NoStateChange() public {
+        bytes32 h = _lock();
+        uint64 nonceBefore = escrow.inboundNonce(STELLAR_EID);
+
+        // First delivery succeeds
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, _fillConfirmed(h, solver));
+        assertEq(escrow.inboundNonce(STELLAR_EID), 1, "nonce should advance to 1");
+
+        // Second delivery with same nonce must revert
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, _fillConfirmed(h, solver));
+
+        // Verify nonce still 1 (not advanced further)
+        assertEq(escrow.inboundNonce(STELLAR_EID), nonceBefore + 1, "nonce must stay at 1 after StaleNonce rejection");
+
+        // Verify lock still released (original state unchanged)
+        (,,,,, bool released,) = escrow.locks(h);
+        assertTrue(released, "lock should still be released after rejected replay");
+    }
+
+    function test_MalformedPayload_NoNonceChange() public {
+        bytes32 h = _lock();
+        uint64 nonceBefore = escrow.inboundNonce(STELLAR_EID);
+
+        // Malformed payload (too short)
+        bytes memory badMessage = abi.encodePacked(V, T_FILL_CONFIRMED, h); // 34 bytes, want 90
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, badMessage);
+
+        // Verify nonce unchanged
+        assertEq(escrow.inboundNonce(STELLAR_EID), nonceBefore, "nonce must not change on MalformedPayload");
+    }
+
+    function test_UnknownMessageType_NoNonceChange() public {
+        bytes32 h = _lock();
+        uint64 nonceBefore = escrow.inboundNonce(STELLAR_EID);
+
+        // Unknown message type
+        bytes memory badMessage = abi.encodePacked(V, bytes1(0x09), h);
+        vm.expectRevert(PerihelionEscrow.UnknownMessageType.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, badMessage);
+
+        // Verify nonce unchanged
+        assertEq(escrow.inboundNonce(STELLAR_EID), nonceBefore, "nonce must not change on UnknownMessageType");
+    }
 }

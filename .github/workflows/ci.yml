@@ -154,3 +154,17 @@ jobs:
       - name: Tests
         run: make test-evm
         working-directory: ${{ github.workspace }}
+
+      - name: Gas snapshot
+        run: forge snapshot
+        working-directory: contracts/evm
+
+      - name: Check gas snapshot
+        working-directory: contracts/evm
+        run: |
+          # Fail if the snapshot changed (regressions detected)
+          if ! git diff --exit-code .gas-snapshot; then
+            echo "::error::Gas snapshot changed. Run 'forge snapshot' locally and commit the updated .gas-snapshot file."
+            echo "If this is an intentional change, verify the new gas values are acceptable."
+            exit 1
+          fi

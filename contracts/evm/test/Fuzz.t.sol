@@ -14,6 +14,11 @@ contract PerihelionEscrowFuzzTest is Test {
     uint32 internal constant STELLAR_EID = 30_316;
     bytes32 internal constant STELLAR_PEER = bytes32(uint256(0x57E11A));
 
+    // Wire-format tags for lzReceive messages (mirror PerihelionEscrow.t.sol).
+    bytes1 internal constant V = 0x01;
+    bytes1 internal constant T_FILL_CONFIRMED = 0x02;
+    bytes1 internal constant T_CANCEL_INTENT = 0x03;
+
     uint256 internal userPk = 0xA11CE;
     address internal user;
     address internal solver = address(0x5012E5);
@@ -143,5 +148,145 @@ contract PerihelionEscrowFuzzTest is Test {
         vm.prank(caller);
         vm.expectRevert(PerihelionEscrow.ReservedForSolver.selector);
         escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    // =========================================================================
+    // Nonce Replay Guard Property Tests (issue #103)
+    // =========================================================================
+
+    /// Helper: build a FillConfirmed message for lzReceive.
+    function _fillConfirmed(bytes32 intentHash, address solverEvm)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes memory message = abi.encodePacked(
+            V,
+            T_FILL_CONFIRMED,
+            intentHash,
+            bytes32(uint256(uint160(solverEvm))), // 32-byte solver_evm (EVM address left-padded)
+            uint128(100_000),
+            uint64(block.timestamp)
+        );
+        return message;
+    }
+
+    /// Helper: build a CancelIntent message for lzReceive.
+    function _cancelIntent(bytes32 intentHash, uint8 reason)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        bytes memory message = abi.encodePacked(
+            V,
+            T_CANCEL_INTENT,
+            intentHash,
+            reason
+        );
+        return message;
+    }
+
+    /// Property: Nonce = 0 is always rejected.
+    function testFuzz_NonceZeroRejected(bytes32 intentHash) public {
+        // Create a locked intent first
+        PerihelionEscrow.Intent memory intent = _intent(100_000, block.timestamp + 600);
+        bytes memory sig = _sign(userPk, intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        // Deliver FillConfirmed with nonce = 0 - must be rejected
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 0, _fillConfirmed(h, solver));
+    }
+
+    /// Property: Each nonce is processed exactly once.
+    /// Replaying the same nonce must always be rejected.
+    function testFuzz_NonceReplayRejected(uint64 nonce) public {
+        nonce = uint64(bound(nonce, 1, type(uint64).max));
+
+        PerihelionEscrow.Intent memory intent = _intent(100_000, block.timestamp + 600);
+        bytes memory sig = _sign(userPk, intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        // First delivery should succeed
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, nonce, _fillConfirmed(h, solver));
+
+        // Second delivery with same nonce must be rejected
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, nonce, _fillConfirmed(h, solver));
+    }
+
+    /// Property: Out-of-order nonces within the bitmap window are all accepted.
+    /// The EVM uses a bitmap-based nonce window supporting unordered delivery.
+    function testFuzz_NonceUnorderedDelivery(
+        uint64 baseNonce,
+        uint64 nonce2,
+        uint64 nonce3
+    ) public {
+        // Constrain to reasonable nonce range
+        baseNonce = uint64(bound(baseNonce, 1, 1000));
+        nonce2 = uint64(bound(nonce2, uint256(baseNonce) + 1, uint256(baseNonce) + 50));
+        nonce3 = uint64(bound(nonce3, uint256(baseNonce) + 51, uint256(baseNonce) + 100));
+
+        // Make sure nonces are distinct
+        vm.assume(nonce2 != nonce3);
+        vm.assume(nonce2 != baseNonce);
+        vm.assume(nonce3 != baseNonce);
+
+        // Lock three intents
+        bytes32 h1 = _lockNonce(baseNonce);
+        bytes32 h2 = _lockNonce(nonce2);
+        bytes32 h3 = _lockNonce(nonce3);
+
+        // Deliver in reverse order (highest nonce first)
+        // All should be accepted due to unordered delivery support
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, nonce3, _fillConfirmed(h3, solver));
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, nonce2, _fillConfirmed(h2, solver));
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, baseNonce, _fillConfirmed(h1, solver));
+
+        // Verify all were processed
+        (,,,,, bool released1,) = escrow.locks(h1);
+        (,,,,, bool released2,) = escrow.locks(h2);
+        (,,,,, bool released3,) = escrow.locks(h3);
+        assertEq(released1, true);
+        assertEq(released2, true);
+        assertEq(released3, true);
+
+        // Replaying any nonce must now fail
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, nonce3, _fillConfirmed(h3, solver));
+    }
+
+    /// Helper: lock an intent returning its hash, with provided nonce.
+    function _lockNonce(uint64 nonce) internal returns (bytes32) {
+        PerihelionEscrow.Intent memory intent = _intent(100_000, block.timestamp + 600);
+        intent.nonce = nonce;
+        bytes memory sig = _sign(userPk, intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        return h;
+    }
+
+    /// Property: Large nonce gaps advance the window appropriately.
+    /// When a nonce far ahead arrives, the high-water mark updates.
+    function testFuzz_NonceLargeGap(uint64 lowNonce, uint64 highNonce) public {
+        lowNonce = uint64(bound(lowNonce, 1, 100));
+        highNonce = uint64(bound(highNonce, uint256(lowNonce) + 65, uint256(lowNonce) + 200)); // > window size
+
+        bytes32 h = _lockNonce(lowNonce);
+
+        // Deliver high nonce - should advance window
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, highNonce, _fillConfirmed(h, solver));
+
+        // The old nonce should now still work (bitmap allows sparse setting)
+        // But the high-water mark should have advanced
+        assertEq(escrow.inboundNonce(STELLAR_EID), highNonce);
     }
 }
