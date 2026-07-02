@@ -106,6 +106,11 @@ contract PerihelionTimelock {
 
     // --- Constructor ---------------------------------------------------------
 
+    /// @notice Deploy the timelock and configure the initial owner set, threshold,
+    ///         and execution delay.
+    /// @param owners_ Initial set of multisig owners.
+    /// @param threshold_ Minimum confirmations required to execute an operation.
+    /// @param delay_ Mandatory delay in seconds between reaching threshold and execution.
     constructor(address[] memory owners_, uint256 threshold_, uint256 delay_) {
         if (owners_.length == 0 || threshold_ == 0 || threshold_ > owners_.length) {
             revert InvalidConfig();
@@ -127,15 +132,24 @@ contract PerihelionTimelock {
 
     // --- Views ---------------------------------------------------------------
 
+    /// @notice Returns the current set of owner addresses.
+    /// @return Array of current owner addresses.
     function owners() external view returns (address[] memory) {
         return _owners;
     }
 
+    /// @notice Returns the number of current owners.
+    /// @return Number of current owners.
     function ownerCount() external view returns (uint256) {
         return _owners.length;
     }
 
     /// @notice Deterministic id binding a call to (target, value, data, salt).
+    /// @param target Call target address.
+    /// @param value ETH value to forward.
+    /// @param data Calldata to execute.
+    /// @param salt Uniqueness salt.
+    /// @return Deterministic operation id.
     function hashOperation(address target, uint256 value, bytes calldata data, bytes32 salt)
         public
         pure
@@ -147,6 +161,8 @@ contract PerihelionTimelock {
     /// @notice Timestamp after which a ready operation can no longer be
     ///         executed and must be re-proposed. Returns 0 if the operation
     ///         has not yet reached threshold confirmations.
+    /// @param id Operation id.
+    /// @return Unix timestamp after which the operation can no longer be executed (0 if not yet ready).
     function expiryOf(bytes32 id) external view returns (uint256) {
         uint64 readyAt = operations[id].readyAt;
         if (readyAt == 0) return 0;
@@ -163,6 +179,11 @@ contract PerihelionTimelock {
     ///      propose → confirm → delay cycle has elapsed. `value` is meant for
     ///      targets that are actually payable; verify the target accepts ETH
     ///      before proposing a non-zero value.
+    /// @param target Call target address.
+    /// @param value ETH value to forward.
+    /// @param data Calldata to execute.
+    /// @param salt Uniqueness salt.
+    /// @return id The operation id.
     function propose(address target, uint256 value, bytes calldata data, bytes32 salt)
         external
         onlyOwner
@@ -177,6 +198,7 @@ contract PerihelionTimelock {
     }
 
     /// @notice Add a confirmation to a pending operation.
+    /// @param id Operation id to confirm.
     function confirm(bytes32 id) external onlyOwner {
         if (!operations[id].exists) revert UnknownOperation();
         _confirm(id);
@@ -198,6 +220,7 @@ contract PerihelionTimelock {
 
     /// @notice Withdraw a confirmation before execution. If this drops the
     ///         operation back below threshold, its timelock is reset.
+    /// @param id Operation id to un-confirm.
     function revokeConfirmation(bytes32 id) external onlyOwner {
         Operation storage op = operations[id];
         if (!op.exists) revert UnknownOperation();
@@ -210,6 +233,10 @@ contract PerihelionTimelock {
     }
 
     /// @notice Execute a confirmed operation once its delay has elapsed.
+    /// @param target Call target.
+    /// @param value ETH value.
+    /// @param data Calldata.
+    /// @param salt Salt (must match what was proposed).
     function execute(address target, uint256 value, bytes calldata data, bytes32 salt)
         external
         payable
@@ -231,6 +258,7 @@ contract PerihelionTimelock {
     }
 
     /// @notice Cancel a pending (un-executed) operation. Any owner may cancel.
+    /// @param id Operation id to cancel.
     function cancel(bytes32 id) external onlyOwner {
         Operation storage op = operations[id];
         if (!op.exists) revert UnknownOperation();
@@ -241,6 +269,9 @@ contract PerihelionTimelock {
 
     // --- Self-administered configuration -------------------------------------
 
+    /// @notice Add a new owner to the multisig. Callable only via a fully
+    ///         confirmed, delayed timelock operation (i.e. through this contract itself).
+    /// @param owner_ Address to add as an owner.
     function addOwner(address owner_) external onlySelf {
         if (owner_ == address(0)) revert InvalidConfig();
         if (isOwner[owner_]) revert AlreadyOwner();
@@ -249,6 +280,10 @@ contract PerihelionTimelock {
         emit OwnerAdded(owner_);
     }
 
+    /// @notice Remove an owner from the multisig. Reverts if removal would drop
+    ///         the owner count below the current threshold. Callable only via a
+    ///         fully confirmed, delayed timelock operation.
+    /// @param owner_ Address to remove from the owner set.
     function removeOwner(address owner_) external onlySelf {
         if (!isOwner[owner_]) revert NotOwner();
         if (_owners.length - 1 < threshold) revert InvalidConfig();
@@ -267,12 +302,20 @@ contract PerihelionTimelock {
         emit OwnerRemoved(owner_);
     }
 
+    /// @notice Update the confirmation threshold. Must remain between 1 and the
+    ///         current owner count inclusive. Callable only via a fully confirmed,
+    ///         delayed timelock operation.
+    /// @param threshold_ New minimum number of confirmations required to execute.
     function setThreshold(uint256 threshold_) external onlySelf {
         if (threshold_ == 0 || threshold_ > _owners.length) revert InvalidConfig();
         threshold = threshold_;
         emit ThresholdSet(threshold_);
     }
 
+    /// @notice Update the mandatory execution delay. Must be within
+    ///         [MIN_DELAY, MAX_DELAY]. Callable only via a fully confirmed,
+    ///         delayed timelock operation.
+    /// @param delay_ New execution delay in seconds.
     function setDelay(uint256 delay_) external onlySelf {
         if (delay_ < MIN_DELAY || delay_ > MAX_DELAY) revert InvalidConfig();
         delay = delay_;

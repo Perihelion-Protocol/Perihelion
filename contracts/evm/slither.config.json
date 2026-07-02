@@ -1,7 +1,7 @@
 {
   "filter_paths": "lib/|test/",
   "solc_remaps": ["forge-std/=lib/forge-std/src/"],
-  "exclude_informational": false,
+  "exclude_informational": true,
   "exclude_low": false,
-  "detectors_to_exclude": "assembly,low-level-calls,naming-convention,timestamp,unused-return,missing-zero-check"
+  "triage_database": "slither.db.json"
 }

@@ -1,0 +1,123 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+      - '.github/workflows/docs.yml'
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-templates:
+    name: Validate issue/PR templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyyaml jsonschema
+
+      - name: Validate YAML templates
+        run: |
+          python3 - <<'EOF'
+          import sys
+          import yaml
+          from pathlib import Path
+
+          errors = []
+          template_dir = Path(".github/ISSUE_TEMPLATE")
+
+          for path in sorted(template_dir.glob("*.yml")):
+              try:
+                  with open(path) as f:
+                      doc = yaml.safe_load(f)
+              except yaml.YAMLError as e:
+                  errors.append(f"{path}: YAML parse error: {e}")
+                  continue
+
+              if not isinstance(doc, dict):
+                  errors.append(f"{path}: expected a YAML mapping at the top level")
+                  continue
+
+              for required in ("name", "description"):
+                  if required not in doc:
+                      errors.append(f"{path}: missing required field '{required}'")
+
+              if "body" in doc:
+                  if not isinstance(doc["body"], list):
+                      errors.append(f"{path}: 'body' must be a list")
+                  else:
+                      for i, item in enumerate(doc["body"]):
+                          if not isinstance(item, dict) or "type" not in item:
+                              errors.append(f"{path}: body[{i}] missing 'type' field")
+
+          if errors:
+              for err in errors:
+                  print(f"::error::{err}")
+              sys.exit(1)
+          else:
+              print(f"All {len(list(template_dir.glob('*.yml')))} YAML templates are valid.")
+          EOF
+
+  markdown-links:
+    name: Markdown link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install markdown-link-check
+        run: npm install -g markdown-link-check@3
+
+      - name: Create link-check config
+        run: |
+          cat > .mlc-config.json <<'EOF'
+          {
+            "ignorePatterns": [
+              { "pattern": "^https?://" },
+              { "pattern": "^mailto:" }
+            ],
+            "replacementPatterns": [],
+            "retryOn429": true,
+            "retryCount": 2,
+            "aliveStatusCodes": [200, 206]
+          }
+          EOF
+
+      - name: Check markdown links
+        run: |
+          set -e
+          FILES=$(find . -name '*.md' \
+            -not -path './node_modules/*' \
+            -not -path './.git/*' \
+            -not -path '*/target/*' \
+            -not -path '*/lib/*')
+          FAILED=0
+          for f in $FILES; do
+            markdown-link-check "$f" --config .mlc-config.json || FAILED=1
+          done
+          exit $FAILED

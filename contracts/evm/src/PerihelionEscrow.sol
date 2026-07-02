@@ -311,6 +311,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Constructor ---------------------------------------------------------
 
+    /// @notice Deploy the escrow, binding it to a LayerZero endpoint and Stellar
+    ///         destination. Sets the deployer as the initial owner.
+    /// @param _endpoint Trusted LayerZero endpoint address.
+    /// @param _stellarEid LayerZero endpoint id for the Stellar settlement contract.
     constructor(address _endpoint, uint32 _stellarEid) {
         if (_endpoint == address(0)) revert ZeroAddress();
         endpoint = ILayerZeroEndpoint(_endpoint);
@@ -332,6 +336,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Admin ---------------------------------------------------------------
 
     /// @notice Set the trusted Stellar settlement peer.
+    /// @param peer 32-byte LayerZero address of the trusted Stellar settlement OApp.
     function setPeer(bytes32 peer) external onlyOwner {
         stellarPeer = peer;
         emit PeerSet(peer);
@@ -340,6 +345,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Tune the local-refund grace period. Bounded by MIN_CONFIRMATION_GRACE
     ///         (so a cancel cannot race an in-flight FillConfirmed) and
     ///         MAX_CONFIRMATION_GRACE (so a misconfiguration cannot strand refunds).
+    /// @param secondsGrace New grace period in seconds; must be in [MIN_CONFIRMATION_GRACE, MAX_CONFIRMATION_GRACE].
     function setConfirmationGrace(uint256 secondsGrace) external onlyOwner {
         if (secondsGrace > MAX_CONFIRMATION_GRACE) revert GraceTooLong();
         if (secondsGrace < MIN_CONFIRMATION_GRACE) revert GraceTooShort();
@@ -348,6 +354,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Set (or clear) the emergency guardian. Owner-only.
+    /// @param newGuardian Address of the new guardian (use address(0) to clear).
     function setGuardian(address newGuardian) external onlyOwner {
         guardian = newGuardian;
         emit GuardianSet(newGuardian);
@@ -358,6 +365,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         Owner calling this clears any guardian-initiated expiry — if called
     ///         with `true` the pause becomes indefinite; if `false` it also resets
     ///         the guardian cooldown so the guardian remains operational.
+    /// @param _paused True to halt new locks and local refunds; false to resume.
     function setPaused(bool _paused) external onlyOwner {
         paused = _paused;
         guardianPauseExpiry = 0; // owner takes full control; no auto-expiry
@@ -400,6 +408,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         {acceptOwnership} to take effect. To cancel a pending handover
     ///         with a clear event, use {cancelOwnershipTransfer} instead of
     ///         passing `address(0)`.
+    /// @param newOwner Address to propose as the new owner.
     function transferOwnership(address newOwner) external onlyOwner {
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
@@ -429,6 +438,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         contract is NOT compatible with rebasing/deflationary tokens; this
     ///         function is provided only to recover surplus that cannot be attributed
     ///         to any active lock. Owner-only.
+    /// @param token ERC-20 token to recover.
+    /// @param to Recipient address.
+    /// @param amount Amount to transfer.
     function skim(address token, address to, uint256 amount) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         _safeTransfer(token, to, amount);
@@ -445,6 +457,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      standard V2 convention. Callers should still use {quoteFee} to minimise
     ///      over-payment rather than relying on endpoint refunds.
     ///      The user must have approved this contract for `sourceAmount` of `sourceAsset`.
+    /// @param intent The user's signed intent specifying bridge parameters.
+    /// @param signature EIP-712 signature over the intent by intent.user.
     function lock(Intent calldata intent, bytes calldata signature)
         external
         payable
@@ -582,6 +596,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Permissionless local refund if no settlement landed within
     ///         `deadline + confirmationGrace`. Shares the terminal-flag guard with
     ///         the release path so exactly one terminal transition wins (I1/I2).
+    /// @param intentHash The keccak256 intent commitment identifying the lock.
     function cancelExpired(bytes32 intentHash) external nonReentrant whenNotPaused {
         Lock storage l = locks[intentHash];
         if (l.user == address(0)) revert NotLocked();
@@ -599,6 +614,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         Solvers should call this off-chain and pass the result (with a small
     ///         buffer) as `msg.value` to {lock}. Any excess is refunded by the
     ///         endpoint to the caller per the LayerZero V2 convention.
+    /// @param intent Intent whose FillInstruction message size determines the fee.
+    /// @return nativeFee Estimated native token fee in wei.
     function quoteFee(Intent calldata intent) external view returns (uint256 nativeFee) {
         // Use a placeholder hash — the fee depends only on message size, not content.
         bytes memory message = _encodeFillInstruction(bytes32(0), intent, intent.sourceAmount);
@@ -609,6 +626,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Compute the canonical EIP-712 intent hash (I5).
+    /// @param intent The intent to hash.
+    /// @return The EIP-712 struct hash.
     function hashIntent(Intent calldata intent) public view returns (bytes32) {
         bytes32 structHash = keccak256(
             abi.encode(
