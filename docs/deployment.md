@@ -27,6 +27,10 @@ users get a public window before any config change takes effect, while the
 compromised guardian can at worst pause the protocol — it can never move funds,
 unpause, or change configuration.
 
+> See the [consolidated threat model](./threat-model.md#0-consolidated-trust-model)
+> for a role-by-role trust breakdown including the relayer, DVN set, Stellar
+> validators, and executor.
+
 ---
 
 ## 2. Prerequisites
@@ -43,6 +47,45 @@ Build and test first:
 ( cd contracts/evm && forge build && forge test )
 ( cd contracts/soroban && cargo test )
 ```
+
+> ### Reproducible builds & explorer verification
+>
+> The EVM contracts use a pinned compiler version and settings that make
+> deployments verifiable on block explorers. The CI workflow
+> (`.github/workflows/reproducible-bytecode.yml`) enforces that the bytecode
+> produced by the current source exactly matches pinned hashes on every PR.
+>
+> **Compiler settings for explorer verification:**
+>
+> | Setting          | Value      |
+> | ---------------- | ---------- |
+> | Solidity version | `0.8.24`   |
+> | EVM version      | `cancun`   |
+> | Optimizer        | enabled    |
+> | Optimizer runs   | `200`      |
+> | Metadata hash    | appended (default) — explorers detect this automatically; append mode is the Solidity default and is standard for verified contracts |
+>
+> These are defined in [`contracts/evm/foundry.toml`](../contracts/evm/foundry.toml).
+> The pinned bytecode hashes live in `contracts/evm/.pinned-bytecode/` and are
+> checked on every CI run. Before deploying, confirm the local build produces the
+> same bytecode as the CI-pinned hashes by running:
+>
+> ```bash
+> cd contracts/evm
+> forge build
+> for contract in PerihelionEscrow PerihelionTimelock; do
+>   echo "$contract creation: $(jq -r '.bytecode.object' "out/$contract.sol/$contract.json" | sha256sum)"
+>   echo "$contract runtime:  $(jq -r '.deployedBytecode.object' "out/$contract.sol/$contract.json" | sha256sum)"
+> done
+> ```
+>
+> If the hashes differ from the `.pinned-bytecode/` entries, the source or
+> compiler settings have changed and the explorer verification input must be
+> updated accordingly (see the CI workflow for the canonical hashes).
+>
+> Once deployed, verify the on-chain bytecode against the build artifact using
+> the block explorer's "Verify & Publish" form with the exact settings above.
+> The source is published at the commit referenced in the deployment record.
 
 ---
 

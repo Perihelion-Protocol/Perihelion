@@ -1,6 +1,73 @@
-# Perihelion EVM Threat Model
+# Perihelion Threat Model & Trust Assumptions
 
-This document captures discrete threat findings with mitigation rationale.
+This is the **single source of truth** for Perihelion's trust model. It
+enumerates every protocol role, what each is trusted for, what each can do if
+compromised, and which mechanism bounds the damage. Cross-reference with the
+threat matrix (T1–T10) in
+[TECHNICAL-ARCHITECTURE.md §6](./TECHNICAL-ARCHITECTURE.md#6-security-model--threat-matrix),
+and with [deployment.md](./deployment.md) for operational roles.
+
+---
+
+## 0. Consolidated trust model
+
+| Role | Trusted assumption | Misbehavior if compromised | Worst-case impact | Bounding mechanism |
+|---|---|---|---|---|
+| **User** | Picks `minDestAmount` and `deadline` correctly, protects their signing key | Poor choice → fill below market or expired; lost key → cannot refund | Grief (user loses opportunity cost, not principal) | I1: always refunded if not filled; I2: single settlement |
+| **Solver** | Fronts honest liquidity; does not fill invalid intents | Fills an intent not backed by a lock (unprofitable; no risk to user) | Grief (solver loses gas) | I3: solver fronts liquidity, repaid only against verified lock |
+| **Relayer** | Forwards messages promptly; cannot forge | Censors or delays delivery; cannot forge a valid message | Censor/delay (temporary liveness loss for FillInstruction, CancelIntent, FillConfirmed) | Permissionless: anyone can relay; LZ endpoint enforces message authenticity and replay guard |
+| **LayerZero endpoint** | Enforces the OApp's DVN/ULN config; calls `lzReceive` only for verified messages | Accepts unverified messages (bypasses DVN set) | **Steal** (forge a FillConfirmed → release solver funds without a Stellar fill) | `msg.sender == address(endpoint)` guard in `lzReceive`; endpoint trust is the strongest assumption |
+| **DVN set** (LayerZero verifiers) | ≥ threshold DVNs attest the same source event honestly | A colluding DVN set attests a fake source event | **Steal** (forge a FillConfirmed or CancelIntent) | Multi-DVN with 2 required + 1 optional (≥3 distinct verifiers on common path); OApp admin can rotate set |
+| **Stellar validators** | Produce canonical ledger state with economic finality | A cartel finalizes a fraudulent Stellar ledger | **Steal** (forge a fill on Stellar that the Solver never actually funded); destroy the bridge's Stellar-side correctness | Stellar's consensus (Stellar Consensus Protocol); Perihelion inherits Stellar's finality guarantees |
+| **Admin / timelock owner set** (EVM) | Only executes governance actions the M-of-N honestly agreed to | Threshold of owners collude to rotate peer, drain escrow | **Steal** (change `stellarPeer` → forge inbound messages, or `setGuardian` + `pause` to censor, or `transferOwnership` to drain) | M-of-N timelock with delay: any config change is public for `delay` seconds before it executes; a single honest owner can `cancel`; GRACE_PERIOD limits stale-op window |
+| **Admin** (Soroban) | Configures endpoint, peer, and pause correctly | Sets a malicious endpoint/peer → steals Stellar-side funds | **Steal** (redirect settlement messages) | Single-key admin on Soroban (future: migrate to multisig); bounded by `cancel_expired_intent` liveness |
+| **Guardian** (EVM) | Only pauses in genuine emergencies | Pauses repeatedly, denying new locks and refunds | Censor (denial of new locks and local refunds for up to 72 h per 144 h cycle) | Auto-expiry (GUARDIAN_PAUSE_TTL) + cooldown; cannot unpause, move funds, or change config |
+| **Executor** (LayerZero delivery) | Delivers committed messages | Drops execution, censors delivery | Censor/delay | Permissionless: anyone can call `lzReceive` for a committed message; executor is replaceable |
+
+### Key explicit assumptions
+
+1. **LayerZero DVN integrity.** The DVN set is the root of cross-chain message
+   authenticity. If the configured DVNs collude, they can forge any message.
+   Perihelion does not add a second verification layer — it trusts the DVN set
+   (see Phase 3 roadmap for ZK proofs to remove this assumption).
+2. **Stellar consensus finality.** The Soroban contract trusts Stellar validator
+   consensus. A Stellar fork or reorg deeper than the DVN block-confirmation
+   count could produce conflicting state. Perihelion relies on Stellar's
+   economic finality guarantees (Stellar Consensus Protocol).
+3. **EVM chain finality.** The EVM escrow trusts the EVM chain's finality. The
+   LayerZero DVN block-confirmation parameter (≥15 blocks on Ethereum) is the
+   defense against EVM reorgs.
+4. **Deterministic EVM bytecode.** Given the pinned compiler version and
+   optimizer settings in `foundry.toml`, the compiled bytecode is deterministic.
+   See [deployment.md](./deployment.md#reproducible-builds--explorer-verification)
+   and the `reproducible-bytecode.yml` CI job.
+5. **EVM-address-based identity.** All EVM role checks (`onlyOwner`,
+   `onlyGuardian`, etc.) are address-based. If an address's private key is
+   compromised, the associated role is compromised.
+
+### What the protocol guarantees regardless of any single role's compromise
+
+| Guarantee | Rationale |
+|-----------|-----------|
+| **No user fund loss** (I1) | A user is either settled on Stellar or refunded in full. The terminal-flag guard (`released`/`refunded`) in the escrow ensures at most one terminal action per lock. |
+| **Single settlement** (I2) | The `intent_hash` idempotency key on both chains prevents double-fill or double-refund. |
+| **Solver fronts liquidity** (I3) | The solver delivers destination assets from its own inventory before being repaid. No unbacked payout. |
+| **Permissionless liveness** (I4) | Refund/cancel paths are callable by anyone — users, keepers, or other solvers. No privileged actor can strand funds. |
+| **Guardian cannot steal** | `pause()` is the only guardian-callable state change. No funds move, no config changes. |
+| **Relayer cannot forge** | The endpoint's `msg.sender` check and `stellarPeer` authentication prevent relayers from injecting unauthenticated messages. |
+
+### Replay and ordering
+
+- **LayerZero transport nonce** prevents the same message from being delivered
+  twice at the destination. Nonces are tracked per `(srcEid, sender)` pathway
+  with a bitmap supporting unordered delivery.
+- **Intent nonce** (256-bit) is an application-level collision-prevention value
+  that distinguishes otherwise-identical intents. It is NOT a replay-protection
+  nonce — that is the LayerZero transport nonce's job.
+
+---
+
+The remainder of this document captures discrete threat findings with mitigation rationale.
 The broader threat matrix (T1–T10) lives in
 [TECHNICAL-ARCHITECTURE.md §6](./TECHNICAL-ARCHITECTURE.md#6-security-model--threat-matrix).
 

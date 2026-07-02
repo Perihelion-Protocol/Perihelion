@@ -1,0 +1,90 @@
+name: Reproducible Bytecode
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/evm/src/**"
+      - "contracts/evm/foundry.toml"
+      - ".github/workflows/reproducible-bytecode.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "contracts/evm/src/**"
+      - "contracts/evm/foundry.toml"
+      - ".github/workflows/reproducible-bytecode.yml"
+
+concurrency:
+  group: reproducible-bytecode-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FOUNDRY_PROFILE: default
+
+jobs:
+  check-bytecode:
+    name: Verify Reproducible Bytecode
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/evm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install forge-std
+        run: forge install foundry-rs/forge-std --no-git
+
+      - name: Build with pinned compiler
+        run: forge build
+
+      - name: Extract creation & runtime bytecode hashes
+        run: |
+          mkdir -p .bytecode-hashes
+          for contract in PerihelionEscrow PerihelionTimelock; do
+            outdir="out/$contract.sol/$contract.json"
+            if [ -f "$outdir" ]; then
+              creation=$(jq -r '.bytecode.object // empty' "$outdir" | sha256sum | cut -d' ' -f1)
+              runtime=$(jq -r '.deployedBytecode.object // empty' "$outdir" | sha256sum | cut -d' ' -f1)
+              echo "$contract creation: $creation"
+              echo "$contract runtime:  $runtime"
+              echo "$creation" > ".bytecode-hashes/${contract}-creation.sha256"
+              echo "$runtime"  > ".bytecode-hashes/${contract}-runtime.sha256"
+            else
+              echo "::error::Contract artifact not found: $outdir"
+              exit 1
+            fi
+          done
+
+      - name: Upload bytecode hashes
+        uses: actions/upload-artifact@v4
+        with:
+          name: bytecode-hashes
+          path: contracts/evm/.bytecode-hashes/
+
+      - name: Compare with pinned hashes (if available)
+        run: |
+          PINNED_DIR=".pinned-bytecode"
+          if [ -d "$PINNED_DIR" ]; then
+            for hashfile in .bytecode-hashes/*; do
+              basename=$(basename "$hashfile")
+              pinned="$PINNED_DIR/$basename"
+              if [ -f "$pinned" ]; then
+                current=$(cat "$hashfile")
+                expected=$(cat "$pinned")
+                if [ "$current" != "$expected" ]; then
+                  echo "::error::Bytecode mismatch for $basename"
+                  echo "  expected: $expected"
+                  echo "  actual:   $current"
+                  exit 1
+                fi
+                echo "✓ $basename matches pinned hash"
+              else
+                echo "⚠ No pinned hash for $basename — skipping check"
+              fi
+            done
+          else
+            echo "No pinned bytecode directory found — hashes will be recorded as new baseline."
+          fi

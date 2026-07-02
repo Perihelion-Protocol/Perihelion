@@ -33,6 +33,14 @@ contract PerihelionTimelockTest is Test {
     uint256 internal constant DELAY = 2 days;
     bytes32 internal constant SALT = bytes32(uint256(1));
 
+    event Proposed(bytes32 indexed id, address indexed proposer, address target, uint256 value);
+    event Confirmed(bytes32 indexed id, address indexed owner, uint256 confirmations);
+    event Executed(bytes32 indexed id);
+    event OwnerAdded(address indexed owner);
+    event OwnerRemoved(address indexed owner);
+    event ThresholdSet(uint256 threshold);
+    event DelaySet(uint256 delay);
+
     function setUp() public {
         address[] memory owners = new address[](3);
         owners[0] = a;
@@ -88,15 +96,17 @@ contract PerihelionTimelockTest is Test {
     function test_RevertWhen_ConstructorDelayBelowMin() public {
         address[] memory owners = new address[](1);
         owners[0] = a;
+        uint256 minDelay = tl.MIN_DELAY();
         vm.expectRevert(PerihelionTimelock.InvalidConfig.selector);
-        new PerihelionTimelock(owners, 1, 86399); // 1 day - 1 second
+        new PerihelionTimelock(owners, 1, minDelay - 1);
     }
 
     function test_RevertWhen_ConstructorDelayAboveMax() public {
         address[] memory owners = new address[](1);
         owners[0] = a;
+        uint256 maxDelay = tl.MAX_DELAY();
         vm.expectRevert(PerihelionTimelock.InvalidConfig.selector);
-        new PerihelionTimelock(owners, 1, 2592001); // 30 days + 1 second
+        new PerihelionTimelock(owners, 1, maxDelay + 1);
     }
 
     // --- Happy path ----------------------------------------------------------
@@ -144,6 +154,37 @@ contract PerihelionTimelockTest is Test {
         vm.prank(a);
         tl.execute(address(target), 0.5 ether, data, SALT);
         assertEq(target.lastMsgValue(), 0.5 ether);
+    }
+
+    // --- Off-by-one boundary: timing gates -----------------------------------
+
+    function test_RevertWhen_ExecuteOneSecondBeforeReadyAt() public {
+        bytes memory data = _setValueData(42);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        assertGt(readyAt, 0);
+        vm.warp(readyAt - 1);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.NotReady.selector);
+        tl.execute(address(target), 0, data, SALT);
+    }
+
+    function test_ExecuteExactlyAtReadyAt_Succeeds() public {
+        bytes memory data = _setValueData(42);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        vm.warp(readyAt);
+        vm.prank(a);
+        tl.execute(address(target), 0, data, SALT);
+        assertEq(target.value(), 42);
     }
 
     // --- Guards --------------------------------------------------------------
@@ -335,8 +376,54 @@ contract PerihelionTimelockTest is Test {
         tl.addOwner(stranger);
     }
 
+    function test_RevertWhen_RemoveOwnerCalledDirectly() public {
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.NotSelf.selector);
+        tl.removeOwner(a);
+    }
+
+    function test_RevertWhen_SetThresholdCalledDirectly() public {
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.NotSelf.selector);
+        tl.setThreshold(2);
+    }
+
+    function test_RevertWhen_SetDelayCalledDirectly() public {
+        uint256 minDelay = tl.MIN_DELAY();
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.NotSelf.selector);
+        tl.setDelay(minDelay);
+    }
+
     function test_AddOwnerThroughGovernance() public {
         bytes memory data = abi.encodeWithSelector(PerihelionTimelock.addOwner.selector, stranger);
+        bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
+
+        vm.expectEmit(true, true, true, true);
+        emit Proposed(id, a, address(tl), 0);
+        vm.prank(a);
+        tl.propose(address(tl), 0, data, SALT);
+
+        vm.expectEmit(true, true, false, false);
+        emit Confirmed(id, b, 2);
+        vm.prank(b);
+        tl.confirm(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        assertGt(readyAt, 0);
+
+        vm.warp(block.timestamp + DELAY);
+        vm.expectEmit(true, false, false, true);
+        emit Executed(id);
+        vm.prank(a);
+        tl.execute(address(tl), 0, data, SALT);
+
+        assertTrue(tl.isOwner(stranger));
+        assertEq(tl.ownerCount(), 4);
+    }
+
+    function test_RemoveOwnerThroughGovernance() public {
+        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.removeOwner.selector, c);
         bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
         vm.prank(a);
         tl.propose(address(tl), 0, data, SALT);
@@ -346,8 +433,22 @@ contract PerihelionTimelockTest is Test {
         vm.prank(a);
         tl.execute(address(tl), 0, data, SALT);
 
-        assertTrue(tl.isOwner(stranger));
-        assertEq(tl.ownerCount(), 4);
+        assertFalse(tl.isOwner(c));
+        assertEq(tl.ownerCount(), 2);
+    }
+
+    function test_SetThresholdThroughGovernance() public {
+        bytes memory data = abi.encodeWithSelector(PerihelionTimelock.setThreshold.selector, 1);
+        bytes32 id = tl.hashOperation(address(tl), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(tl), 0, data, SALT);
+
+        assertEq(tl.threshold(), 1);
     }
 
     function test_RevertWhen_SetDelayBelowMin() public {
