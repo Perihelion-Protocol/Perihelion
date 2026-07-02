@@ -85,7 +85,72 @@ jobs:
         run: npm ci
 
       - name: Build all packages
-        run: npm run build
+        run: make build-ts
 
       - name: Run tests
-        run: npm test
+        run: make test-ts
+
+  soroban:
+    name: Soroban (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/soroban
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/soroban/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/soroban/**/Cargo.toml') }}
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: make lint-soroban
+        working-directory: ${{ github.workspace }}
+
+      - name: Unit tests
+        run: make test-soroban
+        working-directory: ${{ github.workspace }}
+
+      - name: Build wasm (release)
+        run: make build-soroban
+        working-directory: ${{ github.workspace }}
+
+  evm:
+    name: EVM (Solidity)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/evm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install forge-std
+        run: forge install foundry-rs/forge-std --no-git
+
+      - name: Format check
+        run: forge fmt --check
+
+      - name: Build
+        run: make build-evm
+        working-directory: ${{ github.workspace }}
+
+      - name: Tests
+        run: make test-evm
+        working-directory: ${{ github.workspace }}
