@@ -136,10 +136,25 @@ export interface ReadinessState {
   lag: number;
 }
 
+/**
+ * Throw inside tick() (or any code it calls) to signal a non-recoverable
+ * condition. start() re-throws FatalError immediately instead of catching and
+ * continuing, so the process can exit non-zero and be restarted by its
+ * orchestrator.
+ */
+export class FatalError extends Error {
+  constructor(message: string, override readonly cause?: unknown) {
+    super(message);
+    this.name = "FatalError";
+  }
+}
+
 export class Relayer {
   private running = false;
   private cursor: number;
   private readonly backoff: BackoffState;
+  /** Resolves an in-progress interruptibleSleep early when stop() is called. */
+  private abortSleep: (() => void) | null = null;
 
   // --- Internal state -------------------------------------------------------
 
@@ -191,7 +206,11 @@ export class Relayer {
     this.readiness.cursor = this.cursor;
   }
 
-  /** Start the watch-and-relay loop. Resolves when {@link stop} is called. */
+  /**
+   * Start the watch-and-relay loop. Resolves when {@link stop} is called
+   * (graceful drain — the in-flight tick completes before start() returns).
+   * Rejects if a {@link FatalError} propagates out of tick().
+   */
   async start(): Promise<void> {
     await this.resume();
     this.running = true;
@@ -207,6 +226,10 @@ export class Relayer {
         this.readiness.lastTickOk = true;
         this.readiness.lastTickAt = Date.now();
       } catch (err) {
+        if (err instanceof FatalError) {
+          this.log.error("fatal error, relayer stopping", { err: String(err) });
+          throw err;
+        }
         this.backoff.recordFailure();
         this.readiness.lastTickOk = false;
         this.log.error("tick failed", {
@@ -214,12 +237,22 @@ export class Relayer {
           consecutiveFailures: this.backoff.consecutiveFailures,
         });
       }
-      await sleep(this.backoff.nextDelay());
+      // Only sleep if stop() was not called during the tick.
+      if (this.running) {
+        await this.interruptibleSleep(this.backoff.nextDelay());
+      }
     }
   }
 
+  /**
+   * Signal the loop to stop after the current tick completes.
+   * Any in-progress inter-tick sleep is interrupted immediately so start()
+   * resolves without waiting for the full poll interval.
+   */
   stop(): void {
     this.running = false;
+    this.abortSleep?.();
+    this.abortSleep = null;
   }
 
   /** One watch-confirm-deliver cycle. Exposed for testing. */
@@ -303,6 +336,8 @@ export class Relayer {
       this.metrics.delivered += 1;
       return { intentHash, delivered: true, dstTxHash };
     } catch (err) {
+      if (err instanceof FatalError) throw err;
+
       const attempt = (this.attempts.get(keyStr) ?? 0) + 1;
       this.attempts.set(keyStr, attempt);
       this.metrics.maxRetryDepth = Math.max(this.metrics.maxRetryDepth, attempt);
@@ -392,6 +427,16 @@ export class Relayer {
     if (this.blockWindow.length > limit) {
       this.blockWindow.shift();
     }
+  }
+
+  private interruptibleSleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      this.abortSleep = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
   }
 }
 

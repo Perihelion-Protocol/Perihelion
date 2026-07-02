@@ -11,7 +11,7 @@ import {
   type IntentRecord,
   type Hex,
 } from "@perihelion/sdk";
-import { Solver, type Executor, type Logger } from "../src/solver.js";
+import { Solver, FatalError, type Executor, type Logger } from "../src/solver.js";
 import type { SolverConfig } from "../src/config.js";
 
 // Test fixtures
@@ -320,6 +320,70 @@ test("verification cache evicts oldest entries when full", async () => {
   } finally {
     (sdkModule as any).verifyIntent = originalVerify;
   }
+});
+
+// ─── Issue 92: FatalError propagation and graceful drain ────────────────────
+
+test("FatalError thrown from tick() rejects start()", async () => {
+  const fatal = new FatalError("permanent RPC failure");
+
+  global.fetch = mock.fn(async () => { throw fatal; }) as any;
+
+  const solver = new Solver(baseConfig, { fill: async () => ({ settlementTx: "0x" }) }, {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+  });
+
+  const err = await solver.start().catch((e) => e);
+  assert.strictEqual(err, fatal, "start() should reject with the FatalError instance");
+});
+
+test("recoverable tick error keeps loop alive, does not reject start()", async () => {
+  let calls = 0;
+  global.fetch = mock.fn(async () => {
+    calls++;
+    if (calls === 1) throw new Error("transient network blip");
+    // Second call: return empty list so stop() resolves start()
+    return { ok: true, status: 200, json: async () => [] };
+  }) as any;
+
+  const solver = new Solver(
+    { ...baseConfig, pollIntervalMs: 0 },
+    { fill: async () => ({ settlementTx: "0x" }) },
+    { info: () => {}, warn: () => {}, error: () => {} },
+  );
+
+  const startP = solver.start();
+  // Wait for second tick to complete
+  await new Promise((r) => setTimeout(r, 30));
+  solver.stop();
+  await assert.doesNotReject(startP, "recoverable error must not reject start()");
+  assert.ok(calls >= 2, "loop should have continued after recoverable error");
+});
+
+test("stop() interrupts inter-tick sleep so start() resolves promptly", async () => {
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => [],
+  })) as any;
+
+  const solver = new Solver(
+    { ...baseConfig, pollIntervalMs: 60_000 }, // would hang for 60 s without stop()
+    { fill: async () => ({ settlementTx: "0x" }) },
+    { info: () => {}, warn: () => {}, error: () => {} },
+  );
+
+  const startP = solver.start();
+  await new Promise((r) => setTimeout(r, 20)); // let first tick complete
+  solver.stop();
+
+  const result = await Promise.race([
+    startP.then(() => "resolved" as const),
+    new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 1_000)),
+  ]);
+  assert.equal(result, "resolved", "start() should resolve promptly after stop(), not wait 60 s");
 });
 
 test("complete flow: hash validation and cached verification", async () => {

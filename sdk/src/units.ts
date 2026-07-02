@@ -28,7 +28,9 @@ export function toSmallestUnits(human: string, decimals: number): string {
   if (!/^\d+(\.\d+)?$/.test(human.trim())) {
     throw new Error(`toSmallestUnits: invalid amount "${human}"`);
   }
-  const [whole, frac = ""] = human.trim().split(".");
+  const parts = human.trim().split(".");
+  const whole = parts[0] ?? "0";
+  const frac = parts[1] ?? "";
   if (frac.length > decimals) {
     throw new Error(
       `toSmallestUnits: "${human}" has more than ${decimals} decimal places`,

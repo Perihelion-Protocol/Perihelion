@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadConfig } from "../src/config.js";
-import { Relayer } from "../src/relayer.js";
+import { Relayer, FatalError } from "../src/relayer.js";
 import { InMemoryDeadLetterStore } from "../src/dead-letter.js";
 import { messageKeyString } from "../src/types.js";
 import type {
@@ -420,6 +420,78 @@ test("relayer emits DEEP_REORG alert when reorg exceeds confirmation depth", asy
     errorMsgs.some((m) => m.includes("DEEP_REORG")),
     `expected DEEP_REORG alert; got: ${JSON.stringify(errorMsgs)}`,
   );
+});
+
+// ─── Issue 92: FatalError propagation and graceful drain ────────────────────
+
+test("FatalError thrown from watcher.poll() rejects start()", async () => {
+  const fatal = new FatalError("permanent RPC failure");
+  const watcher: SourceWatcher = {
+    async poll() { throw fatal; },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const relayer = new Relayer(baseConfig(), watcher, delivery, silent);
+  const err = await relayer.start().catch((e) => e);
+  assert.strictEqual(err, fatal, "start() should reject with the FatalError instance");
+});
+
+test("recoverable tick error keeps loop alive, does not reject start()", async () => {
+  let calls = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      calls++;
+      if (calls === 1) throw new Error("transient RPC timeout");
+      return { messages: [], head: 0 };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const relayer = new Relayer(
+    { ...baseConfig(), pollIntervalMs: 0 },
+    watcher,
+    delivery,
+    silent,
+  );
+
+  const startP = relayer.start();
+  await new Promise((r) => setTimeout(r, 30));
+  relayer.stop();
+  await assert.doesNotReject(startP, "recoverable error must not reject start()");
+  assert.ok(calls >= 2, "loop should have continued after recoverable error");
+});
+
+test("stop() interrupts inter-tick sleep so start() resolves promptly", async () => {
+  const watcher: SourceWatcher = {
+    async poll() { return { messages: [], head: 0 }; },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const relayer = new Relayer(
+    { ...baseConfig(), pollIntervalMs: 60_000 }, // would hang for 60 s without stop()
+    watcher,
+    delivery,
+    silent,
+  );
+
+  const startP = relayer.start();
+  await new Promise((r) => setTimeout(r, 20)); // let first tick complete
+  relayer.stop();
+
+  const result = await Promise.race([
+    startP.then(() => "resolved" as const),
+    new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 1_000)),
+  ]);
+  assert.equal(result, "resolved", "start() should resolve promptly after stop(), not wait 60 s");
 });
 
 // ─── Existing behaviour preserved ───────────────────────────────────────────
