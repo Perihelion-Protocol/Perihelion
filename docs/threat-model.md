@@ -19,8 +19,8 @@ and with [deployment.md](./deployment.md) for operational roles.
 | **LayerZero endpoint** | Enforces the OApp's DVN/ULN config; calls `lzReceive` only for verified messages | Accepts unverified messages (bypasses DVN set) | **Steal** (forge a FillConfirmed → release solver funds without a Stellar fill) | `msg.sender == address(endpoint)` guard in `lzReceive`; endpoint trust is the strongest assumption |
 | **DVN set** (LayerZero verifiers) | ≥ threshold DVNs attest the same source event honestly | A colluding DVN set attests a fake source event | **Steal** (forge a FillConfirmed or CancelIntent) | Multi-DVN with 2 required + 1 optional (≥3 distinct verifiers on common path); OApp admin can rotate set |
 | **Stellar validators** | Produce canonical ledger state with economic finality | A cartel finalizes a fraudulent Stellar ledger | **Steal** (forge a fill on Stellar that the Solver never actually funded); destroy the bridge's Stellar-side correctness | Stellar's consensus (Stellar Consensus Protocol); Perihelion inherits Stellar's finality guarantees |
-| **Admin / timelock owner set** (EVM) | Only executes governance actions the M-of-N honestly agreed to | Threshold of owners collude to rotate peer, drain escrow | **Steal** (change `stellarPeer` → forge inbound messages, or `setGuardian` + `pause` to censor, or `transferOwnership` to drain) | M-of-N timelock with delay: any config change is public for `delay` seconds before it executes; a single honest owner can `cancel`; GRACE_PERIOD limits stale-op window |
-| **Admin** (Soroban) | Configures endpoint, peer, and pause correctly | Sets a malicious endpoint/peer → steals Stellar-side funds | **Steal** (redirect settlement messages) | Single-key admin on Soroban (future: migrate to multisig); bounded by `cancel_expired_intent` liveness |
+| **Admin / timelock owner set** (EVM) | Only executes governance actions the M-of-N honestly agreed to | Threshold of owners collude to rotate peer, or call `skim` to drain any token balance the escrow holds | **Steal, unbounded** — `skim` has no on-chain accounting tying it to actual surplus, so it is not limited to the drain scenarios above ([T17](#t17--governance-extractable-escrow-balance)) | M-of-N timelock with delay: any config change (including a `skim` proposal) is public for `delay` seconds before it executes — **but this is a detection window, not a prevention**: a single owner can also unilaterally `cancel` a *legitimate recovery* action ([T20](#t20--governance-liveness)), and the refund path is itself pausable during the delay ([T19](#t19--refund-denial-via-pause)) |
+| **Admin** (Soroban) | Configures endpoint, peer, and pause correctly | Sets a malicious endpoint/peer → steals Stellar-side funds | **Steal** (redirect settlement messages) | `set_peer` requires a 1-day propose/confirm delay; **`set_endpoint` does not — it takes effect instantly** ([T18](#t18--instant-endpoint-rotation-on-soroban)). Single-key admin on Soroban (future: migrate to multisig); refund liveness (`cancel_expired_intent`) is itself pausable ([T19](#t19--refund-denial-via-pause)) |
 | **Guardian** (EVM) | Only pauses in genuine emergencies | Pauses repeatedly, denying new locks and refunds | Censor (denial of new locks and local refunds for up to 72 h per 144 h cycle) | Auto-expiry (GUARDIAN_PAUSE_TTL) + cooldown; cannot unpause, move funds, or change config |
 | **Executor** (LayerZero delivery) | Delivers committed messages | Drops execution, censors delivery | Censor/delay | Permissionless: anyone can call `lzReceive` for a committed message; executor is replaceable |
 
@@ -673,3 +673,327 @@ Even if the endpoint is compromised and funds are incorrectly released:
 - **Monitoring (operational):** Bridge monitoring system (relayer + backend) should
   implement anomaly detection
 - **Phase 2 roadmap:** ZK proofs or multi-endpoint verification to remove the assumption
+
+---
+
+## T17 — Governance-extractable escrow balance
+
+### Threat
+
+**Vector:** `skim(address token, address to, uint256 amount)`
+(`PerihelionEscrow.sol:511`) transfers an arbitrary amount of an arbitrary
+token to an arbitrary address, `onlyOwner`, with no accounting bound:
+
+```solidity
+function skim(address token, address to, uint256 amount) external onlyOwner {
+    if (to == address(0)) revert ZeroAddress();
+    _safeTransfer(token, to, amount);
+    emit Skimmed(token, to, amount);
+}
+```
+
+The escrow tracks individual `Lock` entries (`locks[intentHash]`) but does not
+maintain a running `totalLocked` per token. There is therefore no on-chain
+value `skim` is checked against — "surplus only" (the function's NatSpec intent:
+recovering rebasing-token gains or accidental direct transfers) is a
+convention enforced by nobody, not a constraint the contract enforces. A
+malicious or compromised owner set can call `skim` for the full balance of any
+token the escrow holds, including funds currently locked against open,
+unfilled intents.
+
+**Why this is the largest single concentration of risk:** every other
+fund-moving path in the escrow (`lock`, `lzReceive`, `cancelExpired`) is gated
+by a specific state transition tied to an individual `Lock`. `skim` is not —
+it is a flat withdrawal of contract balance, scoped only by `onlyOwner`.
+
+**The timelock is a detection window, not a prevention:**
+
+1. **No user exit during the delay.** `cancelExpired` requires
+   `deadline + confirmationGrace` to have elapsed and is itself blocked by
+   `whenNotPaused` (`PerihelionEscrow.sol:743`, see [T19](#t19--refund-denial-via-pause)).
+   An adversarial owner can `pause()` immediately after proposing a `skim`,
+   preventing any user from self-rescuing via refund during the delay window.
+2. **A single owner can veto governance,** including a legitimate emergency
+   response (see [T20](#t20--governance-liveness)) — so the timelock's own
+   liveness against a compromised or rogue owner is not assured.
+3. **The delay bounds detection time, not loss.** Once the delay elapses and
+   the operation executes, the transfer is final — the timelock provides a
+   window to *notice* and socially/legally respond to a malicious proposal,
+   not an on-chain mechanism that prevents it.
+
+**Worst-case impact:** full drain of every token balance the escrow holds —
+strictly larger than any single-intent loss, and not bounded by the
+`_enforceValueCaps` per-intent/rolling-window caps, which apply only to
+`lock()` inflows and are never consulted by `skim`.
+
+### Mitigation status
+
+**Not yet mitigated on-chain.** The only current control is the M-of-N
+timelock delay on the *proposal* (per [T20](#t20--governance-liveness), that
+delay itself has a governance-liveness gap). Tracked in
+[issue #273](https://github.com/Perihelion-Protocol/Perihelion/issues/273)
+("`skim` can transfer locked user funds — no `totalLocked` accounting bounds
+it"), whose proposed fix is to track `totalLocked` per token (incremented on
+`lock`, decremented on `released`/`refunded`) and bound `skim` to
+`balance - totalLocked`. Related: [issue #277](https://github.com/Perihelion-Protocol/Perihelion/issues/277)
+(refund path pausable, see T19) compounds this by removing the user's exit
+during the timelock window.
+
+### Trade-offs considered
+
+| Approach | Chosen? | Rationale |
+|----------|---------|-----------|
+| `totalLocked` accounting, bound `skim` to surplus | Proposed (#273) | Directly closes the gap; requires careful accounting at every lock-state transition |
+| Remove `skim` entirely | No | Legitimate need to recover rebasing-token surplus / accidental transfers; the function's purpose is sound, its bound is missing |
+| Multisig-only (no timelock) for `skim` specifically | Not proposed | Does not address the core issue — still unbounded, only changes who can trigger it |
+| Rely on the existing timelock delay as sufficient | No | Detection window ≠ prevention; user has no exit during the delay (T19) and a single owner can extend the exposure window by vetoing recovery governance (T20) |
+
+### Residual risk
+
+**HIGH — the largest unmitigated concentration of risk in the protocol.**
+Likelihood is low under an honest owner set (the same assumption the
+"Admin / timelock owner set" row in [§0](#0-consolidated-trust-model) already
+makes explicit), but impact is unbounded — full escrow drain, not capped by
+any per-intent or rolling-window mechanism. This is a **trust boundary**, not
+a bug in the sense of unintended behavior: the code does exactly what it
+says. The gap is that the threat model previously did not say so plainly.
+Until [#273](https://github.com/Perihelion-Protocol/Perihelion/issues/273)
+lands, integrators should treat the escrow's custody guarantee as bounded by
+owner-set honesty, not by contract logic.
+
+### Implementation notes
+
+- **This section:** Documents the gap; no code change here.
+- **Mitigation:** [issue #273](https://github.com/Perihelion-Protocol/Perihelion/issues/273).
+- **Compounding issues:** [#277](https://github.com/Perihelion-Protocol/Perihelion/issues/277)
+  (refund path pausable), [#280](https://github.com/Perihelion-Protocol/Perihelion/issues/280)
+  (`_enforceValueCaps` circuit breaker discarded by the revert it's part of —
+  another reason value caps cannot be relied on to bound this), [#282](https://github.com/Perihelion-Protocol/Perihelion/issues/282)
+  (single-owner `cancel`, see T20).
+- **README / FAQ:** [Trust Assumptions](../README.md#trust-assumptions) and
+  [docs/faq.md](./faq.md#who-do-i-have-to-trust) now scope the "no custodial
+  risk" claim against this entry.
+
+---
+
+## T18 — Instant endpoint rotation on Soroban
+
+### Threat
+
+**Vector:** `set_endpoint` (`contracts/soroban/settlement/src/lib.rs:161`) is
+admin-only and takes effect immediately — no delay, no confirmation step, no
+event-driven cooling period:
+
+```rust
+pub fn set_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
+    Self::require_admin(&env)?.require_auth();
+    let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
+    env.storage().instance().set(&DataKey::Endpoint, &new_endpoint);
+    env.events().publish((Symbol::new(&env, "endpoint_set"),), (old, new_endpoint));
+    ...
+}
+```
+
+This is inconsistent with `propose_peer` / `confirm_peer`
+(`lib.rs:191`, `lib.rs:216`), which enforce `MIN_PEER_CHANGE_DELAY`
+(`lib.rs:93`, 1 day) between proposal and effect. The endpoint is the sole
+caller of `lz_receive` and the root of inbound message authenticity (see
+[T16](#t16--layerzero-endpoint-compromise--malicious-origin-spoofing)) — the
+doc-comment directly above `set_endpoint` even says so ("Endpoint rotations
+are high-sensitivity: a malicious rotation would redirect all inbound
+LayerZero message delivery") but the function applies no delay to match that
+stated sensitivity.
+
+**Worst-case impact:** a compromised or malicious Soroban admin key redirects
+all inbound message delivery in a single transaction, with only an emitted
+event (`endpoint_set`) — not a delay — as the detection signal. By the time an
+operator observes and reacts to the event, the rotation has already taken
+effect.
+
+### Mitigation status
+
+**Not yet mitigated.** No dedicated tracking issue exists yet for bringing
+`set_endpoint` under the same propose/confirm delay as `set_peer`; this is
+recommended as a follow-up. The event emission itself
+([issue #16](https://github.com/Perihelion-Protocol/Perihelion/issues/16),
+closed) already gives off-chain monitors *something* to alert on — it just
+alerts after the fact rather than during a delay window.
+
+### Trade-offs considered
+
+| Approach | Chosen? | Rationale |
+|----------|---------|-----------|
+| Reuse the `propose_peer`/`confirm_peer` delay pattern for the endpoint | Recommended, not yet implemented | Consistent with how the equally-sensitive peer rotation is already handled; smallest change that closes the gap |
+| Leave instant (status quo) | No (this entry is the record of that decision being revisited) | Inconsistent with the documented sensitivity of the endpoint and with the EVM side's admin-config posture |
+| Two-key requirement for endpoint rotation specifically | Not proposed | Soroban admin is currently single-key by design (§0, "future: migrate to multisig"); scoping a special case for just this one field adds complexity ahead of that broader change |
+
+### Residual risk
+
+**Medium.** Likelihood is low (requires a compromised or malicious admin key,
+the same assumption already priced into the "Admin (Soroban)" row of
+[§0](#0-consolidated-trust-model)), but impact is high — full redirection of
+inbound settlement messages — and, unlike the EVM peer-rotation front-running
+case analyzed in [T15](#t15--front-running-of-pause-bypass--telegraphed-timelock-actions),
+there is currently no delay window at all on this specific action, so there is
+no time for the community to react before it takes effect.
+
+### Implementation notes
+
+- **This section:** Documents the gap; no code change here.
+- **Recommended mitigation:** extend the `propose_peer`/`confirm_peer` pattern
+  (`lib.rs:191`, `lib.rs:216`, `MIN_PEER_CHANGE_DELAY` at `lib.rs:93`) to
+  `set_endpoint`.
+- **Tracking:** no open issue yet — file one before scoping the fix.
+
+---
+
+## T19 — Refund denial via pause
+
+### Threat
+
+**Vector:** the documented "guaranteed refund path" is, on both chains,
+gated by the same pause flag that halts new activity:
+
+- **EVM:** `cancelExpired` (`PerihelionEscrow.sol:743`) carries the
+  `whenNotPaused` modifier, three lines below NatSpec that calls the refund
+  "guaranteed". Tracked in [issue #277](https://github.com/Perihelion-Protocol/Perihelion/issues/277).
+- **Soroban:** `cancel_expired_intent` (`lib.rs:691`) calls
+  `Self::require_not_paused(&env)?` at `lib.rs:698`. The global `paused` flag
+  is set via `set_paused`/`pause`-equivalent admin calls; `lz_receive` itself
+  also has its own per-`src_eid` pause gate (`PausedEid`, `lib.rs:432`) — so
+  either the global flag or a per-route flag can strand a refund.
+
+**Why it matters:** the guardian is intentionally a hot key with an
+instant, low-friction `pause()` — that design is sound for stopping new
+`lock()` calls quickly during an incident (see [T11](#t11--guardian-key-dos-via-repeated-instant-pause)).
+But because the *same* flag also blocks the refund path, the guardian's
+instant pause is simultaneously an instant, unilateral block on every user's
+ability to exit an expired, unfilled intent. Combined with
+[T11](#t11--guardian-key-dos-via-repeated-instant-pause)'s finding that a
+compromised guardian key can maintain up to a 50% pause duty cycle, a
+compromised guardian can deny refunds for up to 72 hours at a stretch,
+indefinitely, on a repeating cycle.
+
+**Compounding interaction with T17:** an owner who has proposed a malicious
+`skim` (or any other harmful timelocked action) can pause the contract
+immediately after proposing, removing the user's self-service exit for the
+duration of the timelock delay — see [T17](#t17--governance-extractable-escrow-balance).
+
+### Mitigation status
+
+**Not yet mitigated.** Both `cancelExpired` (EVM, #277) and
+`cancel_expired_intent` (Soroban) currently share the pause gate with the
+non-refund paths they were meant to be independent of. The straightforward
+fix — carve the refund/cancel path out from `whenNotPaused` /
+`require_not_paused` on both chains, so only *new* activity (`lock`, new
+`fill_intent` registrations) is paused, matching the existing exemption
+already given to `lzReceive`/inbound settlement (see
+[T15](#t15--front-running-of-pause-bypass--telegraphed-timelock-actions),
+"pause excludes releases") — has not landed.
+
+### Trade-offs considered
+
+| Approach | Chosen? | Rationale |
+|----------|---------|-----------|
+| Exempt refund/cancel-expired from the pause gate on both chains | Recommended, not yet implemented | Matches the existing design principle that in-flight/exit paths should survive a pause; consistent with why `lzReceive` is already exempt |
+| Leave refund paths pausable (status quo) | No (this entry records that decision being revisited) | Contradicts the "guaranteed refund" NatSpec and removes the user's only self-service exit during an incident or a malicious timelock proposal |
+| Separate "new-activity-only" pause flag from a rarely-used "full halt" flag | Deferred | Larger design change (two pause states); the minimal fix (exempt one function per chain) captures most of the benefit |
+
+### Residual risk
+
+**Medium → High**, specifically because of the T17 compounding case: on its
+own (guardian-triggered pause during a genuine incident), the residual risk
+is bounded by the same ≤50% duty cycle as T11. Combined with a malicious
+timelock proposal (T17) or a single vetoing owner (T20), an adversarial actor
+can use the refund-path pause to remove the user's exit for the full duration
+of their attack window, not just the guardian's 72-hour cycle.
+
+### Implementation notes
+
+- **This section:** Documents the gap; no code change here.
+- **EVM mitigation tracking:** [issue #277](https://github.com/Perihelion-Protocol/Perihelion/issues/277).
+- **Soroban:** no dedicated tracking issue yet for `cancel_expired_intent`'s
+  pause gate specifically — file one alongside #277's EVM fix so both chains
+  are addressed together (the wire-format/parity discipline the rest of this
+  codebase already follows).
+- **Related:** [T11](#t11--guardian-key-dos-via-repeated-instant-pause) (pause
+  duty-cycle bound), [T15](#t15--front-running-of-pause-bypass--telegraphed-timelock-actions)
+  ("pause excludes releases" — the design precedent this fix would extend to
+  refunds).
+
+---
+
+## T20 — Governance liveness
+
+### Threat
+
+**Vector:** `PerihelionTimelock.cancel(bytes32 id)` (`PerihelionTimelock.sol:262`)
+is `onlyOwner` — **any single owner**, not a threshold, can cancel a pending
+operation, including one the rest of the owner set has already confirmed:
+
+```solidity
+/// @notice Cancel a pending (un-executed) operation. Any owner may cancel.
+function cancel(bytes32 id) external onlyOwner {
+```
+
+This means the M-of-N confirmation threshold that governs *proposing* and
+*executing* an operation does not apply symmetrically to *blocking* one — a
+single compromised, coerced, or simply obstructionist owner has unilateral
+veto power over every governance action, including:
+
+- A legitimate emergency unpause after a guardian incident.
+- A guardian-key rotation after a leak is discovered.
+- A recovery action proposed in response to a [T17](#t17--governance-extractable-escrow-balance)
+  attack by a *different* malicious owner.
+
+**Compounding factors** (same underlying single-owner-`onlyOwner` pattern,
+tracked separately): [issue #283](https://github.com/Perihelion-Protocol/Perihelion/issues/283)
+notes `revokeConfirmation` resets `readyAt`, letting one owner reset the delay
+clock indefinitely even without an outright `cancel`; [issue #281](https://github.com/Perihelion-Protocol/Perihelion/issues/281)
+notes `cancel` does not clear `confirmedBy`, permanently bricking a
+re-proposed operation under the same salt. Together these mean a single owner
+can not only block an operation once, but make it costly to ever re-propose.
+
+**Why the existing threat-model text undersells this:** [§0](#0-consolidated-trust-model)'s
+"Admin / timelock owner set" row currently lists "a single honest owner can
+`cancel`" as a *mitigation* (a safety valve against a malicious majority).
+That framing is correct for the case it describes, but it is incomplete: the
+same mechanism is a **liveness vulnerability** when the single acting owner is
+the adversarial or compromised one, not the honest holdout.
+
+### Mitigation status
+
+**Not yet mitigated.** [Issue #44](https://github.com/Perihelion-Protocol/Perihelion/issues/44)
+("timelock `cancel` is callable by any single owner, allowing one owner to
+unilaterally block all governance") was filed and **closed without the
+underlying code changing** — see [issue #282](https://github.com/Perihelion-Protocol/Perihelion/issues/282),
+which reopens the finding and is the current tracking issue. This is itself
+an instance of the closed-without-landing pattern flagged by [issue #357](https://github.com/Perihelion-Protocol/Perihelion/issues/357)'s
+review-gate audit.
+
+### Trade-offs considered
+
+| Approach | Chosen? | Rationale |
+|----------|---------|-----------|
+| Require a threshold (not a single owner) to `cancel` | Recommended (#282), not yet implemented | Restores symmetry with the confirm/execute threshold; a single owner should be able to *flag* concern (e.g. via `revokeConfirmation` on their own confirmation) but not unilaterally kill consensus |
+| Leave single-owner `cancel` as-is (status quo) | No (this entry records that decision being revisited) | The safety-valve rationale only holds against a malicious majority; it creates an equal and opposite liveness risk from a malicious minority of one |
+| Remove `cancel` entirely, rely on letting operations expire via `GRACE_PERIOD` | No | Removes the legitimate fast-abort case (e.g. a proposal found to be buggy before it executes); the fix is to raise the bar on who can cancel, not to remove the capability |
+
+### Residual risk
+
+**Medium.** Likelihood requires one compromised or adversarial owner (already
+priced into the M-of-N trust assumption), but the impact is liveness-only —
+no funds move via `cancel` alone. The risk is that it can be *combined* with
+other findings: it removes the recovery path exactly when [T17](#t17--governance-extractable-escrow-balance)
+or a guardian-key compromise ([T11](#t11--guardian-key-dos-via-repeated-instant-pause))
+needs one, which is why it is documented here as a first-class entry rather
+than left as a footnote on the trust table.
+
+### Implementation notes
+
+- **This section:** Documents the gap; no code change here.
+- **Tracking:** [issue #282](https://github.com/Perihelion-Protocol/Perihelion/issues/282)
+  (primary), [#281](https://github.com/Perihelion-Protocol/Perihelion/issues/281),
+  [#283](https://github.com/Perihelion-Protocol/Perihelion/issues/283)
+  (compounding `confirmedBy`/`readyAt` issues in the same function family).
+  Closed-without-fix history: [#44](https://github.com/Perihelion-Protocol/Perihelion/issues/44).

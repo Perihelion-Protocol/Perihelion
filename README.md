@@ -52,6 +52,7 @@ EVM-compatible networks — Ethereum, Base, Arbitrum, and beyond.
 - [Roadmap](#roadmap)
 - [Project Status](#project-status)
 - [Contributing](#contributing)
+- [Trust Assumptions](#trust-assumptions)
 - [Security](#security)
 - [Community & Support](#community--support)
 - [License](#license)
@@ -372,6 +373,30 @@ tracks: **Rust/Soroban**, **Solidity**, **TypeScript**, and **Documentation**.
 
 All PRs run through CI (`npm test`, `cargo test`, `forge test`) and are reviewed
 against the protocol's [design invariants](./docs/TECHNICAL-ARCHITECTURE.md#0-design-invariants-read-first).
+
+## Trust Assumptions
+
+The claims above ("no custodial risk," "never lose funds mid-bridge") describe
+the **normal intent flow**: while a lock is in transit, the protocol's
+invariants (I1–I5, see [Architecture](#architecture)) guarantee a user is
+either settled or refunded. They do not describe the **governance layer**.
+Scoped honestly, per role:
+
+| Role | Can do | Cannot do | Bounding mechanism |
+|---|---|---|---|
+| **Solver / Relayer / Keeper** | Delay or decline to act | Steal funds, forge a fill, censor permanently (anyone can take over) | Permissionless; wire-format and signature checks |
+| **LayerZero DVN set** | — | — | Root of message authenticity; a colluding DVN set can forge a fill (see [T16](./docs/threat-model.md#t16--layerzero-endpoint-compromise--malicious-origin-spoofing)) |
+| **Guardian (EVM)** | Pause new locks and local refunds, for up to 72h per 144h cycle | Move funds, change config, unpause | Auto-expiry + cooldown ([T11](./docs/threat-model.md#t11--guardian-key-dos-via-repeated-instant-pause)) |
+| **EVM timelock owner set** | Rotate the peer, guardian, or grace period; **withdraw *any* token balance the escrow holds via `skim`, with no on-chain bound relating it to locked funds** | Bypass the timelock delay for peer/grace/guardian changes | M-of-N confirmation + public delay for config changes; **`skim` itself has no delay, no cap, and no per-token accounting** ([T17](./docs/threat-model.md#t17--governance-extractable-escrow-balance)) |
+| **A single EVM timelock owner** | Cancel any pending operation, including a legitimate unpause or guardian rotation | Execute an operation alone | None at present — this is a liveness single point of failure ([T20](./docs/threat-model.md#t20--governance-liveness)) |
+| **Soroban admin** | Rotate the LayerZero endpoint **instantly, with no delay** | — | `propose_peer`/`confirm_peer` have a 1-day delay; `set_endpoint` does not ([T18](./docs/threat-model.md#t18--instant-endpoint-rotation-on-soroban)) |
+
+**The practical implication:** the escrow's custody guarantee is only as strong
+as the timelock owner set's honesty, because `skim` is unbounded and the
+refund path (`cancelExpired`) is itself pausable. This is the single largest
+concentration of risk in the protocol today and is not yet mitigated on-chain
+— see [`docs/threat-model.md`](./docs/threat-model.md) §0 and T17–T20 for the
+full trust model, likelihood/impact assessment, and tracked mitigation issues.
 
 ## Security
 

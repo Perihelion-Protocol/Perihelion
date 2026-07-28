@@ -28,6 +28,22 @@ single solver or relayer — those roles are permissionless and a faulty one onl
 delays your settlement, never endangers your funds. The roadmap replaces DVN
 trust on the most sensitive path with ZK state proofs (Protocol 24).
 
+**Scoped precisely** — this is what each trusted role can and cannot do:
+
+| Role | What they can do | What bounds it |
+|---|---|---|
+| DVN set | Attest to source-chain events | Multi-DVN threshold; a colluding set can forge a fill (worst case, see [threat-model.md T16](./threat-model.md#t16--layerzero-endpoint-compromise--malicious-origin-spoofing)) |
+| EVM timelock owner set (M-of-N) | Rotate peer/guardian/grace; **withdraw any token balance the escrow holds via `skim`, unbounded by locked-fund accounting** | Config changes go through a public delay; **`skim` does not** ([T17](./threat-model.md#t17--governance-extractable-escrow-balance)) |
+| A single timelock owner | Veto (cancel) any pending governance action, including a legitimate unpause | Nothing — a liveness gap, not a fund-safety one ([T20](./threat-model.md#t20--governance-liveness)) |
+| Guardian | Pause new locks/refunds for ≤72h per 144h cycle | Auto-expiry + cooldown; cannot move funds |
+| Soroban admin | Rotate the LayerZero endpoint with **no delay** (unlike peer rotation, which has one) | Not yet bounded ([T18](./threat-model.md#t18--instant-endpoint-rotation-on-soroban)) |
+
+The "you don't lose funds" guarantee holds for the intent-fill flow itself
+(I1–I5). It does not mean the timelock owner set is powerless over custody —
+see [`threat-model.md`](./threat-model.md) for the full breakdown, including
+why this is currently the largest unmitigated concentration of risk in the
+protocol.
+
 ### How is this different from UniswapX or CoW Protocol?
 
 The architecture is the same family — signed intents fulfilled by a competing
