@@ -162,9 +162,30 @@ When adding a new wire message type:
 
 4. **Document** the message layout in this file
 
+## Specification-derived vs. implementation-derived vectors
+
+The proptests in `fuzz.rs` above are **implementation-derived**: they generate
+inputs from the Rust encoder and check the Rust decoder agrees with itself.
+That proves the two Rust functions are mutual inverses — it cannot catch a
+case where the encoder and decoder agree with each other but both diverge
+from the actual specification (this directory's `README.md`). `fuzz.rs` also
+includes two **specification-derived** tests that close part of that gap:
+
+- `fill_instruction_matches_golden_vector` — asserts the encoder produces the
+  exact bytes in `fill_instruction.hex`, not just bytes its own decoder
+  happens to accept.
+- `fill_instruction_recipient_does_not_survive_the_evm_encoder_truncation` —
+  a semantic round-trip assertion (not just byte-level): takes a real Stellar
+  address, applies the truncation the EVM encoder actually performs, decodes
+  it back, and checks whether the result is the original address. It
+  currently is not — this pins the known gap tracked as issue #271 so a fix
+  requires consciously updating the assertion, and documents in the test
+  suite itself why the differential-fuzz proptests alone don't catch it (see
+  "Known Limitations" below).
+
 ## Known Limitations
 
-- **String fields** (`destination`, `destAsset` in `FillInstruction`) are not fully fuzzed due to Stellar-specific encoding constraints
+- **String fields** (`destination`, `destAsset` in `FillInstruction`) are not fully fuzzed due to Stellar-specific encoding constraints. The `recipient`/`dest_asset` wire fields currently carry the strkey's ASCII *text*, truncated to 32 bytes, which the Soroban decoder reinterprets as a raw contract-id payload — an unresolved mismatch (issue #271) that a pure round-trip test cannot detect on its own; see the specification-derived test above.
 - **Address validation** assumes EVM addresses; Stellar addresses use a different format
 - **Replay nonces** are tested separately (transport layer, not wire codec)
 

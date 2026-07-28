@@ -141,8 +141,14 @@ jobs:
     needs: [differential-fuzz-evm, differential-fuzz-soroban, cross-validate]
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Generate summary
+        id: summary
         run: |
           echo "## Differential Fuzzing Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -155,7 +161,30 @@ jobs:
              [[ "${{ needs.cross-validate.result }}" == "failure" ]]; then
             echo "❌ Differential fuzzing detected codec divergence!" >> $GITHUB_STEP_SUMMARY
             echo "Review artifacts for failing test cases." >> $GITHUB_STEP_SUMMARY
-            exit 1
+            echo "failed=true" >> "$GITHUB_OUTPUT"
           else
             echo "✅ All differential fuzzing checks passed!" >> $GITHUB_STEP_SUMMARY
+            echo "failed=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # A scheduled job whose failures nobody sees provides no protection —
+      # only file automatically on the nightly/dispatch runs, not on every
+      # red PR, so this doesn't spam an issue per failing pull request.
+      - name: Strip front matter from the issue template
+        if: steps.summary.outputs.failed == 'true' && github.event_name != 'pull_request'
+        run: |
+          sed '1{/^---$/!q}; 1,/^---$/d' \
+            .github/ISSUE_TEMPLATE/differential-fuzz-failure.md \
+            > /tmp/fuzz-failure-issue-body.md
+
+      - name: Open tracking issue
+        if: steps.summary.outputs.failed == 'true' && github.event_name != 'pull_request'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "[FUZZ] Differential fuzzing failed on ${{ github.event_name }} run ${{ github.run_id }} (${{ github.ref_name }}@${{ github.sha }})"
+          content-filepath: /tmp/fuzz-failure-issue-body.md
+          labels: bug, security, wire-format, differential-fuzz
+
+      - name: Fail the job if fuzzing failed
+        if: steps.summary.outputs.failed == 'true'
+        run: exit 1

@@ -9,8 +9,7 @@ use serde::Deserialize;
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
     testutils::{Address as _, Events, Ledger as _},
-    xdr::{ContractEvent, ContractEventBody, ScVal},
-    token, Address, Bytes, BytesN, Env,
+    token, Address, BytesN, Env, Symbol, TryFromVal,
 };
 
 // --- Mock LayerZero endpoint --------------------------------------------------
@@ -163,6 +162,14 @@ fn setup() -> Setup {
         li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
     });
     client.confirm_peer(&src_eid);
+    // confirm_peer only requires that the delay has elapsed since propose_peer;
+    // nothing about the confirmed peer depends on the clock staying advanced.
+    // Reset it back to the setup() baseline so every test's `deadline` fixture
+    // values (written against a ~1_000 clock) aren't already expired the
+    // moment setup() returns.
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000;
+    });
 
     let issuer = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(issuer);
@@ -245,7 +252,7 @@ fn resource_budget_baselines_are_within_thresholds() {
         .get("lz_receive")
         .expect("lz_receive baseline missing");
     let (lz_cpu, lz_mem) = measure_entrypoint_budget(&s, |s| {
-        register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+        register_intent(s, &h, &recipient, 100_000, 5_000, 1, None);
     });
     assert_budget_within(
         "lz_receive",
@@ -464,8 +471,27 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
     let recipient = Address::generate(&s.env);
     let h = hash(&s.env, 50);
 
-    // Body declares a different src_eid (e.g. a different chain).
+    // Body declares a different src_eid (e.g. a different chain). Issue #15
+    // requires a peer to already be configured for the body-declared src_eid
+    // (registration is otherwise rejected as UntrustedPeer — see
+    // `registration_rejected_when_no_peer_for_src_eid`), so the attacker eid
+    // here has to be a *legitimately configured* peer for this test to reach
+    // the override logic it's actually checking: that the intent record uses
+    // the transport-authenticated eid, not the body-declared one, even when
+    // the body-declared eid is itself a trusted peer.
     let attacker_eid = 99999u32;
+    let attacker_peer = BytesN::from_array(&s.env, &[0xAA; 32]);
+    s.client.propose_peer(&attacker_eid, &attacker_peer);
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+    s.client.confirm_peer(&attacker_eid);
+    // Reset the clock back to the setup() baseline so this test's own
+    // `deadline: 5_000` fixture isn't already expired.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp = 1_000;
+    });
+
     let fi = FillInstruction {
         intent_hash: h.clone(),
         src_eid: attacker_eid, // body-declared, must be ignored
@@ -474,6 +500,7 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
+        reservation_window: 0,
     };
     let origin = Origin {
         src_eid: s.src_eid, // transport-authenticated
@@ -496,7 +523,8 @@ fn rejects_double_initialize() {
     let s = setup();
     let admin = Address::generate(&s.env);
     let endpoint = Address::generate(&s.env);
-    s.client.initialize(&admin, &endpoint);
+    let native_token = Address::generate(&s.env);
+    s.client.initialize(&admin, &endpoint, &native_token);
 }
 
 // --- Issue #18: initialize validation ----------------------------------------
@@ -530,20 +558,18 @@ fn initialize_emits_event() {
     let id = env.register(Perihelion, ());
     let client = PerihelionClient::new(&env, &id);
     let admin = Address::generate(&env);
-    client.initialize(&admin, &endpoint_addr);
+    let native_token = Address::generate(&env);
+    client.initialize(&admin, &endpoint_addr, &native_token);
     // Verify the initialized event was published (env records all events).
     let events = env.events().all();
-    let found = events.iter().any(|e| {
-        if let soroban_sdk::xdr::ContractEvent {
-            body: soroban_sdk::xdr::ContractEventBody::V0(ref v0),
-            ..
-        } = e
-        {
-            // Topic[0] should be the Symbol "initialized"
-            !v0.topics.is_empty()
-        } else {
-            false
-        }
+    let expected = Symbol::new(&env, "initialized");
+    let found = events.iter().any(|(_, topics, _)| {
+        // Topic[0] should be the Symbol "initialized"
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(&env, &topic)
+                .map(|s| s == expected)
+                .unwrap_or(false)
+        })
     });
     assert!(found, "initialized event not emitted");
 }
@@ -593,16 +619,13 @@ fn set_admin_emits_transfer_started_event() {
     let new_admin = Address::generate(&s.env);
     s.client.set_admin(&new_admin);
     let events = s.env.events().all();
-    let found = events.iter().any(|e| {
-        if let soroban_sdk::xdr::ContractEvent {
-            body: soroban_sdk::xdr::ContractEventBody::V0(ref v0),
-            ..
-        } = e
-        {
-            !v0.topics.is_empty()
-        } else {
-            false
-        }
+    let expected = Symbol::new(&s.env, "admin_transfer_started");
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(&s.env, &topic)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
     });
     assert!(found, "admin_transfer_started event not emitted");
 }
@@ -634,13 +657,13 @@ fn peer_governance_confirm_requires_delay() {
     s.client.propose_peer(&s.src_eid, &new_peer);
 
     // Should fail if called before the delay
-    assert!(s.client.confirm_peer(&s.src_eid).is_err());
+    assert!(s.client.try_confirm_peer(&s.src_eid).is_err());
 
     // Advance time and try again
     s.env.ledger().with_mut(|li| {
         li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
     });
-    assert!(s.client.confirm_peer(&s.src_eid).is_ok());
+    assert!(s.client.try_confirm_peer(&s.src_eid).is_ok());
 }
 
 #[test]
@@ -650,13 +673,13 @@ fn peer_governance_cancel_clears_pending() {
     s.client.propose_peer(&s.src_eid, &new_peer);
 
     // Cancel the pending peer change
-    assert!(s.client.cancel_pending_peer(&s.src_eid).is_ok());
+    assert!(s.client.try_cancel_pending_peer(&s.src_eid).is_ok());
 
     // Confirm should now fail (no pending change)
     s.env.ledger().with_mut(|li| {
         li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
     });
-    assert!(s.client.confirm_peer(&s.src_eid).is_err());
+    assert!(s.client.try_confirm_peer(&s.src_eid).is_err());
 }
 
 #[test]
@@ -665,15 +688,15 @@ fn peer_governance_get_pending_peer() {
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
 
     // No pending peer initially
-    let pending = s.client.get_pending_peer(&s.src_eid);
+    let pending = s.client.try_get_pending_peer(&s.src_eid);
     assert!(pending.is_ok());
-    assert!(pending.unwrap().is_none());
+    assert!(pending.unwrap().unwrap().is_none());
 
     // After propose, should return the pending peer
     s.client.propose_peer(&s.src_eid, &new_peer);
-    let pending = s.client.get_pending_peer(&s.src_eid);
+    let pending = s.client.try_get_pending_peer(&s.src_eid);
     assert!(pending.is_ok());
-    let (peer, _time) = pending.unwrap().unwrap();
+    let (peer, _time) = pending.unwrap().unwrap().unwrap();
     assert_eq!(peer, new_peer);
 }
 
@@ -692,14 +715,26 @@ fn set_paused_emits_event() {
 // treating event shapes as a versioned interface that must not change silently.
 
 /// Helper: Assert an event with the expected topic symbol exists.
+///
+/// Event topics are `Val`s; a `Val`'s `Debug` output only shows an opaque
+/// host object handle (e.g. `Symbol(obj#431)`) for symbols longer than the
+/// small-symbol inline limit, so string-matching the Debug output silently
+/// never matches. Topics must be converted to a typed `Symbol` (which
+/// resolves the underlying host object via `env`) and compared for equality.
 fn assert_event_with_symbol(
-    events: &[(Address, Vec<soroban_sdk::Val>, soroban_sdk::Val)],
+    env: &Env,
+    events: &soroban_sdk::Vec<(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)>,
     expected_sym: &str,
     expected_data_len: usize,
 ) {
     let _ = expected_data_len;
+    let expected = Symbol::new(env, expected_sym);
     let found = events.iter().any(|(_, topics, _)| {
-        topics.iter().any(|topic| format!("{topic:?}").contains(expected_sym))
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(env, &topic)
+                .map(|s| s == expected)
+                .unwrap_or(false)
+        })
     });
     assert!(found, "event '{}' not found", expected_sym);
 }
@@ -715,7 +750,7 @@ fn registered_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("registered", intent_hash) -> (src_eid, deadline)
-    assert_event_with_symbol(&events, "registered", 2);
+    assert_event_with_symbol(&s.env, &events, "registered", 2);
 }
 
 /// Assert `filled` event: topics = ("filled", intent_hash), data = (solver, dest_asset, fill_amount, src_eid)
@@ -734,7 +769,7 @@ fn filled_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("filled", intent_hash) -> (solver, dest_asset, fill_amount, src_eid)
-    assert_event_with_symbol(&events, "filled", 4);
+    assert_event_with_symbol(&s.env, &events, "filled", 4);
 }
 
 /// Assert `cancelled` event: topics = ("cancelled", intent_hash), data = (src_eid, deadline)
@@ -752,7 +787,7 @@ fn cancelled_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("cancelled", intent_hash) -> (src_eid, deadline)
-    assert_event_with_symbol(&events, "cancelled", 2);
+    assert_event_with_symbol(&s.env, &events, "cancelled", 2);
 }
 
 /// Assert `cancelled_inbound` event: topics = ("cancelled_inbound", intent_hash), data = (src_eid,)
@@ -777,7 +812,7 @@ fn cancelled_inbound_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("cancelled_inbound", intent_hash) -> (src_eid,)
-    assert_event_with_symbol(&events, "cancelled_inbound", 1);
+    assert_event_with_symbol(&s.env, &events, "cancelled_inbound", 1);
 }
 
 /// Assert `confirmation_sent` event: topics = ("confirmation_sent", intent_hash), data = (solver,)
@@ -799,7 +834,7 @@ fn confirmation_sent_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("confirmation_sent", intent_hash) -> (solver,)
-    assert_event_with_symbol(&events, "confirmation_sent", 1);
+    assert_event_with_symbol(&s.env, &events, "confirmation_sent", 1);
 }
 
 /// Assert `initialized` event: topics = ("initialized",), data = (admin, endpoint)
@@ -820,20 +855,20 @@ fn initialized_event_shape() {
 
     let events = env.events().all();
     // Event: ("initialized",) -> (admin, endpoint)
-    assert_event_with_symbol(&events, "initialized", 2);
+    assert_event_with_symbol(&env, &events, "initialized", 2);
 }
 
 /// Assert `endpoint_set` event: topics = ("endpoint_set",), data = (old, new)
 #[test]
 fn endpoint_set_event_shape() {
     let s = setup();
-    let old_ep = s.client.endpoint();
+    let _old_ep = s.client.endpoint();
     let new_ep = Address::generate(&s.env);
     s.client.set_endpoint(&new_ep);
 
     let events = s.env.events().all();
     // Event: ("endpoint_set",) -> (old, new)
-    assert_event_with_symbol(&events, "endpoint_set", 2);
+    assert_event_with_symbol(&s.env, &events, "endpoint_set", 2);
 }
 
 /// Assert `peer_set` event: topics = ("peer_set",), data = (eid, old, peer)
@@ -857,7 +892,7 @@ fn peer_set_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("peer_set",) -> (eid, old, peer) with 3 data fields
-    assert_event_with_symbol(&events, "peer_set", 3);
+    assert_event_with_symbol(&s.env, &events, "peer_set", 3);
 }
 
 /// Assert `paused_set` event: topics = ("paused_set",), data = (paused,)
@@ -868,7 +903,7 @@ fn paused_set_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("paused_set",) -> (paused,)
-    assert_event_with_symbol(&events, "paused_set", 1);
+    assert_event_with_symbol(&s.env, &events, "paused_set", 1);
 }
 
 /// Assert `admin_transfer_started` event: topics = ("admin_transfer_started",), data = (old, new)
@@ -880,7 +915,7 @@ fn admin_transfer_started_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("admin_transfer_started",) -> (old, new)
-    assert_event_with_symbol(&events, "admin_transfer_started", 2);
+    assert_event_with_symbol(&s.env, &events, "admin_transfer_started", 2);
 }
 
 /// Assert `admin_transfer_completed` event: topics = ("admin_transfer_completed",), data = (old, new)
@@ -893,7 +928,7 @@ fn admin_transfer_completed_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("admin_transfer_completed",) -> (old, new)
-    assert_event_with_symbol(&events, "admin_transfer_completed", 2);
+    assert_event_with_symbol(&s.env, &events, "admin_transfer_completed", 2);
 }
 
 /// Assert `cancel_ignored` event: topics = ("cancel_ignored", intent_hash), data = (status,)
@@ -923,7 +958,7 @@ fn cancel_ignored_event_shape() {
 
     let events = s.env.events().all();
     // Event: ("cancel_ignored", intent_hash) -> (status,)
-    assert_event_with_symbol(&events, "cancel_ignored", 1);
+    assert_event_with_symbol(&s.env, &events, "cancel_ignored", 1);
 }
 
 // --- Issue #15: peer symmetry — registration rejects unknown src_eid ---------
@@ -1399,6 +1434,12 @@ fn cancel_confirmation_sent_intent_returns_already_filled() {
     );
     // The event should have been emitted, but we can't easily assert on it in this context
     // (soroban test framework doesn't expose event inspection). This test documents the behavior.
+    // Now advance past deadline and try to cancel — must get AlreadyFilled (#146),
+    // mirroring cancel_filled_intent_returns_already_filled above but starting
+    // from ConfirmationSent instead of Filled.
+    s.env.ledger().with_mut(|li| li.timestamp = 10_000);
+    let caller = Address::generate(&s.env);
+    s.client.cancel_expired_intent(&caller, &h, &0);
 }
 
 #[test]
@@ -1423,6 +1464,12 @@ fn cancel_intent_when_locked_emits_event() {
     s.client
         .lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
 
+    // Capture events right after the mutating call: the test env's event log
+    // only holds the most recent top-level contract invocation's events, so
+    // the `get_intent`/`is_cancelled` read calls below would otherwise clear
+    // what we're trying to inspect here.
+    let events = s.env.events().all();
+
     // Verify the intent transitioned to Cancelled
     assert_eq!(
         s.client.get_intent(&h).unwrap().status,
@@ -1431,10 +1478,15 @@ fn cancel_intent_when_locked_emits_event() {
     assert!(s.client.is_cancelled(&h));
 
     // Verify the cancelled_inbound event was emitted with correct src_eid
-    let events = s.env.events().all();
-    assert!(events.iter().any(|(_, topics, _)| {
-        topics.iter().any(|topic| format!("{topic:?}").contains("cancelled_inbound"))
-    }), "cancelled_inbound event not emitted");
+    let expected = Symbol::new(&s.env, "cancelled_inbound");
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(&s.env, &topic)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
+    });
+    assert!(found, "cancelled_inbound event not emitted");
 }
 
 // --- Issue #57: Amount boundary conformance vectors --------------------------
@@ -1595,7 +1647,8 @@ fn cancel_expired_intent_pays_keeper_reward() {
     
     // Fund the contract with native tokens to pay the keeper reward
     let native_token_client = token::TokenClient::new(&s.env, &native_token);
-    native_token_client.mint(&s.client.as_contract_id(), &1_000_000);
+    let native_token_admin = token::StellarAssetClient::new(&s.env, &native_token);
+    native_token_admin.mint(&s.client.address, &1_000_000);
 
     // Register an intent with a deadline in the past (relative to ledger time)
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
@@ -1603,7 +1656,7 @@ fn cancel_expired_intent_pays_keeper_reward() {
     // Set the keeper reward
     let reward_amount = 50_000i128;
     s.client.set_keeper_reward(&reward_amount);
-    assert_eq!(s.client.keeper_reward(&s.env), reward_amount);
+    assert_eq!(s.client.keeper_reward(), reward_amount);
 
     // Move time past the deadline so the intent can be cancelled
     s.env.ledger().with_mut(|li| li.timestamp = 6_000);
@@ -1613,6 +1666,12 @@ fn cancel_expired_intent_pays_keeper_reward() {
 
     // Cancel the expired intent (keeper calls it)
     s.client.cancel_expired_intent(&keeper, &h, &0);
+
+    // Capture events right after the mutating call: the test env's event log
+    // only holds the most recent top-level contract invocation's events, so
+    // the `is_cancelled`/`balance` read calls below would otherwise clear
+    // what we're trying to inspect here.
+    let events = s.env.events().all();
 
     // Verify the intent was cancelled
     assert!(s.client.is_cancelled(&h));
@@ -1626,25 +1685,14 @@ fn cancel_expired_intent_pays_keeper_reward() {
     );
 
     // Verify the keeper_reward_paid event was emitted
-    let events = s.env.events().all();
-    let keeper_paid_event_found = events.iter().any(|e| {
-        if let soroban_sdk::xdr::ContractEvent {
-            body: soroban_sdk::xdr::ContractEventBody::V0(ref v0),
-            ..
-        } = e
-        {
-            // Check that the event has the keeper_reward_paid symbol
-            if !v0.topics.is_empty() {
-                if let soroban_sdk::xdr::SCVal::Vec(Some(ref topics)) = v0.topics[0] {
-                    if let Some(soroban_sdk::xdr::SCVal::Symbol(ref sym)) = topics.sc_vec.first() {
-                        return String::from_utf8_lossy(&sym.0) == "keeper_reward_paid";
-                    }
-                }
-            }
-            false
-        } else {
-            false
-        }
+    let expected = Symbol::new(&s.env, "keeper_reward_paid");
+    let keeper_paid_event_found = events.iter().any(|(_, topics, _)| {
+        // Check that the event has the keeper_reward_paid symbol as its first topic
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(&s.env, &topic)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
     });
     assert!(
         keeper_paid_event_found,
@@ -1665,13 +1713,14 @@ fn cancel_expired_intent_skips_reward_when_disabled() {
     
     // Fund the contract (even though we won't spend it)
     let native_token_client = token::TokenClient::new(&s.env, &native_token);
-    native_token_client.mint(&s.client.as_contract_id(), &1_000_000);
+    let native_token_admin = token::StellarAssetClient::new(&s.env, &native_token);
+    native_token_admin.mint(&s.client.address, &1_000_000);
 
     // Register an intent
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
 
     // Keeper reward is initialized to 0 and not changed
-    assert_eq!(s.client.keeper_reward(&s.env), 0);
+    assert_eq!(s.client.keeper_reward(), 0);
 
     // Move time past the deadline
     s.env.ledger().with_mut(|li| li.timestamp = 6_000);
@@ -1706,29 +1755,24 @@ fn can_set_and_get_native_token() {
     let new_token = Address::generate(&s.env);
     s.client.set_native_token(&new_token);
 
+    // Capture events right after the mutating call: the test env's event log
+    // only holds the most recent top-level contract invocation's events, so
+    // any further client call (even a read-only view) clears what we're
+    // trying to inspect here.
+    let events = s.env.events().all();
+
     // Verify the new value is persisted
     let retrieved_token = s.client.native_token();
     assert_eq!(retrieved_token, Some(new_token.clone()));
 
     // Verify the native_token_set event was emitted
-    let events = s.env.events().all();
-    let event_found = events.iter().any(|e| {
-        if let soroban_sdk::xdr::ContractEvent {
-            body: soroban_sdk::xdr::ContractEventBody::V0(ref v0),
-            ..
-        } = e
-        {
-            if !v0.topics.is_empty() {
-                if let soroban_sdk::xdr::SCVal::Vec(Some(ref topics)) = v0.topics[0] {
-                    if let Some(soroban_sdk::xdr::SCVal::Symbol(ref sym)) = topics.sc_vec.first() {
-                        return String::from_utf8_lossy(&sym.0) == "native_token_set";
-                    }
-                }
-            }
-            false
-        } else {
-            false
-        }
+    let expected = Symbol::new(&s.env, "native_token_set");
+    let event_found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(&s.env, &topic)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
     });
     assert!(event_found, "native_token_set event should be emitted");
 }
@@ -1746,7 +1790,7 @@ fn cancel_succeeds_without_native_token_configured() {
 
     let admin = Address::generate(&env);
     let endpoint = env.register(MockEndpoint, ());
-    let mock = MockEndpointClient::new(&env, &endpoint);
+    let _mock = MockEndpointClient::new(&env, &endpoint);
 
     let id = env.register(Perihelion, ());
     let client = PerihelionClient::new(&env, &id);
@@ -1780,32 +1824,43 @@ fn cancel_succeeds_without_native_token_configured() {
         preferred_solver: None,
         reservation_window: 1,
     };
-    let msg = soroban_sdk::Bytes::new(
-        &env,
-        &crate::messages::encode_fill_instruction(&env, &fi),
-    );
+    let guid = BytesN::from_array(&env, &[0u8; 32]);
     client.lz_receive(
         &Origin {
             src_eid,
             sender: peer.clone(),
             nonce: 1,
         },
-        &msg,
+        &guid,
+        &LzMessage::FillInstruction(fi),
     );
 
     // Set keeper reward before clearing the native token
     let reward = 10_000i128;
     client.set_keeper_reward(&reward);
 
-    // Now clear native token by setting it to an unreachable address
-    // (simulating a state where native_token is not properly configured)
-    // We can't truly delete it, but the contract should handle the missing
-    // token gracefully. For this test, we verify the cancel doesn't panic.
-    
+    // NOTE: this test was originally written to exercise the "native_token
+    // not configured" graceful-skip branch in cancel_expired_intent (see
+    // lib.rs: `if let Some(native_token) = ... { transfer } // else silently
+    // skip`). Since issue #173, `initialize` takes `native_token` as a
+    // mandatory constructor argument and `set_native_token` likewise only
+    // accepts an `Address` (no way to clear it back to `None`), so that
+    // branch is no longer reachable through the public contract API — the
+    // token is always configured post-initialize. Rather than leave this
+    // test permanently failing on an unreachable premise, or touching
+    // lib.rs (out of scope here), we fund the contract so the now-mandatory
+    // transfer path succeeds and assert what the test's name actually
+    // promises: cancel_expired_intent must not panic when it owes a keeper
+    // reward. The original "not configured" branch is still covered
+    // structurally by code review of lib.rs; it just can't be reached from
+    // a black-box client test anymore.
+    let native_token_admin = token::StellarAssetClient::new(&env, &initial_token);
+    native_token_admin.mint(&id, &reward);
+
     // Move time past deadline
     env.ledger().with_mut(|li| li.timestamp = 6_000);
 
-    // This should not panic even without a proper native token
+    // This should not panic.
     client.cancel_expired_intent(&keeper, &h, &0);
 
     // Verify the intent was still cancelled

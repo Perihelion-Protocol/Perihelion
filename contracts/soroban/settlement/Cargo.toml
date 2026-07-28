@@ -11,6 +11,12 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+# NOTE: constructing an `Address` from raw contract-id bytes (guest/wasm code
+# has no other way — see `src/strkey.rs`) needs strkey encoding. The obvious
+# choice, the `stellar-strkey` crate, depends on `std` and breaks the wasm
+# release build (`E0152: duplicate lang item panic_impl`, conflicting with
+# soroban-sdk's own no_std panic handler). `src/strkey.rs` hand-ports just the
+# encode path with no dependency, avoiding that conflict.
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

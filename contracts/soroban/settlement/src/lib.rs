@@ -17,6 +17,7 @@
 mod endpoint;
 mod error;
 mod messages;
+mod strkey;
 mod types;
 
 #[cfg(test)]
@@ -1166,7 +1167,7 @@ impl Perihelion {
         }
 
         // Check value caps before registering the intent.
-        Self::enforce_value_caps(&env, fi.min_dest_amount)?;
+        Self::enforce_value_caps(env, fi.min_dest_amount)?;
 
         let rec = IntentRecord {
             intent_hash: fi.intent_hash.clone(),

@@ -219,6 +219,15 @@ GitHub Actions → Differential Fuzz → Run workflow
 - Toggle "Run extended fuzzing" for 10k cases
 - On-demand deep validation
 
+### Failure visibility
+
+A scheduled or manually-triggered run that fails opens a tracking issue
+automatically from
+[`.github/ISSUE_TEMPLATE/differential-fuzz-failure.md`](../.github/ISSUE_TEMPLATE/differential-fuzz-failure.md)
+(the `report` job in `differential-fuzz.yml`). PR runs do not open an issue —
+a red PR check is already visible to the author — this is specifically for
+the case a scheduled run fails with nobody watching.
+
 ## Reproducing Failures
 
 ### Solidity Failure
@@ -324,7 +333,14 @@ No changes needed — new tests are auto-discovered.
 
 ## Limitations
 
-- **String fields** not fully fuzzed (Stellar-specific encoding)
+- **String fields** not fully fuzzed (Stellar-specific encoding). The
+  `recipient`/`dest_asset` fields currently carry a truncated strkey **string**
+  that the Soroban decoder reinterprets as raw contract-id **bytes** — a
+  real, tracked mismatch (issue #271) that pure encode→decode round-trip
+  proptests cannot detect, since both sides "agree" on the wire value while
+  both are wrong relative to the sender's actual address. `fuzz.rs` includes
+  a specification-derived test that pins this gap explicitly — see
+  [`contracts/shared/wire-vectors/DIFFERENTIAL-FUZZING.md`](../contracts/shared/wire-vectors/DIFFERENTIAL-FUZZING.md#specification-derived-vs-implementation-derived-vectors).
 - **Nested structures** tested as flat fields
 - **Nonce replay** tested separately (transport layer, not codec)
 - **Performance**: 100k cases take ~1 hour; not feasible per-commit
