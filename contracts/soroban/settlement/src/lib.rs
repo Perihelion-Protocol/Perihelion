@@ -124,7 +124,12 @@ impl Perihelion {
     ///
     /// Emits an `initialized` event so deployment tooling can confirm the
     /// configured values without polling storage.
-    pub fn initialize(env: Env, admin: Address, endpoint: Address, native_token: Address) -> Result<(), PerihelionError> {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        endpoint: Address,
+        native_token: Address,
+    ) -> Result<(), PerihelionError> {
         let storage = env.storage().instance();
         if storage.has(&DataKey::Admin) {
             return Err(PerihelionError::AlreadyInitialized);
@@ -144,10 +149,8 @@ impl Perihelion {
 
         // Issue #16/#18: emit an event so deployment tooling and off-chain
         // monitors can confirm the configured roles without polling storage.
-        env.events().publish(
-            (Symbol::new(&env, "initialized"),),
-            (admin, endpoint),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "initialized"),), (admin, endpoint));
         Ok(())
     }
 
@@ -165,10 +168,8 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::Endpoint, &new_endpoint);
-        env.events().publish(
-            (Symbol::new(&env, "endpoint_set"),),
-            (old, new_endpoint),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "endpoint_set"),), (old, new_endpoint));
         Ok(())
     }
 
@@ -195,8 +196,12 @@ impl Perihelion {
         let now = env.ledger().timestamp();
         let ready_at = now + MIN_PEER_CHANGE_DELAY;
 
-        env.storage().instance().set(&DataKey::PendingPeer(eid), &new_peer);
-        env.storage().instance().set(&DataKey::PendingPeerTime(eid), &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingPeer(eid), &new_peer);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingPeerTime(eid), &now);
         env.events().publish(
             (Symbol::new(&env, "peer_change_proposed"),),
             (eid, old_peer, new_peer, ready_at),
@@ -235,9 +240,13 @@ impl Perihelion {
         }
 
         let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
-        env.storage().instance().set(&DataKey::Peer(eid), &proposed_peer);
+        env.storage()
+            .instance()
+            .set(&DataKey::Peer(eid), &proposed_peer);
         env.storage().instance().remove(&DataKey::PendingPeer(eid));
-        env.storage().instance().remove(&DataKey::PendingPeerTime(eid));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeerTime(eid));
 
         env.events().publish(
             (Symbol::new(&env, "peer_set"),),
@@ -254,17 +263,13 @@ impl Perihelion {
     pub fn cancel_pending_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
 
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingPeer(eid));
+        env.storage().instance().remove(&DataKey::PendingPeer(eid));
         env.storage()
             .instance()
             .remove(&DataKey::PendingPeerTime(eid));
 
-        env.events().publish(
-            (Symbol::new(&env, "peer_change_cancelled"),),
-            (eid,),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "peer_change_cancelled"),), (eid,));
         Ok(())
     }
 
@@ -275,7 +280,10 @@ impl Perihelion {
 
     /// Retrieve a pending peer change, if one exists (issue #165).
     /// Returns (proposed_peer, proposed_at_timestamp) or None if no change pending.
-    pub fn get_pending_peer(env: Env, eid: u32) -> Result<Option<(BytesN<32>, u64)>, PerihelionError> {
+    pub fn get_pending_peer(
+        env: Env,
+        eid: u32,
+    ) -> Result<Option<(BytesN<32>, u64)>, PerihelionError> {
         let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
         let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
 
@@ -344,10 +352,8 @@ impl Perihelion {
     pub fn set_paused(env: Env, paused: bool) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
         env.storage().instance().set(&DataKey::Paused, &paused);
-        env.events().publish(
-            (Symbol::new(&env, "paused_set"),),
-            (paused,),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "paused_set"),), (paused,));
         Ok(())
     }
 
@@ -370,11 +376,11 @@ impl Perihelion {
         if reward < 0 {
             return Err(PerihelionError::InvalidAmount);
         }
-        env.storage().instance().set(&DataKey::KeeperReward, &reward);
-        env.events().publish(
-            (Symbol::new(&env, "keeper_reward_set"),),
-            (reward,),
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::KeeperReward, &reward);
+        env.events()
+            .publish((Symbol::new(&env, "keeper_reward_set"),), (reward,));
         Ok(())
     }
 
@@ -386,10 +392,8 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::NativeToken, &native_token);
-        env.events().publish(
-            (Symbol::new(&env, "native_token_set"),),
-            (native_token,),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "native_token_set"),), (native_token,));
         Ok(())
     }
 
@@ -538,7 +542,11 @@ impl Perihelion {
         Self::require_not_paused(&env)?;
 
         // Guard against double-dispatch
-        if env.storage().persistent().has(&DataKey::ConfirmationSent(intent_hash.clone())) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::ConfirmationSent(intent_hash.clone()))
+        {
             return Err(PerihelionError::IntentFinalized);
         }
 
@@ -553,10 +561,7 @@ impl Perihelion {
             return Err(PerihelionError::AlreadyFilled);
         }
 
-        let solver = rec
-            .solver
-            .clone()
-            .ok_or(PerihelionError::IntentNotFound)?;
+        let solver = rec.solver.clone().ok_or(PerihelionError::IntentNotFound)?;
         let solver_evm = rec
             .solver_evm
             .clone()
@@ -1016,8 +1021,8 @@ impl Perihelion {
             let new_base = nonce - 1;
             ps.set(&base_key, &new_base);
             ps.set(&bitmap_key, &1u64); // Only the new nonce is set in the bitmap.
-            // Replay-safety invariant: archival of either entry resets the
-            // high-water mark to zero, re-opening previously consumed nonces.
+                                        // Replay-safety invariant: archival of either entry resets the
+                                        // high-water mark to zero, re-opening previously consumed nonces.
             ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
             ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
             return Ok(());
@@ -1060,7 +1065,9 @@ impl Perihelion {
                 if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap) {
                     if cap > 0 {
                         // Reject if cap has already been triggered.
-                        if let Some(true) = storage.get::<DataKey, bool>(&DataKey::RollingWindowTriggered) {
+                        if let Some(true) =
+                            storage.get::<DataKey, bool>(&DataKey::RollingWindowTriggered)
+                        {
                             return Err(PerihelionError::RollingWindowCapTriggered);
                         }
 
@@ -1069,7 +1076,9 @@ impl Perihelion {
                         let window_start = (now / duration) * duration;
 
                         // Advance memoized window if time has moved to a new bucket.
-                        let latest_window_start = storage.get::<DataKey, u64>(&DataKey::LatestWindowStart).unwrap_or(0);
+                        let latest_window_start = storage
+                            .get::<DataKey, u64>(&DataKey::LatestWindowStart)
+                            .unwrap_or(0);
                         if window_start > latest_window_start {
                             storage.set(&DataKey::LatestWindowStart, &window_start);
                             // In a new window; prior bucket is abandoned. Restart accumulator.
@@ -1090,7 +1099,8 @@ impl Perihelion {
                             storage.set(&DataKey::RollingWindowTriggered, &true);
                             storage.set(
                                 &DataKey::RollingWindowResetEarliestAt,
-                                &now.checked_add(duration).ok_or(PerihelionError::ArithmeticError)?,
+                                &now.checked_add(duration)
+                                    .ok_or(PerihelionError::ArithmeticError)?,
                             );
                             env.events().publish(
                                 (Symbol::new(env, "rolling_window_cap_triggered"),),
@@ -1109,7 +1119,11 @@ impl Perihelion {
         Ok(())
     }
 
-    fn on_fill_instruction(env: &Env, transport_src_eid: u32, fi: FillInstruction) -> Result<(), PerihelionError> {
+    fn on_fill_instruction(
+        env: &Env,
+        transport_src_eid: u32,
+        fi: FillInstruction,
+    ) -> Result<(), PerihelionError> {
         // The intent's return-path eid must equal the transport-authenticated
         // origin eid. If they differ, a compromised or misconfigured adapter
         // could declare a different src_eid in the body and route the eventual
@@ -1158,11 +1172,7 @@ impl Perihelion {
         //   In practice the two are the same on all known deployments, but we
         //   guard on fi.src_eid here because that is what dispatch uses at
         //   settlement time.
-        if !env
-            .storage()
-            .instance()
-            .has(&DataKey::Peer(fi.src_eid))
-        {
+        if !env.storage().instance().has(&DataKey::Peer(fi.src_eid)) {
             return Err(PerihelionError::UntrustedPeer);
         }
 
@@ -1179,7 +1189,9 @@ impl Perihelion {
             deadline: fi.deadline,
             preferred_solver: fi.preferred_solver,
             reservation_expires: if fi.reservation_window > 0 {
-                env.ledger().timestamp().saturating_add(fi.reservation_window)
+                env.ledger()
+                    .timestamp()
+                    .saturating_add(fi.reservation_window)
             } else {
                 fi.deadline
             },
@@ -1228,7 +1240,10 @@ impl Perihelion {
                     MAX_TTL,
                 );
                 env.events().publish(
-                    (Symbol::new(env, "cancelled_inbound"), ci.intent_hash.clone()),
+                    (
+                        Symbol::new(env, "cancelled_inbound"),
+                        ci.intent_hash.clone(),
+                    ),
                     (rec.src_eid,),
                 );
             } else {
@@ -1280,15 +1295,15 @@ impl Perihelion {
         fill_latency_ledgers: u32,
     ) -> Result<(), PerihelionError> {
         let key = DataKey::SolverReputation(solver.clone());
-        let mut rep: SolverReputationRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(SolverReputationRecord {
-                fill_count: 0,
-                success_count: 0,
-                ewma_latency: 0,
-            });
+        let mut rep: SolverReputationRecord =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(SolverReputationRecord {
+                    fill_count: 0,
+                    success_count: 0,
+                    ewma_latency: 0,
+                });
 
         rep.fill_count = rep.fill_count.saturating_add(1);
         rep.success_count = rep.success_count.saturating_add(1);

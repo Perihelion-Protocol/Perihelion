@@ -93,9 +93,18 @@ fn load_resource_baselines() -> ResourceBaselines {
     let baseline_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("ci")
         .join("resource-baselines.json");
-    let content = fs::read_to_string(&baseline_path)
-        .unwrap_or_else(|err| panic!("failed to read resource baselines from {:?}: {err}", baseline_path));
-    serde_json::from_str(&content).unwrap_or_else(|err| panic!("failed to parse resource baselines from {:?}: {err}", baseline_path))
+    let content = fs::read_to_string(&baseline_path).unwrap_or_else(|err| {
+        panic!(
+            "failed to read resource baselines from {:?}: {err}",
+            baseline_path
+        )
+    });
+    serde_json::from_str(&content).unwrap_or_else(|err| {
+        panic!(
+            "failed to parse resource baselines from {:?}: {err}",
+            baseline_path
+        )
+    })
 }
 
 fn measure_entrypoint_budget<F>(s: &Setup, operation: F) -> (u64, u64)
@@ -116,11 +125,14 @@ fn assert_budget_within(
     tolerance_percent: u64,
 ) {
     let cpu_limit = threshold.max_cpu_instructions.saturating_add(
-        threshold.max_cpu_instructions.saturating_mul(tolerance_percent) / 100,
+        threshold
+            .max_cpu_instructions
+            .saturating_mul(tolerance_percent)
+            / 100,
     );
-    let mem_limit = threshold.max_memory_bytes.saturating_add(
-        threshold.max_memory_bytes.saturating_mul(tolerance_percent) / 100,
-    );
+    let mem_limit = threshold
+        .max_memory_bytes
+        .saturating_add(threshold.max_memory_bytes.saturating_mul(tolerance_percent) / 100);
 
     assert!(
         cpu <= cpu_limit,
@@ -146,12 +158,12 @@ fn setup() -> Setup {
 
     let id = env.register(Perihelion, ());
     let client = PerihelionClient::new(&env, &id);
-    
+
     // Create a mock native token for testing keeper rewards
     let issuer = Address::generate(&env);
     let native_sac = env.register_stellar_asset_contract_v2(issuer);
     let native_token = native_sac.address();
-    
+
     client.initialize(&admin, &endpoint, &native_token);
 
     let src_eid = 30101u32;
@@ -270,7 +282,8 @@ fn resource_budget_baselines_are_within_thresholds() {
     register_intent(&s, &h2, &recipient, 100_000, 5_000, 2, None);
     let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
     let (fill_cpu, fill_mem) = measure_entrypoint_budget(&s, |s| {
-        s.client.fill_intent(&solver, &solver_evm, &h2, &250_000, &0);
+        s.client
+            .fill_intent(&solver, &solver_evm, &h2, &250_000, &0);
     });
     assert_budget_within(
         "fill_intent",
@@ -584,7 +597,7 @@ fn admin_handover_requires_acceptance() {
     s.client.set_admin(&new_admin);
     // set_admin must NOT immediately change the admin — old admin can still call
     s.client.set_paused(&false); // should succeed (old admin still in control)
-    // Complete the handover
+                                 // Complete the handover
     s.client.accept_admin();
     // Now new_admin is admin; old admin's calls should still work only because
     // mock_all_auths() is active — in production the old key loses access.
@@ -605,7 +618,7 @@ fn admin_handover_can_be_cancelled_by_current_admin() {
     let s = setup();
     let nominee = Address::generate(&s.env);
     let cancel_addr = Address::generate(&s.env); // any address
-    // Nominate
+                                                 // Nominate
     s.client.set_admin(&nominee);
     // Cancel by overwriting with a different pending nominee
     s.client.set_admin(&cancel_addr);
@@ -723,7 +736,11 @@ fn set_paused_emits_event() {
 /// resolves the underlying host object via `env`) and compared for equality.
 fn assert_event_with_symbol(
     env: &Env,
-    events: &soroban_sdk::Vec<(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)>,
+    events: &soroban_sdk::Vec<(
+        Address,
+        soroban_sdk::Vec<soroban_sdk::Val>,
+        soroban_sdk::Val,
+    )>,
     expected_sym: &str,
     expected_data_len: usize,
 ) {
@@ -765,7 +782,8 @@ fn filled_event_shape() {
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
     let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
     let fill_amount = 250_000;
-    s.client.fill_intent(&solver, &solver_evm, &h, &fill_amount, &0);
+    s.client
+        .fill_intent(&solver, &solver_evm, &h, &fill_amount, &0);
 
     let events = s.env.events().all();
     // Event: ("filled", intent_hash) -> (solver, dest_asset, fill_amount, src_eid)
@@ -1171,8 +1189,7 @@ fn pause_does_not_block_lz_receive_inbound_cancel() {
     };
     let guid = BytesN::from_array(&s.env, &[0u8; 32]);
     // Must succeed while paused.
-    s.client
-        .lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
     assert!(s.client.is_cancelled(&h));
 }
 
@@ -1188,7 +1205,10 @@ fn unpause_restores_fill_intent() {
 
     s.client.set_paused(&true);
     let evm = BytesN::from_array(&s.env, &[0x11; 32]);
-    assert!(s.client.try_fill_intent(&solver, &evm, &h, &100_000, &0).is_err());
+    assert!(s
+        .client
+        .try_fill_intent(&solver, &evm, &h, &100_000, &0)
+        .is_err());
 
     s.client.set_paused(&false);
     s.client.fill_intent(&solver, &evm, &h, &100_000, &0);
@@ -1461,8 +1481,7 @@ fn cancel_intent_when_locked_emits_event() {
         nonce: 2,
     };
     let guid = BytesN::from_array(&s.env, &[0u8; 32]);
-    s.client
-        .lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
 
     // Capture events right after the mutating call: the test env's event log
     // only holds the most recent top-level contract invocation's events, so
@@ -1643,8 +1662,11 @@ fn cancel_expired_intent_pays_keeper_reward() {
     let h = hash(&s.env, 200);
 
     // Get the native token address from the setup (it was configured during initialize)
-    let native_token = s.client.native_token().expect("native_token should be configured");
-    
+    let native_token = s
+        .client
+        .native_token()
+        .expect("native_token should be configured");
+
     // Fund the contract with native tokens to pay the keeper reward
     let native_token_client = token::TokenClient::new(&s.env, &native_token);
     let native_token_admin = token::StellarAssetClient::new(&s.env, &native_token);
@@ -1709,8 +1731,11 @@ fn cancel_expired_intent_skips_reward_when_disabled() {
     let h = hash(&s.env, 201);
 
     // Get the native token address
-    let native_token = s.client.native_token().expect("native_token should be configured");
-    
+    let native_token = s
+        .client
+        .native_token()
+        .expect("native_token should be configured");
+
     // Fund the contract (even though we won't spend it)
     let native_token_client = token::TokenClient::new(&s.env, &native_token);
     let native_token_admin = token::StellarAssetClient::new(&s.env, &native_token);
@@ -1746,10 +1771,13 @@ fn cancel_expired_intent_skips_reward_when_disabled() {
 #[test]
 fn can_set_and_get_native_token() {
     let s = setup();
-    
+
     // The native token was set during initialize
     let initial_token = s.client.native_token();
-    assert!(initial_token.is_some(), "native_token should be set after initialize");
+    assert!(
+        initial_token.is_some(),
+        "native_token should be set after initialize"
+    );
 
     // Admin can update it to a different address
     let new_token = Address::generate(&s.env);
@@ -1794,7 +1822,7 @@ fn cancel_succeeds_without_native_token_configured() {
 
     let id = env.register(Perihelion, ());
     let client = PerihelionClient::new(&env, &id);
-    
+
     // Initialize with a native token that we'll use initially
     let issuer = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(issuer);

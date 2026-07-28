@@ -24,9 +24,9 @@
 use soroban_sdk::{Address, Bytes, BytesN, Env};
 
 use crate::types::{
-    CancelInstruction, FillInstruction, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED,
-    MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
-    CANCEL_REASON_EXPIRED, CANCEL_REASON_ADMIN, CANCEL_REASON_INVALID,
+    CancelInstruction, FillInstruction, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED,
+    CANCEL_REASON_INVALID, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION,
+    PROTOCOL_VERSION,
 };
 
 /// Build an `Address` from a raw 32-byte contract-id payload.
@@ -325,9 +325,7 @@ fn decode_cancel_intent(
     // Extract and validate reason (offset 34, 1 byte).
     // Only the three cross-chain reason codes are valid on the wire; reject
     // anything else to keep the decoder strict and match EVM behaviour.
-    let reason_byte = message
-        .get(34)
-        .ok_or(PerihelionError::MalformedPayload)?;
+    let reason_byte = message.get(34).ok_or(PerihelionError::MalformedPayload)?;
     if reason_byte != CANCEL_REASON_EXPIRED
         && reason_byte != CANCEL_REASON_ADMIN
         && reason_byte != CANCEL_REASON_INVALID

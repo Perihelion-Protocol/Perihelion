@@ -345,8 +345,8 @@ proptest! {
 
 /// Export a payload to the shared fuzz corpus directory for Solidity to consume.
 fn export_to_corpus(name: &str, payload: &Bytes) {
-    let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../shared/wire-vectors/fuzz-corpus");
+    let corpus_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shared/wire-vectors/fuzz-corpus");
     fs::create_dir_all(&corpus_dir).expect("Failed to create corpus dir");
 
     let mut hex = String::with_capacity(payload.len() as usize * 2 + 2);
@@ -371,8 +371,8 @@ mod tests {
         let encoded = encode_fill_confirmed(&env, &hash, &solver, 1_000_000, 42);
         export_to_corpus("test_export", &encoded);
         // Verify file exists
-        let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../shared/wire-vectors/fuzz-corpus");
+        let corpus_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shared/wire-vectors/fuzz-corpus");
         let file_path = corpus_dir.join("test_export.hex");
         assert!(file_path.exists(), "Corpus file should exist");
     }
