@@ -91,6 +91,9 @@ cp solver/.env.example solver/.env
 | `PERIHELION_ESCROW_ADDRESS` | `0x5678...` | Deployed escrow contract address |
 | `PERIHELION_SETTLEMENT_CONTRACT_ID` | `ABC123...` | Soroban settlement contract ID |
 | `PERIHELION_SOURCE_CHAIN_ID` | `8453` | LayerZero EID of the source chain |
+| `PERIHELION_METRICS_PORT` | `9090` | Port for the `/metrics` Prometheus endpoint |
+| `PERIHELION_HEALTH_HOST` | `127.0.0.1` | Bind address for `/metrics` — see [Network exposure](#network-exposure) before widening |
+| `PERIHELION_METRICS_TOKEN` | — | If set, `/metrics` requires `Authorization: Bearer <token>` |
 
 ### Customization Points
 
@@ -180,6 +183,20 @@ Set up alerts for:
 - **Connection loss** — mempool unreachable, RPC timeout
 - **Fill failure** — transaction reverts on either chain
 - **Low balance** — Stellar or EVM account balance below threshold
+
+### Network exposure
+
+`/metrics` (`solver/src/index.ts`) publishes `SolverMetrics`: fill attempts,
+wins, losses, and realised profit in basis points. On a fill-race market,
+handing a competitor your realised margin is directly adversarial (see
+[ECONOMICS.md](./ECONOMICS.md) on the fill race) — it is a materially more
+sensitive exposure than the relayer's operational metrics.
+
+The endpoint therefore binds to `PERIHELION_HEALTH_HOST=127.0.0.1` by default,
+with a startup log warning if bound anywhere else. If you need to scrape it
+from outside the host (a remote Prometheus, a shared monitoring VPC), set
+`PERIHELION_METRICS_TOKEN` to a random secret and configure the scraper with
+`Authorization: Bearer <token>` rather than widening the bind address alone.
 
 ## Troubleshooting
 

@@ -142,6 +142,9 @@ cp relayer/.env.example relayer/.env
 | `PERIHELION_CHECKPOINT_FILE` | No | `./.perihelion-relayer-checkpoint.json` | Cursor persistence path (see §7) |
 | `SIGNER_SECRET` | **Yes** | — | Stellar secret key used to sign delivery transactions |
 | `STELLAR_NETWORK` | No | `Test SDF Network ; September 2015` | Stellar network passphrase |
+| `PERIHELION_HEALTH_PORT` | No | `8080` | HTTP port for `/healthz`, `/readyz`, `/metrics` |
+| `PERIHELION_HEALTH_HOST` | No | `127.0.0.1` | Bind address for the health server — see [§5.3](#53-readiness-check) before widening |
+| `PERIHELION_METRICS_TOKEN` | No | — | If set, `/metrics` requires `Authorization: Bearer <token>`; `/healthz`/`/readyz` stay open |
 
 The config loader validates all values at startup and exits with a descriptive
 error list if anything is missing or malformed — fix every reported error
@@ -243,7 +246,33 @@ before any network calls are made. Fix the reported variables and restart.
 
 ### 5.3 Readiness check
 
-The relayer does not (yet) expose an HTTP health endpoint. Until one is added:
+The relayer exposes an HTTP server (`HealthServer`, `relayer/src/health-server.ts`)
+with three endpoints on `PERIHELION_HEALTH_PORT` (default `8080`):
+
+| Path | Purpose |
+|------|---------|
+| `/healthz` | Liveness — always `200` while the process is alive |
+| `/readyz` | Readiness — `200` when a recent tick succeeded and cursor lag is within bounds, `503` otherwise, with a `reasons` array explaining why |
+| `/metrics` | Prometheus-style delivery/failure/dead-letter counters and cursor lag |
+
+**Network exposure model.** `/readyz` and `/metrics` disclose operational
+detail — how far behind the relayer is and why — that is useful reconnaissance
+to an attacker timing a censorship or delay window. The server therefore binds
+to `PERIHELION_HEALTH_HOST=127.0.0.1` by default; a log warning is emitted at
+startup if bound anywhere else. Widen it only deliberately:
+
+- **Kubernetes**: the readiness/liveness probe reaches the pod IP directly, so
+  set `PERIHELION_HEALTH_HOST=0.0.0.0` in the pod spec — this is the expected,
+  safe case (traffic stays inside the cluster network).
+- **External scraping** (e.g. a Prometheus server outside the pod network): set
+  `PERIHELION_METRICS_TOKEN` to a random secret and configure the scraper with
+  `Authorization: Bearer <token>`. `/healthz` and `/readyz` remain
+  unauthenticated (orchestrators need them to be) — do not widen the bind
+  address for these without also putting a network policy or reverse proxy in
+  front of them.
+
+Fallback if you need to check readiness without curl access to the bind
+address:
 
 - **Process liveness**: check the process is running (`systemctl is-active
   perihelion-relayer`, or container health check on exit code).

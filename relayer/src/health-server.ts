@@ -68,6 +68,8 @@
  * | Environment variable              | Default                      | Description                                    |
  * |-----------------------------------|------------------------------|------------------------------------------------|
  * | PERIHELION_HEALTH_PORT            | 8080                         | HTTP port for the health server                |
+ * | PERIHELION_HEALTH_HOST            | 127.0.0.1                    | Bind address. Widen deliberately (e.g. 0.0.0.0 in Kubernetes, where the probe reaches the pod IP) |
+ * | PERIHELION_METRICS_TOKEN          | (unset)                      | If set, `/metrics` requires `Authorization: Bearer <token>`. `/healthz`/`/readyz` stay open for orchestrators |
  * | PERIHELION_READINESS_STALE_MS     | 3 × pollIntervalMs           | Max ms since last tick before readiness fails  |
  * | PERIHELION_MAX_LAG_BLOCKS         | 500                          | Max block lag before readiness fails           |
  *
@@ -100,6 +102,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import type { Relayer } from "./relayer.js";
 import type { Logger } from "./relayer.js";
 
@@ -125,6 +128,8 @@ export class HealthServer {
   private server: Server | null = null;
   private readonly stalenessThresholdMs: number;
   private readonly maxLagBlocks: number;
+  private readonly host: string;
+  private readonly metricsToken: string | undefined;
 
   constructor(
     private readonly relayer: Relayer,
@@ -141,17 +146,26 @@ export class HealthServer {
     this.maxLagBlocks =
       opts.maxLagBlocks ??
       Number(process.env.PERIHELION_MAX_LAG_BLOCKS ?? 500);
+    this.host = process.env.PERIHELION_HEALTH_HOST ?? "127.0.0.1";
+    this.metricsToken = process.env.PERIHELION_METRICS_TOKEN || undefined;
   }
 
   /** Start the HTTP server. Resolves once the server is listening. */
   start(): Promise<void> {
     return new Promise((resolve) => {
       this.server = createServer((req, res) => this.handle(req, res));
-      this.server.listen(this.port, () => {
+      this.server.listen(this.port, this.host, () => {
         this.log.info("health server listening", {
+          host: this.host,
           port: this.port,
           paths: ["/healthz", "/readyz", "/metrics"],
         });
+        if (this.host !== "127.0.0.1" && this.host !== "localhost") {
+          this.log.warn(
+            "health server bound to a non-loopback address; /metrics and /readyz are reachable from the network",
+            { host: this.host },
+          );
+        }
         resolve();
       });
     });
@@ -171,11 +185,31 @@ export class HealthServer {
     } else if (url === "/readyz") {
       this.handleReadyz(res);
     } else if (url === "/metrics") {
+      if (this.metricsToken && !this.isAuthorized(req)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
       this.handleMetrics(res);
     } else {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     }
+  }
+
+  /** Constant-time bearer-token check against PERIHELION_METRICS_TOKEN. */
+  private isAuthorized(req: IncomingMessage): boolean {
+    const header = req.headers.authorization ?? "";
+    const [scheme, token] = header.split(" ");
+    if (scheme !== "Bearer" || !token || !this.metricsToken) {
+      return false;
+    }
+    const expected = Buffer.from(this.metricsToken);
+    const actual = Buffer.from(token);
+    return (
+      expected.length === actual.length &&
+      timingSafeEqual(expected, actual)
+    );
   }
 
   /** Liveness: always 200 while the process is alive. */
