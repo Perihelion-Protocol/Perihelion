@@ -168,9 +168,17 @@ Branches → Protection rules for `main`).
 | `contracts/shared/` | Shared wire-format test vectors used by differential fuzzing. |
 | `sdk/src/intent.ts` | `hashIntent` / `INTENT_TYPEHASH` — must be byte-identical to EVM (Invariant I5). |
 | `sdk/src/types.ts` | `IntentStatus` lifecycle vocabulary. |
+| `sdk/src/validate.ts` | Pre-signature intent validation (`minDestAmount`, `deadline`, destination shape) — the last check before a user signs. |
+| `.github/workflows/` | A weakened or bypassed required check has the same blast radius as a contract bug — see the admin-bypass note above. |
 
 If you are unsure whether your change touches a security-sensitive path, err on
 the side of requesting a security reviewer in your PR.
+
+Each fund-moving PR should also answer, in its description: **does this change
+fund movement, authorisation, the wire format, or a CI gate? If yes, which
+invariant in [`docs/formal-specification.md`](./docs/formal-specification.md)
+does it touch, and which test asserts it?** The PR template prompts for this
+directly.
 
 Thank you for helping build the shortest path between Stellar and every other
 chain. 🌌

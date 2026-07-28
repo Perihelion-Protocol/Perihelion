@@ -86,3 +86,16 @@
 # SDK type definitions — IntentStatus lifecycle vocabulary and the Intent
 # interface; changes can desync the SDK from on-chain state machines.
 /sdk/src/types.ts                                   @Perihelion-Protocol/security-reviewers
+
+# SDK intent validation — the pre-signature checks (minDestAmount, deadline,
+# destination/destAsset shape) that stand between a malformed or economically
+# unsound intent and a user's signature. Weakening a check here has the same
+# blast radius as a contract-side validation bug.
+/sdk/src/validate.ts                                @Perihelion-Protocol/security-reviewers
+
+# CI/CD workflows — a change that weakens a required check, disables a gate,
+# or grants broader permissions to a workflow is a security change, not a
+# routine CI edit. (An admin merge bypassing a required check is how the
+# refund-helper regression reached main; see CONTRIBUTING.md.) This overrides
+# the broader `@maintainers` rule above for the same path.
+/.github/workflows/                                 @Perihelion-Protocol/security-reviewers
