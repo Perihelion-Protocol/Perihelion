@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@perihelion/sdk": "*",
-    "viem": "^2.55.8"
+    "viem": "^2.55.10"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
