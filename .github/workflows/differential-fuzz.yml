@@ -29,7 +29,7 @@ jobs:
     name: EVM Differential Fuzzing
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -37,7 +37,7 @@ jobs:
           version: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
 
       - name: Cache Foundry build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: contracts/evm/out
           key: ${{ runner.os }}-forge-out-${{ hashFiles('contracts/evm/src/**/*.sol', 'contracts/evm/test/**/*.sol', 'contracts/evm/foundry.toml') }}
@@ -56,7 +56,7 @@ jobs:
 
       - name: Upload fuzz failures
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: evm-fuzz-failures
           path: contracts/evm/test/**/*.failure.log
@@ -65,7 +65,7 @@ jobs:
     name: Soroban Differential Fuzzing
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -74,7 +74,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -100,14 +100,14 @@ jobs:
           PROPTEST_CASES=10000 cargo test fuzz -- --test-threads=1 --nocapture
 
       - name: Upload fuzz corpus
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soroban-fuzz-corpus
           path: contracts/shared/wire-vectors/fuzz-corpus/
 
       - name: Upload fuzz failures
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soroban-fuzz-failures
           path: contracts/soroban/settlement/proptest-regressions/
@@ -117,10 +117,10 @@ jobs:
     needs: [differential-fuzz-soroban]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download Soroban corpus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: soroban-fuzz-corpus
           path: contracts/shared/wire-vectors/fuzz-corpus/
@@ -145,7 +145,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Generate summary
         id: summary
@@ -179,7 +179,7 @@ jobs:
 
       - name: Open tracking issue
         if: steps.summary.outputs.failed == 'true' && github.event_name != 'pull_request'
-        uses: peter-evans/create-issue-from-file@v5
+        uses: peter-evans/create-issue-from-file@v6
         with:
           title: "[FUZZ] Differential fuzzing failed on ${{ github.event_name }} run ${{ github.run_id }} (${{ github.ref_name }}@${{ github.sha }})"
           content-filepath: /tmp/fuzz-failure-issue-body.md

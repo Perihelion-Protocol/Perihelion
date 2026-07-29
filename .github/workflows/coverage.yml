@@ -21,10 +21,10 @@ jobs:
       matrix:
         package: [sdk, solver, relayer]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -39,7 +39,7 @@ jobs:
         run: npm run test:coverage --workspace=${{ matrix.package }}
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: ./${{ matrix.package }}/coverage/lcov.info
           flags: ts-${{ matrix.package }}
@@ -57,7 +57,7 @@ jobs:
       run:
         working-directory: contracts/soroban
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -67,7 +67,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -89,7 +89,7 @@ jobs:
           --ignore-filename-regex '(fuzz|test)\.rs$'
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: contracts/soroban/lcov.info
           flags: soroban
@@ -105,7 +105,7 @@ jobs:
       run:
         working-directory: contracts/evm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -120,7 +120,7 @@ jobs:
         run: forge coverage --report lcov --lcov-version 1
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: contracts/evm/lcov.info
           flags: evm
@@ -136,10 +136,10 @@ jobs:
     # Run even if individual coverage jobs fail (partial upload is still useful).
     if: always()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Post Codecov PR comment
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false

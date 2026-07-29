@@ -36,7 +36,7 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' && (inputs.stack == 'soroban' || inputs.stack == 'all')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -44,7 +44,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -86,7 +86,7 @@ jobs:
 
       - name: Upload cargo-mutants report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soroban-mutants-report
           path: contracts/soroban/settlement/mutants.out/
@@ -101,10 +101,10 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' && (inputs.stack == 'ts' || inputs.stack == 'all')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -158,7 +158,7 @@ jobs:
 
       - name: Upload Stryker reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stryker-mutation-report
           path: |
@@ -176,7 +176,7 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' && (inputs.stack == 'evm' || inputs.stack == 'all')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -213,7 +213,7 @@ jobs:
 
       - name: Upload EVM mutation report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: evm-mutation-report
           path: contracts/evm/mutation-report.txt
