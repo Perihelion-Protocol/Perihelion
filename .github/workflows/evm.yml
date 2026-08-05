@@ -27,7 +27,7 @@ jobs:
       run:
         working-directory: contracts/evm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -35,7 +35,7 @@ jobs:
           version: ${{ env.FOUNDRY_VERSION }}
 
       - name: Cache Foundry build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: contracts/evm/out
           key: ${{ runner.os }}-forge-out-${{ hashFiles('contracts/evm/src/**/*.sol', 'contracts/evm/test/**/*.sol', 'contracts/evm/foundry.toml') }}
@@ -73,7 +73,7 @@ jobs:
 
       - name: Comment gas diff on PR
         if: github.event_name == 'pull_request' && steps.gas_diff.outputs.markdown != ''
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: evm-gas-diff
           message: ${{ steps.gas_diff.outputs.markdown }}
@@ -88,7 +88,7 @@ jobs:
       run:
         working-directory: contracts/evm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -96,7 +96,7 @@ jobs:
           version: ${{ env.FOUNDRY_VERSION }}
 
       - name: Cache Foundry build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: contracts/evm/out
           key: ${{ runner.os }}-forge-out-${{ hashFiles('contracts/evm/src/**/*.sol', 'contracts/evm/test/**/*.sol', 'contracts/evm/foundry.toml') }}
@@ -105,7 +105,7 @@ jobs:
         run: forge install foundry-rs/forge-std --no-git
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -113,7 +113,7 @@ jobs:
         run: pip install slither-analyzer
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -138,7 +138,7 @@ jobs:
 
       - name: Upload Slither report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: slither-report
           path: |
@@ -150,7 +150,7 @@ jobs:
     name: Reproducible bytecode
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -171,7 +171,7 @@ jobs:
       run:
         working-directory: contracts/evm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -188,7 +188,7 @@ jobs:
         run: forge doc --out /tmp/natspec-out 2>&1 | tee /tmp/natspec-warnings.txt
 
       - name: Upload NatSpec docs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: natspec-docs
           path: /tmp/natspec-out/
