@@ -36,7 +36,7 @@
   },
   "dependencies": {
     "@perihelion/sdk": "*",
-    "viem": "^2.55.8"
+    "viem": "^2.55.11"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
