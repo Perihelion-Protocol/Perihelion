@@ -71,15 +71,25 @@ results that differ from CI for reasons unrelated to your change.
 
 | Toolchain | Version                                            | Pinned in                                        |
 | --------- | -------------------------------------------------- | ------------------------------------------------ |
-| Rust      | `1.81.0` (target `wasm32-unknown-unknown`)         | [rust-toolchain.toml](./rust-toolchain.toml)      |
-| Foundry   | `nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266` | `FOUNDRY_VERSION` in each Foundry workflow        |
+| Rust      | `1.85.0` (target `wasm32-unknown-unknown`)         | [rust-toolchain.toml](./rust-toolchain.toml)      |
+| Foundry   | `stable`                                           | `FOUNDRY_VERSION` in each Foundry workflow        |
 | Node.js   | see [.nvmrc](./.nvmrc)                             | [.nvmrc](./.nvmrc)                                |
 
 Each version has exactly one source of truth. Rust jobs read the channel out of
 `rust-toolchain.toml` instead of repeating it, so bumping that file bumps CI.
 Bumping Foundry means changing `FOUNDRY_VERSION` in the workflows that set it
 (`evm.yml`, `coverage.yml`, `differential-fuzz.yml`, `mutation-testing.yml`) and
-this table. Verify locally with:
+this table.
+
+**Foundry version pinning policy:** The nightly version is pinned to ensure all
+CI jobs use the same toolchain, so coverage, mutation testing, and bytecode
+builds are reproducible and not affected by toolchain regressions. To advance
+the version, pick a newer nightly from [foundry releases](https://github.com/foundry-rs/foundry/releases),
+update the `FOUNDRY_VERSION` env var in all four workflow files, verify
+locally that the build still passes, and include the pinned SHA in your PR
+description so reviewers can track the justification for the bump.
+
+Verify locally with:
 
 ```bash
 ./scripts/check-toolchain.sh all

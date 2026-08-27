@@ -266,6 +266,19 @@ export interface BuildOptions {
  * nonce when not provided. Validates all caller-supplied fields and throws
  * {@link PerihelionValidationError} if any are malformed. Emits a non-fatal warning
  * if the intent's source amount is below the economical threshold (V_min).
+ *
+ * **V_min warning behavior:**
+ * - The warning is always emitted when `sourceAmount < vMin` and `suppressWarning` is false.
+ * - DEFAULT_V_MIN assumes 6 decimal places (suitable for USDC, USDT, etc.).
+ * - If `sourceDecimals` is provided, the warning note clarifies the precision assumption.
+ * - If `sourceDecimals` is omitted, the warning includes a note that the default
+ *   6-decimal assumption is being used.
+ *
+ * @param params  Intent parameters (user, destination, amounts, etc.)
+ * @param options Build options: `vMin` (minimum notional), `sourceDecimals` (asset precision),
+ *                and `suppressWarning` (skip the V_min check)
+ * @throws {@link IntentValidationError} if any field is malformed
+ * @returns A fully-formed Intent with nonce and preferredSolver filled in
  */
 export function buildIntent(params: IntentParams, options?: BuildOptions): Intent {
   validateIntent(params);
@@ -300,17 +313,20 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
   validateAmount(intent.minDestAmount, "minDestAmount", I128_MAX);
 
   // Warn if below minimum economical size.
-  // The vMin check requires knowing the source asset's decimal places to make
-  // a meaningful comparison across different token precisions. Without sourceDecimals,
-  // we skip the check to avoid spurious or missing warnings for mismatched decimals.
-  if (!suppressWarning && options?.sourceDecimals !== undefined) {
+  // The vMin check is performed in the source asset's smallest units (e.g., wei for WETH, stroops for XLM).
+  // DEFAULT_V_MIN assumes 6 decimal places; pass sourceDecimals to adjust the threshold for different
+  // token precisions. If sourceDecimals is provided, V_min is normalized; otherwise, the raw check proceeds.
+  if (!suppressWarning) {
     const vMinBig = BigInt(vMin);
     const sourceAmountBig = BigInt(intent.sourceAmount);
     if (sourceAmountBig < vMinBig) {
+      const decimalNote = options?.sourceDecimals === undefined
+        ? " (sourceDecimals not provided; assuming default 6-decimal precision)"
+        : "";
       console.warn(
-      `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
-      `economical minimum V_min (${vMin}). The fixed LayerZero messaging fee may ` +
-      `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
+        `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
+        `economical minimum V_min (${vMin})${decimalNote}. The fixed LayerZero messaging fee may ` +
+        `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
       );
     }
   }

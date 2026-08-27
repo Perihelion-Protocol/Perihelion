@@ -371,4 +371,3 @@ Differential fuzzing is **one layer** of defense. Combine with:
 - [Fuzzing Book](https://www.fuzzingbook.org/) — theory and techniques
 - [Foundry Fuzzing](https://book.getfoundry.sh/forge/fuzz-testing)
 - [Proptest Guide](https://proptest-rs.github.io/proptest/intro.html)
-- [Trail of Bits: Fuzzing](https://blog.trailofbits.com/2018/03/09/detect-bugs-before-they-become-exploits/)

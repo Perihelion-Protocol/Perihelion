@@ -16,27 +16,13 @@ const RATE_LIMIT_MAX_REQUESTS = 60;
 const HASH_RE = /^0x[0-9a-f]{64}$/;
 
 /**
- * Canonical status vocabulary, shared with the SDK's {@link IntentStatus}
- * (docs/api/mempool-api.yaml documents the same six values). Validating
- * against this set — rather than trusting the query string — means a
- * typo'd or repeated `status` filter fails loudly instead of silently
- * matching nothing.
+ * The set of statuses the mempool assigns.
+ * Derived from {@link MempoolIntentStatus} (mempool/src/types.ts) and the SDK.
+ * Validating against this set — rather than trusting the query string —
+ * means a typo'd or repeated `status` filter fails loudly instead of
+ * silently matching nothing.
  */
 const INTENT_STATUSES: ReadonlySet<string> = new Set([
-  "pending",
-  "claimed",
-  "settling",
-  "settled",
-  "refunded",
-  "expired",
-]);
-
-/**
- * Statuses the mempool itself may be moved into via PATCH /intents/:hash/status.
- * Narrower than {@link INTENT_STATUSES}: `claimed`/`settling` are derived from
- * chain state, not reported by the relayer.
- */
-const VALID_STATUSES: ReadonlySet<IntentStatus> = new Set([
   "pending",
   "settled",
   "refunded",
@@ -92,12 +78,20 @@ export class MempoolServer {
     this.verifyingContract = opts.verifyingContract;
     this.domain = perihelionDomain(this.chainId, this.verifyingContract);
     this.statusToken = opts.statusToken;
+    if (this.host !== "localhost" && this.host !== "127.0.0.1") {
+      console.warn(
+        `PERIHELION_MEMPOOL_HOST is set to ${this.host} — this endpoint has no write authentication and should not be exposed publicly.`,
+      );
+    }
     this.setupRoutes();
   }
 
   private setupRoutes(): void {
     this.app.use(express.json({ limit: "8kb" }));
 
+    this.app.get("/healthz", (req: Request, res: Response) => {
+      res.status(200).json({ status: "ok" });
+    });
     this.app.get("/info", this.handleInfo.bind(this));
     this.app.post("/intents", this.rateLimit.bind(this), this.handleSubmitIntent.bind(this));
     this.app.get("/intents/:hash", this.handleGetIntent.bind(this));
@@ -117,8 +111,8 @@ export class MempoolServer {
     const { hash } = req.params as { hash: Hex };
     const { status } = req.body as { status?: IntentStatus };
 
-    if (!status || !VALID_STATUSES.has(status)) {
-      res.status(400).json({ error: `status must be one of ${[...VALID_STATUSES].join(", ")}` });
+    if (!status || !INTENT_STATUSES.has(status)) {
+      res.status(400).json({ error: `status must be one of ${[...INTENT_STATUSES].join(", ")}` });
       return;
     }
 

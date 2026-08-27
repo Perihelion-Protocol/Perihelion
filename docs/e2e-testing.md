@@ -90,6 +90,15 @@ TypeScript tests for profitability evaluation, slippage checks, and pricing erro
 - Terminal vs transient skip decisions
 - Fee-inclusive profit calculation
 
+## Environment Versions
+
+The `docker-compose.yml` pins specific versions for reproducibility:
+
+- **Foundry/Anvil**: `ghcr.io/foundry-rs/foundry:nightly-f625e95`
+- **Stellar Quickstart**: `stellar/quickstart:21.2.0`
+
+When reproducing a test failure or setting up a new environment, these versions ensure consistent behavior across machines and time.
+
 ## Test Execution
 
 ### Local Development

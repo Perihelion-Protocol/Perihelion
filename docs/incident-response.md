@@ -196,12 +196,12 @@ settlement halts.
 |--------|---------------|
 | **Alert:** `EndpointLatency` fires | Relayer RPC is timing out |
 | **Alert:** `MessageUndelivered` fires | Multiple messages stalled > 12 h |
-| **Dashboard:** Check LayerZero status page | https://status.layerzero.network |
+| **Dashboard:** Check LayerZero status | LayerZero infrastructure status page |
 
 ### Triage (first 5 minutes)
 
 1. **Check LayerZero status and recent incidents:**
-   - Visit https://status.layerzero.network
+   - Check the LayerZero infrastructure status (consult LayerZero dashboard or support)
    - Look for "Soroban network" or "EVM network" incidents
    - If there's an active incident post, escalate to LayerZero support immediately
 
@@ -868,8 +868,8 @@ Run incident drills quarterly:
 
 **External resources:**
 
-- LayerZero Status: https://status.layerzero.network
-- Stellar CLI documentation: https://developers.stellar.org/docs/tools/stellar-cli
+- LayerZero infrastructure dashboard: consult LayerZero support for status
+- Stellar CLI: available via `cargo install stellar-cli` or the Stellar documentation site
 - EVM RPC tools (cast, curl): See Foundry and curl documentation
 
 **Escalation contacts (update with your team):**

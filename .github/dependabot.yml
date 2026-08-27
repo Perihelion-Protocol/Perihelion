@@ -27,6 +27,16 @@ updates:
     labels:
       - dependencies
 
+  # Docker images in docker-compose.yml (anvil, stellar/quickstart).
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - docker
+
   # Actions pinned across ci.yml, coverage.yml, dependency-audit.yml,
   # differential-fuzz.yml, docs.yml, evm.yml, mutation-testing.yml,
   # pr-title-lint.yml, soroban.yml.

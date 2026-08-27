@@ -83,29 +83,6 @@ tags:
 
 paths:
 
-  /info:
-    get:
-      operationId: getInfo
-      tags: [Intents]
-      summary: Get the mempool's active EIP-712 domain
-      description: |
-        Returns the `chainId` and `verifyingContract` (escrow address) this
-        server verifies intent signatures against. Clients should confirm
-        agreement here before signing, since a mismatch produces a
-        signature-verification failure rather than an obvious config error.
-      responses:
-        '200':
-          description: The active EIP-712 domain.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  chainId:
-                    type: integer
-                  verifyingContract:
-                    type: string
-
   /intents:
 
     post:
@@ -268,11 +245,11 @@ paths:
                 invalidStatus:
                   summary: Unrecognized status value
                   value:
-                    error: "status must be one of pending, claimed, settling, settled, refunded, expired"
+                    error: "status must be one of pending, settled, refunded, expired"
                 repeatedStatus:
                   summary: status parameter passed more than once
                   value:
-                    error: "status must be one of pending, claimed, settling, settled, refunded, expired"
+                    error: "status must be one of pending, settled, refunded, expired"
 
   /intents/{hash}:
 
@@ -583,7 +560,7 @@ components:
             the mempool server.
           required:
             - status
-            - submittedAt
+            - createdAt
           properties:
             status:
               $ref: '#/components/schemas/IntentStatus'
@@ -601,16 +578,11 @@ components:
                 field (see "Status ownership" above).
               examples:
                 - "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
-            submittedAt:
+            createdAt:
               type: integer
               description: |
                 Unix timestamp **in milliseconds** (`Date.now()`) at which the
-                record was created. Named `submittedAt` to match the
-                reference server's wire format; note that the SDK's
-                `IntentRecord` type currently expects a field named
-                `createdAt` in seconds instead, which is why
-                `parseIntentRecord` rejects every response this mempool
-                produces (tracked by issue #294 — not yet reconciled).
+                record was created in the mempool.
               examples:
                 - 1751270400000
 

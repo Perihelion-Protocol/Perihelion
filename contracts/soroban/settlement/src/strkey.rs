@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 //! Minimal, `no_std`-safe Stellar strkey (SEP-0023) encoder for contract IDs.
 //!
 //! `Address::from_contract_id` (used to construct an `Address` from a raw

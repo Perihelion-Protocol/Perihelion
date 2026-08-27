@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Contract test for `docs/api/mempool-api.yaml`.
  *
@@ -158,18 +160,14 @@ test("GET /intents 200 response matches the documented IntentRecord[] schema, in
 
   const res = await fetch(`${BASE}/intents`);
   assert.equal(res.status, 200);
-  const body = (await res.json()) as unknown[];
-  assert.ok(Array.isArray(body) && body.length > 0);
+  const body = (await res.json()) as { records: Array<Record<string, unknown>>; nextCursor?: string };
+  assert.ok(body.records && body.records.length > 0);
 
   assertMatchesSchema(responseSchema("/intents", "get", "200"), body, "GET /intents 200 body");
 
-  // The single field-name divergence the issue called out: the real server
-  // uses `submittedAt`, not `createdAt`. Assert the wire format directly so
-  // a future rename in either direction is caught here, not just in the
-  // schema check above.
-  const record = body[0] as Record<string, unknown>;
-  assert.equal(typeof record.submittedAt, "number");
-  assert.equal(record.createdAt, undefined);
+  // Verify the record includes the expected timestamp field.
+  const record = body.records[0];
+  assert.equal(typeof record.createdAt, "number");
 });
 
 test("GET /intents?status=<invalid> returns the documented 400", async () => {
@@ -188,19 +186,19 @@ test("GET /intents supports limit/offset pagination", async () => {
   await submitSignedIntent();
   await submitSignedIntent();
 
-  const full = (await (await fetch(`${BASE}/intents`)).json()) as unknown[];
-  assert.ok(full.length >= 3);
+  const full = (await (await fetch(`${BASE}/intents`)).json()) as { records: unknown[]; nextCursor?: string };
+  assert.ok(full.records.length >= 3);
 
-  const page = (await (await fetch(`${BASE}/intents?limit=1&offset=1`)).json()) as unknown[];
-  assert.equal(page.length, 1);
+  const page = (await (await fetch(`${BASE}/intents?limit=1&cursor=${(full.records[0] as Record<string, unknown>).hash}`)).json()) as { records: unknown[]; nextCursor?: string };
+  assert.equal(page.records.length, 1);
   assertMatchesSchema(responseSchema("/intents", "get", "200"), page, "GET /intents paginated body");
 });
 
 test("GET /intents?chainId=<other> filters out non-matching intents", async () => {
   const res = await fetch(`${BASE}/intents?chainId=999999`);
   assert.equal(res.status, 200);
-  const body = (await res.json()) as unknown[];
-  assert.equal(body.length, 0);
+  const body = (await res.json()) as { records: unknown[]; nextCursor?: string };
+  assert.equal(body.records.length, 0);
 });
 
 test("GET /intents/:hash 200 response matches the documented IntentRecord schema", async () => {
@@ -218,7 +216,9 @@ test("GET /intents/:hash 200 response matches the documented IntentRecord schema
 });
 
 test("GET /intents/:hash 404 response matches the documented ErrorResponse schema", async () => {
-  const res = await fetch(`${BASE}/intents/0xdeadbeef`);
+  // Use a well-formed hash that doesn't exist (not a malformed one).
+  // Malformed hashes return 400 (see server.test.ts "returns 400 for a malformed hash").
+  const res = await fetch(`${BASE}/intents/0x${"00".repeat(32)}`);
   assert.equal(res.status, 404);
   const body = await res.json();
   assertMatchesSchema(

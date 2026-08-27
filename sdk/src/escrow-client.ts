@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Client for on-chain escrow contract interactions.
  *

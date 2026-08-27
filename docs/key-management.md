@@ -10,6 +10,27 @@ for the deployment topology.
 
 ---
 
+## Local Development Setup
+
+For local development and testing with `docker-compose up`, sensitive keys must be
+provided via a `.env` file at the repository root. This keeps credentials out of
+version control and prevents accidental exposure.
+
+**Setup:**
+1. Copy the template: `cp .env.example .env`
+2. Edit `.env` and set the required variables:
+   - `SIGNER_SECRET`: Relayer signing key (Stellar secret)
+   - `PERIHELION_EVM_PRIVATE_KEY`: Solver's EVM private key (hex)
+   - `PERIHELION_SOROBAN_SECRET_KEY`: Solver's Soroban signing key (Stellar secret)
+3. Run `docker compose up` — it will read `.env` automatically and fail with a
+   clear message if any required variable is missing.
+
+**Important:** The all-zero values in `.env.example` are safe test keys (control no
+real assets) but must never be used in staging or production. Always generate fresh
+keys for each deployment environment.
+
+---
+
 ## Key Inventory
 
 | Key role | Layer | Held by | Purpose | Signing frequency | Sensitivity |

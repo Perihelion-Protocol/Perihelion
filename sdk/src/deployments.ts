@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * PerihelionEscrow deployment addresses by chain ID.
  *

@@ -23,6 +23,16 @@ All amounts are decimal strings in the asset's smallest unit. The canonical
 per-asset decimals, corridor conversion rule, and human-unit ceilings are in
 [Asset Decimals and Corridors](./assets.md).
 
+### preferredSolver Limitation
+
+**`preferredSolver` controls solver reservation on the EVM source chain only.**
+When an intent bridges to Stellar, the solver reservation does not carry over —
+the Soroban settlement contract cannot represent an EVM address as a Stellar
+address, so any `preferredSolver` value is silently dropped on Stellar. Users who
+set `preferredSolver` on the EVM side get no reservation protection if the intent
+settles through cross-chain settlement. Cross-chain solver identity and
+reservation is tracked as a follow-up to issue #271.
+
 ## Amount Field Specification
 
 Each amount field has a distinct width, signedness, valid range, and set of

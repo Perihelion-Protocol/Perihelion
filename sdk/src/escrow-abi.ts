@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * PerihelionEscrow ABI — generated from contract source via forge inspect.
  * This ABI is the authoritative interface for the escrow contract used by the SDK.

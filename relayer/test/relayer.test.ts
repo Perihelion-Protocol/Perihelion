@@ -575,7 +575,7 @@ test("a restarted relayer resumes from the persisted checkpoint", async () => {
 // ─── Issue 4: Reorg detection ───────────────────────────────────────────────
 
 test("reorg detected when block hash changes and cursor rolls back", async () => {
-  const config = { ...baseConfig(), confirmations: 2 };
+  const config = { ...baseConfig(), confirmations: 0 };
   let tick = 0;
 
   const watcher: SourceWatcher = {
@@ -623,13 +623,13 @@ test("reorg detected when block hash changes and cursor rolls back", async () =>
   const checkpoint = memCheckpoint();
   const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
 
-  // First tick: deliveries at blocks 1+ (since confirmedHead = 3 - 2 = 1)
+  // First tick: deliveries at blocks 1-3 (no confirmations required with confirmations: 0)
   await relayer.tick();
   assert.equal(delivered.length, 3, "delivered 3 messages on first tick");
-  assert.equal(relayer.readiness.cursor, 2, "cursor advanced to confirmedHead + 1");
+  assert.equal(relayer.readiness.cursor, 4, "cursor advanced to head + 1");
 
   // Second tick: reorg detected, cursor rolled back
   await relayer.tick();
-  assert.equal(relayer.readiness.cursor, 2, "cursor rolled back after reorg");
+  assert.equal(relayer.readiness.cursor, 3, "cursor rolled back after reorg");
 });
 

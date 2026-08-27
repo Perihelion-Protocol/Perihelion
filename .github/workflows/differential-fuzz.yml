@@ -19,13 +19,17 @@ on:
 # Cancel in-progress runs on the same branch/PR.
 env:
   # Keep in step with .github/workflows/evm.yml and CONTRIBUTING.md.
-  FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
+  FOUNDRY_VERSION: stable
+  # Soroban CLI and SDK versions must match major versions
+  SOROBAN_CLI_VERSION: "22.0.0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
+  # Keep in step with .github/workflows/evm.yml and CONTRIBUTING.md.
+  FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
   FOUNDRY_PROFILE: ci
 
 jobs:
@@ -39,8 +43,6 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: ${{ env.FOUNDRY_VERSION }}
-        with:
-          version: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
 
       - name: Cache Foundry build
         uses: actions/cache@v4
@@ -91,7 +93,20 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Install Soroban CLI
-        run: cargo install --locked soroban-cli --version 21.0.0
+        uses: taiki-e/install-action@v2
+        with:
+          tool: soroban-cli@${{ env.SOROBAN_CLI_VERSION }}
+
+      - name: Verify CLI and SDK major versions match
+        working-directory: contracts/soroban
+        run: |
+          SDK_MAJOR=$(grep 'soroban-sdk = ' Cargo.toml | sed 's/.*"\([0-9]*\).*/\1/')
+          CLI_MAJOR=$(echo "${{ env.SOROBAN_CLI_VERSION }}" | cut -d. -f1)
+          if [ "$SDK_MAJOR" != "$CLI_MAJOR" ]; then
+            echo "::error::Soroban SDK major ($SDK_MAJOR) and CLI major ($CLI_MAJOR) must match"
+            exit 1
+          fi
+          echo "✓ SDK and CLI both use major version $SDK_MAJOR"
 
       - name: Run bounded differential fuzzing (100 cases)
         if: github.event_name != 'schedule' && !inputs.extended
@@ -135,8 +150,6 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: ${{ env.FOUNDRY_VERSION }}
-        with:
-          version: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
 
       - name: Validate Rust-generated payloads with Solidity decoder
         working-directory: contracts/evm

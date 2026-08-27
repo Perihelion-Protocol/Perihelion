@@ -196,11 +196,13 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
         return builder;
       }
 
-      // TODO(#303): build the RestoreFootprint operation from the archived
-      // key and attach it with the corresponding SorobanTransactionData. Until
-      // that lands, the delivery still simulates and submits normally — an
-      // archived entry will surface as a simulation error rather than a silent
-      // failure, so the message is retried instead of lost.
+      // Known limitation (issue #427): RestoreFootprint operation is not yet built.
+      // When a settlement contract ledger entry is archived (TTL < 1000 ledgers),
+      // delivery should restore it before invoking lz_receive. Until that is
+      // implemented, delivery fails at simulation with an archived-entry error,
+      // triggering a retry. Past maxAttempts, the message is dead-lettered rather
+      // than delivered. A long-idle contract entry means messages are lost.
+      // TODO(#303): implement RestoreFootprint restoration.
       return builder;
     } catch {
       return builder;

@@ -13,6 +13,7 @@ COPY sdk/package.json sdk/
 COPY relayer/package.json relayer/
 COPY solver/package.json solver/
 COPY mempool/package.json mempool/
+COPY test/package.json test/
 
 # Install dependencies with workspace symlink resolution
 RUN npm ci
@@ -34,14 +35,15 @@ COPY --from=build /app/sdk/dist ./sdk/dist
 COPY --from=build /app/sdk/package.json ./sdk/
 COPY --from=build /app/${PACKAGE}/package.json ./${PACKAGE}/
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && adduser -S node -u 1001
+# Promote build-time ARG to runtime environment variable for CMD expansion
+ENV PACKAGE=${PACKAGE}
 
+# Run as the non-root node user provided by the base image
 USER node
 
 # Health check for Docker container orchestration
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "require('http').get('http://localhost:8080/healthz', (r) => { if (r.statusCode === 200) process.exit(0); process.exit(1); })" || exit 1
 
-# Start the relayer or solver
-CMD ["node", "${PACKAGE}/dist/index.js"]
+# Start the relayer or solver with shell expansion and exec to maintain PID 1
+CMD ["sh", "-c", "exec node \"$PACKAGE/dist/index.js\""]

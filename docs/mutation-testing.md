@@ -154,4 +154,3 @@ Focus mutation-testing budget on modules that are:
 - [cargo-mutants documentation](https://mutants.rs/)
 - [Stryker Mutator documentation](https://stryker-mutator.io/docs/stryker-js/introduction/)
 - [vertigo-rs (Solidity mutation)](https://github.com/JoranHonig/vertigo)
-- [Trail of Bits: "Testing with Mutation" blog post](https://blog.trailofbits.com/2019/10/08/mutation-testing-in-the-wild/)

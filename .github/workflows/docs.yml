@@ -1,6 +1,10 @@
 name: Docs
 
 on:
+  schedule:
+    # Nightly external link check at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -38,7 +42,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: '.nvmrc'
 
       - name: Lint docs/api/mempool-api.yaml with Spectral
         run: npx --yes @stoplight/spectral-cli lint docs/api/mempool-api.yaml
@@ -108,7 +112,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: '.nvmrc'
 
       # Needs the API to resolve issue state, so it runs with the default token.
       - name: Check the table links no closed issues
@@ -137,7 +141,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: '.nvmrc'
 
       - name: Install markdown-link-check
         run: npm install -g markdown-link-check@3
@@ -159,14 +163,14 @@ jobs:
   markdown-links-external:
     name: Check external links (nightly)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event.schedule == '0 2 * * *'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: '.nvmrc'
 
       - name: Install markdown-link-check
         run: npm install -g markdown-link-check@3

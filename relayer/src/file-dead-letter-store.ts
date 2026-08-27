@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Persistent file-backed dead-letter store. */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";

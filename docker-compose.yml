@@ -1,9 +1,7 @@
-version: '3.9'
-
 services:
   # EVM local testnet using Anvil
   anvil:
-    image: ghcr.io/foundry-rs/foundry:latest
+    image: ghcr.io/foundry-rs/foundry:nightly-f625e95
     command: anvil --host 0.0.0.0 --port 8545
     ports:
       - "8545:8545"
@@ -14,7 +12,7 @@ services:
 
   # Stellar local testnet using Stellar Quickstart
   stellar:
-    image: stellar/quickstart:latest
+    image: stellar/quickstart:21.2.0
     environment:
       STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
       SOROBAN_RPC_HOST: "0.0.0.0"
@@ -44,14 +42,15 @@ services:
       - stellar
     environment:
       NODE_ENV: development
-      PERIHELION_EVM_RPC_URL: http://anvil:8545
-      PERIHELION_SOROBAN_RPC_URL: http://stellar:8000
+      PORT: 3000
+      PERIHELION_SOURCE_CHAIN_ID: 31337
+      PERIHELION_ESCROW_ADDRESS: "0x0000000000000000000000000000000000000000"
     ports:
-      - "8080:8080"
+      - "3000:3000"
     networks:
       - perihelion
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -74,16 +73,16 @@ services:
     environment:
       NODE_ENV: development
       # EVM configuration
-      EVM_RPC_URL: http://anvil:8545
+      PERIHELION_EVM_RPC_URL: http://anvil:8545
       PERIHELION_SOURCE_EID: 30101
       # Stellar configuration
-      SOROBAN_RPC_URL: http://stellar:8000
+      PERIHELION_STELLAR_RPC_URL: http://stellar:8000
       STELLAR_NETWORK: "Test SDF Network ; September 2015"
       PERIHELION_STELLAR_EID: 40161
       # Relayer configuration
       PERIHELION_ESCROW_ADDRESS: "0x0000000000000000000000000000000000000000"
       PERIHELION_SETTLEMENT_CONTRACT: "CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS"
-      SIGNER_SECRET: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
+      SIGNER_SECRET: ${SIGNER_SECRET:?set SIGNER_SECRET}
       PERIHELION_CONFIRMATIONS: "1"
       PERIHELION_POLL_INTERVAL_MS: "5000"
       PERIHELION_CHECKPOINT_FILE: "/tmp/relayer-checkpoint.json"
@@ -96,6 +95,12 @@ services:
       - perihelion
     volumes:
       - relayer-checkpoint:/tmp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # Perihelion solver
   solver:
@@ -114,7 +119,7 @@ services:
     environment:
       NODE_ENV: development
       # Mempool configuration
-      PERIHELION_MEMPOOL_URL: http://mempool:8080
+      PERIHELION_MEMPOOL_URL: http://mempool:3000
       # Solver identification
       PERIHELION_SOLVER_ADDRESS: "0x0000000000000000000000000000000000000000"
       # Chain configuration
@@ -126,10 +131,10 @@ services:
       PERIHELION_SUPPORTED_ASSETS: "native"
       # Executor configuration (EVM)
       PERIHELION_EVM_RPC_URL: http://anvil:8545
-      PERIHELION_EVM_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000000"
+      PERIHELION_EVM_PRIVATE_KEY: ${PERIHELION_EVM_PRIVATE_KEY:?set PERIHELION_EVM_PRIVATE_KEY}
       # Executor configuration (Soroban)
       PERIHELION_SOROBAN_RPC_URL: http://stellar:8000
-      PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
+      PERIHELION_SOROBAN_SECRET_KEY: ${PERIHELION_SOROBAN_SECRET_KEY:?set PERIHELION_SOROBAN_SECRET_KEY}
       PERIHELION_SETTLEMENT_CONTRACT_ID: "CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS"
       # Cache configuration
       PERIHELION_VERIFICATION_CACHE_SIZE: "10000"
@@ -140,6 +145,12 @@ services:
       - "9090:9090"
     networks:
       - perihelion
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 networks:
   perihelion:

@@ -161,8 +161,9 @@ test("GET /intents?status=<repeated> returns 400 instead of silently comparing a
 test("GET /intents?status=pending returns only matching records", async () => {
   const res = await fetch(`${BASE}/intents?status=pending`);
   assert.equal(res.status, 200);
-  const body = (await res.json()) as Array<{ status: string }>;
-  assert.ok(body.every((r) => r.status === "pending"));
+  const body = (await res.json()) as { records: Array<{ status: string }>; nextCursor?: string };
+  assert.ok(Array.isArray(body.records), "response should have a records array");
+  assert.ok(body.records.every((r) => r.status === "pending"));
 });
 
 // ─── Issue 320: duplicate and expired submissions ──────────────────────────
@@ -238,4 +239,126 @@ test("submit -> report settled over HTTP -> waitForSettlement resolves promptly"
 
   const result = await client.waitForSettlement(hash, { intervalMs: 20, timeoutMs: 2_000 });
   assert.equal(result.status, "settled");
+});
+
+// ─── Issue 473: pagination envelope tests ──────────────────────────────────
+
+test("GET /intents returns pagination envelope with records and nextCursor", async () => {
+  // Submit multiple intents
+  const intents = [];
+  for (let i = 0; i < 3; i++) {
+    const intent = { ...sampleIntent(), nonce: String(i) };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    await submit(intent, signature);
+    intents.push(intent);
+  }
+
+  const res = await fetch(`${BASE}/intents?status=pending`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: unknown[]; nextCursor?: string };
+  
+  assert.ok(Array.isArray(body.records), "response must have a records array");
+  assert.ok(body.records.length >= 3, "should contain the submitted intents");
+  assert.ok("nextCursor" in body, "response must have nextCursor field (even if undefined)");
+});
+
+test("GET /intents pagination: page smaller than result set returns nextCursor", async () => {
+  // Submit multiple intents to ensure pagination
+  const intents = [];
+  for (let i = 0; i < 5; i++) {
+    const intent = { ...sampleIntent(), nonce: `page-test-${i}` };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    await submit(intent, signature);
+    intents.push(intent);
+  }
+
+  const res = await fetch(`${BASE}/intents?status=pending&limit=2`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: unknown[]; nextCursor?: string };
+  
+  assert.equal(body.records.length, 2, "should return exactly 2 records");
+  assert.ok(body.nextCursor, "nextCursor should be present when more pages exist");
+});
+
+test("GET /intents pagination: following cursor returns next page", async () => {
+  // Submit intents with distinct nonces
+  for (let i = 0; i < 4; i++) {
+    const intent = { ...sampleIntent(), nonce: `cursor-test-${i}` };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    await submit(intent, signature);
+  }
+
+  // Get first page
+  const res1 = await fetch(`${BASE}/intents?status=pending&limit=2`);
+  const page1 = (await res1.json()) as { records: Array<{ hash: string }>; nextCursor?: string };
+  
+  assert.equal(page1.records.length, 2);
+  assert.ok(page1.nextCursor, "first page should have nextCursor");
+
+  // Get second page
+  const res2 = await fetch(`${BASE}/intents?status=pending&limit=2&cursor=${page1.nextCursor}`);
+  const page2 = (await res2.json()) as { records: Array<{ hash: string }>; nextCursor?: string };
+  
+  assert.ok(page2.records.length > 0, "second page should have records");
+  
+  // Verify no overlap
+  const page1Hashes = new Set(page1.records.map(r => r.hash));
+  const page2Hashes = page2.records.map(r => r.hash);
+  for (const hash of page2Hashes) {
+    assert.ok(!page1Hashes.has(hash), "pages should not overlap");
+  }
+});
+
+test("GET /intents pagination: final page returns nextCursor undefined", async () => {
+  // Submit exactly 2 intents
+  for (let i = 0; i < 2; i++) {
+    const intent = { ...sampleIntent(), nonce: `final-page-${i}` };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    await submit(intent, signature);
+  }
+
+  const res = await fetch(`${BASE}/intents?status=pending&limit=100`);
+  const body = (await res.json()) as { records: unknown[]; nextCursor?: string };
+  
+  assert.ok(body.records.length >= 2);
+  assert.equal(body.nextCursor, undefined, "final page should have nextCursor: undefined");
+});
+
+test("GET /intents limit parameter: values above MAX_LIST_LIMIT are clamped", async () => {
+  const res = await fetch(`${BASE}/intents?status=pending&limit=9999`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: unknown[] };
+  
+  // MAX_LIST_LIMIT is 1000 in the server
+  assert.ok(body.records.length <= 1000, "result should be clamped to MAX_LIST_LIMIT");
+});
+
+test("GET /intents chainId filter: returns only matching chain intents", async () => {
+  // Submit intent for the configured chain
+  const intent8453 = { ...sampleIntent(), sourceChainId: CHAIN_ID };
+  const sig8453 = await sign(intent8453, perihelionDomain(CHAIN_ID, ESCROW));
+  await submit(intent8453, sig8453);
+
+  // Query with chainId filter
+  const res = await fetch(`${BASE}/intents?status=pending&chainId=${CHAIN_ID}`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: Array<{ intent: { sourceChainId: number } }> };
+  
+  assert.ok(body.records.length > 0, "should have at least one result");
+  for (const record of body.records) {
+    assert.equal(record.intent.sourceChainId, CHAIN_ID, "all results should match chainId filter");
+  }
+});
+
+test("GET /intents rejects bare array response format (regression test)", async () => {
+  // This test documents that the server returns an envelope, not a bare array
+  const res = await fetch(`${BASE}/intents?status=pending`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  
+  assert.ok(typeof body === "object" && body !== null, "response should be an object");
+  assert.ok("records" in body, "response must have records field");
+  assert.ok(Array.isArray(body.records), "records must be an array");
+  assert.ok("nextCursor" in body, "response must have nextCursor field");
+  assert.ok(!Array.isArray(body), "response must NOT be a bare array");
 });

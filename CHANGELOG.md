@@ -139,5 +139,5 @@ the merge history preserved one.
   specifically to catch the classes of issue found in the EVM/Soroban fixes
   above before merge, not just after.
 
-[Unreleased]: https://github.com/Perihelion-Protocol/Perihelion/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Perihelion-Protocol/Perihelion/commits/main
+[Unreleased]: https://github.com/Perihelion-Protocol/Perihelion/compare/main...HEAD
+[0.1.0]: https://github.com/Perihelion-Protocol/Perihelion/releases/tag/v0.1.0

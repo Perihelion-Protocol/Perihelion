@@ -47,7 +47,10 @@ async function main(): Promise<void> {
     return expected.length === actual.length && timingSafeEqual(expected, actual);
   };
   const server = createServer((req, res) => {
-    if (req.url === "/metrics") {
+    if (req.url === "/healthz") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+    } else if (req.url === "/metrics") {
       if (!isAuthorized(req.headers.authorization)) {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "unauthorized" }));

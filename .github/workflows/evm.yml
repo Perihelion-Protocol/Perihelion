@@ -10,7 +10,7 @@ on:
 
 env:
   # Single source of truth for the Foundry version; see CONTRIBUTING.md.
-  FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
+  FOUNDRY_VERSION: stable
 
 concurrency:
   group: evm-${{ github.ref }}
@@ -41,7 +41,7 @@ jobs:
           key: ${{ runner.os }}-forge-out-${{ hashFiles('contracts/evm/src/**/*.sol', 'contracts/evm/test/**/*.sol', 'contracts/evm/foundry.toml') }}
 
       - name: Install forge-std
-        run: forge install foundry-rs/forge-std --no-git
+        run: forge install foundry-rs/forge-std@${{ env.FORGE_STD_VERSION }} --no-git
 
       - name: Format check
         run: forge fmt --check
@@ -102,7 +102,7 @@ jobs:
           key: ${{ runner.os }}-forge-out-${{ hashFiles('contracts/evm/src/**/*.sol', 'contracts/evm/test/**/*.sol', 'contracts/evm/foundry.toml') }}
 
       - name: Install forge-std
-        run: forge install foundry-rs/forge-std --no-git
+        run: forge install foundry-rs/forge-std@${{ env.FORGE_STD_VERSION }} --no-git
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -155,11 +155,11 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
+          version: ${{ env.FOUNDRY_VERSION }}
 
       - name: Install forge-std
         working-directory: contracts/evm
-        run: forge install foundry-rs/forge-std --no-git
+        run: forge install foundry-rs/forge-std@${{ env.FORGE_STD_VERSION }} --no-git
 
       - name: Compare build against pinned bytecode
         run: ./scripts/check-pinned-bytecode.sh
@@ -182,7 +182,7 @@ jobs:
         run: ../../scripts/check-toolchain.sh foundry
 
       - name: Install forge-std
-        run: forge install foundry-rs/forge-std --no-git
+        run: forge install foundry-rs/forge-std@${{ env.FORGE_STD_VERSION }} --no-git
 
       - name: Generate NatSpec docs
         run: forge doc --out /tmp/natspec-out 2>&1 | tee /tmp/natspec-warnings.txt
