@@ -572,7 +572,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Recover surplus native ETH held by the contract (e.g. from direct
-    ///         transfers or overpaid lock calls that were not refunded locally).
+    ///         transfers, overpaid lock calls, or inbound lzReceive value).
     /// @param to Recipient address.
     /// @param amount Amount of native ETH to transfer.
     function skimNative(address to, uint256 amount) external onlyOwner {
@@ -718,8 +718,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     // --- LayerZero inbound ---------------------------------------------------
-
+ 
     /// @inheritdoc ILayerZeroReceiver
+    /// @dev `lzReceive` is declared `payable` to satisfy the `ILayerZeroReceiver` interface.
+    ///      The contract does not process native value on inbound messages; any native value
+    ///      delivered by the endpoint/executor remains as contract surplus and can be recovered
+    ///      by the owner via {skimNative}.
     function lzReceive(
         Origin calldata origin,
         bytes32, /* guid */
@@ -749,10 +753,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             _onCancelIntent(message);
         } else {
             revert UnknownMessageType();
-        }
-        if (msg.value > 0) {
-            (bool ok,) = msg.sender.call{ value: msg.value }("");
-            if (!ok) revert NativeTransferFailed();
         }
     }
 
