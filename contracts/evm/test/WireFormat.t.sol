@@ -145,6 +145,15 @@ contract WireFormatConformanceTest is Test {
         assertEq(encoded, golden, "Solidity encoder output must match fill_instruction.hex golden vector");
     }
 
+    /// @dev Asserts the golden vector length matches the expected constant.
+    /// This test catches stale vectors immediately rather than surfacing as
+    /// a decode error in an unrelated test.
+    function test_FillInstructionVectorLength() public view {
+        bytes memory golden = _readVector("fill_instruction.hex");
+        assertEq(golden.length, FILL_INSTRUCTION_LENGTH, "fill_instruction.hex must be exactly FILL_INSTRUCTION_LENGTH bytes");
+        assertEq(golden.length, 219, "fill_instruction.hex must be exactly 219 bytes");
+    }
+
     // -------------------------------------------------------------------------
     // Negative / adversarial conformance vectors (issue #61)
     //
