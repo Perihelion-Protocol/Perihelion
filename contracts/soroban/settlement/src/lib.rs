@@ -28,6 +28,9 @@ mod test;
 #[cfg(test)]
 mod fuzz;
 
+#[cfg(test)]
+mod event_shape_spec;
+
 pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
