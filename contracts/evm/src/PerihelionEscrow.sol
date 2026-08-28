@@ -73,7 +73,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         ///      nonce. Two intents with identical fields but different nonces hash to
         ///      different intent_hash values, so a user can bridge the same amount twice
         ///      without the second intent colliding with the first.
-        ///      Transport-layer replay is prevented separately by `inboundNonce`.
+        ///      Transport-layer replay is prevented separately by `_inboundNonceBitmap`.
         ///      See docs/TECHNICAL-ARCHITECTURE.md §11.
         uint256 nonce;
         address preferredSolver;
@@ -226,23 +226,28 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Latest window start timestamp (memoized for efficiency).
     uint256 private _latestWindowStart;
 
-    /// @notice Lazy-nonce high-water mark per source endpoint id.
+    /// @notice Observational high-water mark for inbound nonces per source endpoint id.
     ///
-    /// This is the **LayerZero transport nonce** — it prevents the same
-    /// LayerZero message from being delivered twice (message-replay protection).
+    /// Maintained as a monitoring and lag signal for off-chain observers.
+    /// This is NOT the authoritative replay guard: replay protection is enforced
+    /// by {_inboundNonceBitmap}, which allows unordered message delivery under
+    /// LayerZero's lazy-nonce model.
+    mapping(uint32 => uint64) public inboundNonce;
+    /// @notice Bitmap-based nonce tracking for unordered delivery (LayerZero
+    ///         lazy-nonce model) — authoritative transport-layer replay guard.
+    ///
+    /// Prevents the same LayerZero message from being delivered twice (message-replay protection).
+    /// Each bit represents whether a specific nonce has been consumed:
+    /// word index = nonce / 256, bit index = nonce % 256.
+    ///
     /// It is NOT the `Intent.nonce` field, which is a 256-bit random value
     /// chosen by the SDK to prevent two otherwise-identical intents from
     /// mapping to the same `intent_hash` (collision prevention).
     ///
-    /// Any `origin.nonce <= inboundNonce[origin.srcEid]` is rejected as stale.
     /// The complementary application-layer guard against double-settlement is
     /// `Lock.released` and `Lock.refunded` in each `locks` entry.
     ///
     /// See docs/TECHNICAL-ARCHITECTURE.md §11 for the full anti-replay story.
-    mapping(uint32 => uint64) public inboundNonce;
-    /// @notice Bitmap-based nonce tracking for unordered delivery (LayerZero
-    ///         lazy-nonce model). Each bit represents whether a specific nonce
-    ///         has been consumed: word index = nonce / 256, bit index = nonce % 256.
     mapping(uint32 => mapping(uint256 => uint256)) private _inboundNonceBitmap;
 
     // --- Reentrancy invariant (I-RE) -----------------------------------------
