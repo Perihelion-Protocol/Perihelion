@@ -668,7 +668,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         emit Locked(intentHash, msg.sender, intent.user, intent.sourceAsset, received);
 
         bytes memory message = _encodeFillInstruction(intentHash, intent);
-        MessagingParams memory params = _buildMessagingParams(message, msg.value);
+        // Quote with nativeFee=0, identical to quoteFee(), so the value a solver
+        // sized off-chain via quoteFee is the same value compared against below.
+        MessagingParams memory params = _buildMessagingParams(message, 0);
         // Revert early on obvious underpayment rather than letting the endpoint
         // bubble an opaque error. Only the quoted fee is actually sent to the
         // endpoint; any excess is refunded locally to the caller.
@@ -918,8 +920,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: codec -----------------------------------------------------
 
-    /// @dev Build MessagingParams for a FillInstruction message. Used by both lock
-    ///      (with actual nativeFee) and quoteFee (with nativeFee=0) to ensure consistent params.
+    /// @dev Build MessagingParams for a FillInstruction message. Both lock and quoteFee
+    ///      call this with nativeFee=0, so the two quote identically and the value a
+    ///      solver sizes via quoteFee is the value lock actually compares msg.value against.
     function _buildMessagingParams(bytes memory message, uint256 nativeFee)
         internal
         view
