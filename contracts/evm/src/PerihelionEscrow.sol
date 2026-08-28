@@ -347,6 +347,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error ExceedsSurplus();
     error AssetNotAllowed();
     error UnderDelivered();
+    /// @dev A uint256 intent field cannot fit in the narrower wire/storage type
+    ///      without wrapping (minDestAmount/sourceAmount vs uint128, deadline vs uint64).
+    error AmountTooLarge();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -618,6 +621,13 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (assetLen > MAX_DEST_ASSET_LEN) revert StringFieldTooLong();
 
         if (!assetAllowed[intent.sourceAsset]) revert AssetNotAllowed();
+
+        // Reject values that would silently wrap when narrowed to the storage/wire
+        // type below (Lock.minDestAmount/deadline, and the FillInstruction fields),
+        // rather than truncating a signed intent into a different meaning.
+        if (intent.minDestAmount > type(uint128).max) revert AmountTooLarge();
+        if (intent.sourceAmount > type(uint128).max) revert AmountTooLarge();
+        if (intent.deadline > type(uint64).max) revert AmountTooLarge();
 
         bytes32 intentHash = hashIntent(intent);
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
