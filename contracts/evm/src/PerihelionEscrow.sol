@@ -631,8 +631,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
 
-        // Check value caps before committing to the lock.
-        _enforceValueCaps(intent.sourceAmount, intent.sourceAsset);
+        // Check value caps before pulling funds.
+        _checkValueCaps(intent.sourceAmount, intent.sourceAsset);
 
         // Measured-delta accounting: store exactly what the escrow received, so
         // fee-on-transfer / rebasing tokens can never release more than is held.
@@ -644,6 +644,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // fully-taxed token). Safe under `nonReentrant`.
         // slither-disable-next-line incorrect-equality,reentrancy-balance
         if (received == 0) revert NothingReceived();
+
+        // Commit the actual received amount to the rolling window accumulator.
+        _commitValueCaps(received);
 
         // The lock is written after the pull because measured-delta needs the
         // post-transfer balance; safe because `lock` and every fund-moving path
@@ -682,9 +685,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Value cap enforcement -----------------------------------------------
 
-    /// @dev Check per-intent and rolling-window value caps. Reverts if exceeded.
-    ///      Must be called before the lock is recorded.
-    function _enforceValueCaps(uint256 sourceAmount, address asset) private {
+    /// @dev Pre-flight check per-intent and rolling-window value caps against requested sourceAmount.
+    ///      Reverts if exceeded. Must be called before funds are transferred.
+    function _checkValueCaps(uint256 sourceAmount, address asset) private {
         // Check 1: Per-intent maximum (per-asset takes precedence, then global)
         uint256 maxAmount = maxIntentAmountPerAsset[asset] > 0
             ? maxIntentAmountPerAsset[asset]
@@ -703,24 +706,32 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             // Calculate current window start. Each window spans [windowStart, windowStart + duration).
             uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
 
-            // Advance memoized window if time has moved to a new bucket.
+            // If time has moved to a new window, existing bucket for this window is 0.
+            uint256 currentBucket = windowStart > _latestWindowStart
+                ? 0
+                : _rollingWindowBuckets[windowStart];
+
+            uint256 projected = currentBucket + sourceAmount;
+            if (projected > rollingWindowCap) {
+                // Cap exceeded: trigger halt and record the window + amount for diagnostics.
+                rollingWindowTriggered = true;
+                rollingWindowResetEarliestAt = block.timestamp + rollingWindowDuration;
+                emit RollingWindowCapTriggered(windowStart, projected);
+                revert RollingWindowCapExceeded();
+            }
+        }
+    }
+
+    /// @dev Commit the measured delta (actual received tokens) to the rolling-window bucket.
+    ///      Ensures fee-on-transfer tokens do not cause accumulator drift.
+    function _commitValueCaps(uint256 receivedAmount) private {
+        if (rollingWindowDuration > 0 && rollingWindowCap > 0) {
+            uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
             if (windowStart > _latestWindowStart) {
                 _latestWindowStart = windowStart;
                 // In a new window; prior buckets are orphaned and expire implicitly.
             }
-
-            // Accumulate this lock's amount into the current window.
-            uint256 accumulated = _rollingWindowBuckets[windowStart] + sourceAmount;
-            if (accumulated > rollingWindowCap) {
-                // Cap exceeded: trigger halt and record the window + amount for diagnostics.
-                rollingWindowTriggered = true;
-                rollingWindowResetEarliestAt = block.timestamp + rollingWindowDuration;
-                emit RollingWindowCapTriggered(windowStart, accumulated);
-                revert RollingWindowCapExceeded();
-            }
-
-            // Update the bucket.
-            _rollingWindowBuckets[windowStart] = accumulated;
+            _rollingWindowBuckets[windowStart] += receivedAmount;
         }
     }
 
