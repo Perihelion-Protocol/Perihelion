@@ -174,7 +174,7 @@ proptest! {
 // from the actual specification (contracts/shared/wire-vectors/README.md),
 // which is exactly the failure mode of issue #271 (`Address::from_contract_id`
 // reinterprets strkey ASCII text as a raw contract id) and #272
-// (`reservation_window` absent from the wire layout). The tests below are
+// (`reservation_window` was absent from the wire layout). The tests below are
 // derived from the golden vectors instead, and from a real Stellar address,
 // so they fail if the implementation drifts from the documented layout even
 // when both sides of a pure round-trip would still agree.
@@ -184,10 +184,11 @@ fn fill_instruction_matches_golden_vector() {
     // contracts/shared/wire-vectors/fill_instruction.hex, decoded per the
     // canonical table in contracts/shared/wire-vectors/README.md.
     //
-    // The golden vector uses the 219-byte strkey-text layout (issue #270):
+    // The golden vector uses the 227-byte strkey-text layout (issue #270):
     //   recipient  = 56-byte ASCII strkey of [0xBB; 32] contract id
     //   dest_asset = 56-byte ASCII strkey of [0xCC; 32] contract id, right-zero-padded to 69
-    //   preferred_solver = all zeros (open) — encode_fill_instruction always writes zeros
+    // preferred_solver: all zeros (open) — encode_fill_instruction always writes zeros
+    // reservation_window: explicit eight-byte zero field
     const GOLDEN: &str = include_str!("../../../shared/wire-vectors/fill_instruction.hex");
 
     let env = Env::default();
@@ -234,9 +235,9 @@ fn decode_hex(s: &str) -> std::vec::Vec<u8> {
 }
 
 #[test]
-fn fill_instruction_recipient_round_trips_with_219_byte_format() {
+fn fill_instruction_recipient_round_trips_with_227_byte_format() {
     // Regression test for issue #271 and #270: verify that a payload built with
-    // the corrected 219-byte wire format (56-byte strkey text for recipient,
+    // the corrected 227-byte wire format (56-byte strkey text for recipient,
     // 69-byte strkey text for dest_asset) correctly round-trips through the
     // Soroban decoder back to the original address.
     //
@@ -254,7 +255,7 @@ fn fill_instruction_recipient_round_trips_with_219_byte_format() {
     let zero_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
     let original = Address::from_str(&env, zero_contract);
 
-    // Build a valid 219-byte payload using the corrected wire format:
+    // Build a valid 227-byte payload using the corrected wire format:
     // recipient field is 56 bytes of ASCII strkey text (no truncation).
     let mut strkey_bytes = [0u8; 56];
     let ascii = zero_contract.as_bytes();
@@ -277,11 +278,11 @@ fn fill_instruction_recipient_round_trips_with_219_byte_format() {
     payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes()));
     payload.append(&Bytes::from_array(&env, &9_999_999_999u64.to_be_bytes()));
     payload.append(&Bytes::from_array(&env, &[0u8; 32])); // preferred_solver: open
-
-    assert_eq!(payload.len(), 219, "payload must be 219 bytes");
+    payload.append(&Bytes::from_array(&env, &0u64.to_be_bytes())); // reservation_window: no reservation
+    assert_eq!(payload.len(), 227, "payload must be 227 bytes");
 
     let (msg_type, fi, _) =
-        decode_message(&env, &payload).expect("decoder must accept a well-formed 219-byte payload");
+        decode_message(&env, &payload).expect("decoder must accept a well-formed 227-byte payload");
     assert_eq!(msg_type, MSG_FILL_INSTRUCTION);
 
     // The decoded recipient must equal the original address — the full strkey
@@ -397,7 +398,7 @@ mod tests {
     }
 
     /// Regression: the 218-byte FillInstruction negative vector must be rejected
-    /// by the Soroban decoder with MalformedPayload (length check: expects 219).
+    /// by the Soroban decoder with MalformedPayload (length check: expects 227).
     #[test]
     fn fill_instruction_short_neg_vector_is_rejected() {
         const SHORT: &str =
@@ -412,12 +413,12 @@ mod tests {
         let result = crate::messages::decode_message(&env, &payload);
         assert!(
             result.is_err(),
-            "decoder must reject a 218-byte FillInstruction (expects 219)"
+            "decoder must reject a 218-byte FillInstruction (expects 227)"
         );
     }
 
     /// Regression: the 220-byte FillInstruction negative vector must be rejected
-    /// by the Soroban decoder with MalformedPayload (length check: expects 219).
+    /// by the Soroban decoder with MalformedPayload (length check: expects 227).
     #[test]
     fn fill_instruction_long_neg_vector_is_rejected() {
         const LONG: &str =
@@ -432,7 +433,7 @@ mod tests {
         let result = crate::messages::decode_message(&env, &payload);
         assert!(
             result.is_err(),
-            "decoder must reject a 220-byte FillInstruction (expects 219)"
+            "decoder must reject a 220-byte FillInstruction (expects 227)"
         );
     }
 }

@@ -13,7 +13,7 @@
  * 2. It emits `Locked(bytes32 indexed intentHash, address indexed solver,
  *    address indexed user, address asset, uint256 amount)`.
  * 3. It calls `endpoint.send(params, refundAddress)` with the encoded
- *    `FillInstruction` payload (158 bytes) directed to the Stellar settlement
+ *    `FillInstruction` payload (227 bytes) directed to the Stellar settlement
  *    contract.
  *
  * The relayer must watch for `Locked` events and reconstruct the full
@@ -34,20 +34,21 @@
  * `Intent` struct is the first argument, so decoding the transaction input
  * gives every field needed to reconstruct `BridgeMessage`.
  *
- * ### FillInstruction binary layout (for reference)
+ * ### FillInstruction binary layout (canonical 227-byte format)
  * ```
  * offset  size  field
  * 0       1     PROTOCOL_VERSION (0x01)
  * 1       1     MSG_FILL_INSTRUCTION (0x01)
  * 2       32    intentHash
  * 34      4     stellarEid (uint32, big-endian)
- * 38      32    recipient (Stellar strkey, left-padded to 32 bytes)
- * 70      32    destAsset (asset id string, left-padded to 32 bytes)
- * 102     16    minDestAmount (uint128)
- * 118     8     deadline (uint64)
- * 126     32    solver (EVM address, right-padded to 32 bytes)
+ * 38      56    recipient (Stellar strkey, right-zero-padded)
+ * 94      69    destAsset (asset identifier string, right-zero-padded)
+ * 163     16    minDestAmount (uint128, non-negative)
+ * 179     8     deadline (uint64)
+ * 187     32    preferredSolver (EVM address, left-zero-padded)
+ * 219     8     reservationWindow (uint64, zero for legacy EVM intents)
  *         ───
- *         158   total bytes
+ *         227   total bytes
  * ```
  *
  * ## Nonce

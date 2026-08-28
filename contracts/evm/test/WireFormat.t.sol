@@ -62,7 +62,7 @@ contract WireFormatConformanceTest is Test {
         hex"2222222222222222222222222222222222222222222222222222222222222222";
 
     // FillInstruction canonical inputs (must match fill_instruction.hex).
-    // The vector uses the 219-byte strkey-text layout (issue #270/#271):
+    // The vector uses the 227-byte strkey-text layout (issue #270/#271):
     //   recipient  = CC53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53WQD5 (56 chars)
     //                = strkey of [0xBB; 32] contract id
     //   dest_asset = CDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZLND (56 chars)
@@ -120,7 +120,7 @@ contract WireFormatConformanceTest is Test {
     ///      69-byte dest_asset) and issue #271 (strkey ASCII text, not raw bytes).
     function test_FillInstructionVectorMatchesSolidityEncoder() public view {
         bytes memory golden = _readVector("fill_instruction.hex");
-        assertEq(golden.length, 219, "fill_instruction.hex must be 219 bytes");
+        assertEq(golden.length, 227, "fill_instruction.hex must be 227 bytes");
 
         // Build the canonical intent using the same inputs as the Rust test.
         PerihelionEscrow.Intent memory intent = PerihelionEscrow.Intent({
@@ -137,7 +137,7 @@ contract WireFormatConformanceTest is Test {
         });
 
         bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent);
-        assertEq(encoded.length, 219, "encoder must produce 219 bytes");
+        assertEq(encoded.length, 227, "encoder must produce 227 bytes");
         assertEq(encoded, golden, "Solidity encoder output must match fill_instruction.hex golden vector");
     }
 
@@ -243,7 +243,7 @@ contract WireFormatConformanceTest is Test {
         // cross-language vector is correctly sized and available for Soroban tests.)
         assertEq(m[0], 0x01, "version must be 0x01");
         assertEq(m[1], 0x01, "type must be 0x01 (FillInstruction)");
-        // Soroban decoder will reject this at the length check (expects 219).
+        // Soroban decoder will reject this at the length check (expects 227).
         // The vector is included here so the file is validated and the hex is parseable.
         assertTrue(m.length == 218);
     }
@@ -253,7 +253,7 @@ contract WireFormatConformanceTest is Test {
         assertEq(m.length, 220);
         assertEq(m[0], 0x01, "version must be 0x01");
         assertEq(m[1], 0x01, "type must be 0x01 (FillInstruction)");
-        // Soroban decoder will reject this at the length check (expects 219).
+        // Soroban decoder will reject this at the length check (expects 227).
         assertTrue(m.length == 220);
     }
 }
@@ -283,11 +283,11 @@ contract FillInstructionEncodeTest is Test {
         });
     }
 
-    /// Encoded payload is exactly 219 bytes (expanded from the old 158).
-    function test_EncodedPayloadIs219Bytes() public view {
+    /// Encoded payload is exactly 227 bytes (expanded from the old 158 and including reservation_window).
+    function test_EncodedPayloadIs227Bytes() public view {
         PerihelionEscrow.Intent memory intent = _baseIntent();
         bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
-        assertEq(encoded.length, 219);
+        assertEq(encoded.length, 227);
     }
 
     /// The full 69-byte destAsset appears at offset 94 in the payload.
@@ -300,7 +300,7 @@ contract FillInstructionEncodeTest is Test {
         intent.destAsset = fullAsset;
 
         bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
-        assertEq(encoded.length, 219);
+        assertEq(encoded.length, 227);
 
         // Slice out the 69-byte dest_asset field at offset 94.
         bytes memory destField = new bytes(69);
@@ -325,7 +325,7 @@ contract FillInstructionEncodeTest is Test {
         intent.destination = "GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 58 chars, will be clamped to 56
         bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
         // Confirm recipient field occupies bytes [38, 94).
-        assertEq(encoded.length, 219);
+        assertEq(encoded.length, 227);
         // Byte at offset 94 is the start of dest_asset, not recipient overflow.
         // Verify by checking that the min_dest_amount field lands at offset 163.
         // min_dest_amount = 990_000 encoded as uint128 big-endian.

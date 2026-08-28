@@ -923,11 +923,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         });
     }
 
-    /// @dev Encode a FillInstruction payload (219 bytes) using the fixed big-endian
+    /// @dev Encode a FillInstruction payload (227 bytes) using the fixed big-endian
     ///      layout from architecture spec §3.3, matching the Soroban decoder byte-for-byte:
     ///
     ///      version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56)
     ///        | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
+    ///        | reservation_window(8)
     ///
     ///      `intent.destination` is a Stellar strkey (exactly 56 chars) encoded as a
     ///      fixed 56-byte field (zero-padded on the right if shorter — should never happen
@@ -975,8 +976,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             destAssetField,       // 69 bytes offset 94
             uint128(intent.minDestAmount), // 16 bytes offset 163
             uint64(intent.deadline),       // 8  bytes offset 179
-            solverWord            // 32 bytes offset 187
-            //                                 total       219
+            solverWord,           // 32 bytes offset 187
+            uint64(0)              // 8 bytes offset 219; no reservation in legacy EVM intents
+            // reservation_window is explicit and zero until the signed EVM intent schema adds it.
+            //                                 total       227
         );
     }
 

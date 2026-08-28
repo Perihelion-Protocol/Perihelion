@@ -178,13 +178,17 @@ pub const RECIPIENT_TYPE_CONTRACT: u8 = 0x10; // C... contract (0x02 << 3)
 /// A registration instruction from the source chain (FillInstruction), decoded
 /// at the endpoint/adapter boundary into native Soroban types.
 ///
-/// Wire format (159 bytes):
-///   version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient_type(1)
-///   | recipient_key(32) | dest_asset_type(1) | dest_asset_key(32)
-///   | min_dest_amount(16) | deadline(8) | preferred_solver(32)
+/// Canonical wire format (227 bytes):
+///   version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56)
+///   | dest_asset(69) | min_dest_amount(16) | deadline(8)
+///   | preferred_solver(32) | reservation_window(8)
 ///
-/// Recipient and dest_asset are decoded from their strkey form (version byte + 32-byte key)
-/// into Soroban Address objects at the adapter boundary.
+/// `recipient` is a right-zero-padded Stellar strkey. `dest_asset` is the
+/// user-signed Stellar asset identifier (`native` or `CODE:ISSUER`), also
+/// right-zero-padded to preserve the EVM wire representation. The adapter must
+/// resolve that identifier to the configured Soroban token address before
+/// constructing an `IntentRecord`; it must not interpret the bytes as a strkey
+/// address.
 #[contracttype]
 #[derive(Clone)]
 pub struct FillInstruction {
