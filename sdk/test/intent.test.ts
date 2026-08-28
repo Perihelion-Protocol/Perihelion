@@ -136,6 +136,28 @@ test("buildIntent does not warn when sourceAmount is above V_min", () => {
   }
 });
 
+test("buildIntent does not warn when sourceAmount equals V_min", () => {
+  const logged: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
+
+  try {
+    buildIntent({
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: DEFAULT_V_MIN,
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "9000000",
+      deadline: 4102444800,
+    });
+    assert.equal(logged.length, 0, "expected no warning at the V_min boundary");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("buildIntent respects suppressWarning option", () => {
   const logged: string[] = [];
   const warnStub = (msg: string) => logged.push(msg);

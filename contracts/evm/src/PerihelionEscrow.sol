@@ -59,6 +59,8 @@ import {
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
+    uint256 internal constant FILL_INSTRUCTION_LENGTH = 219;
+
     struct Intent {
         address user;
         string destination;
