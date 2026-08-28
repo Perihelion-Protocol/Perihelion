@@ -176,6 +176,14 @@ export function validateIntent(
       `must be a Unix timestamp strictly in the future (got ${params.deadline}, now is ${now})`,
     );
   }
+  if (params.deadline > now + MAX_DEADLINE_HORIZON) {
+    throw new IntentValidationError(
+      "deadline",
+      `exceeds the maximum deadline horizon of ${MAX_DEADLINE_HORIZON}s from now ` +
+        `(got ${params.deadline}, now is ${now}); the Soroban settlement contract ` +
+        `rejects FillInstructions with a deadline further out than this`,
+    );
+  }
   if (params.nonce !== undefined) {
     if (!isNonNegIntString(params.nonce)) {
       throw new IntentValidationError(
@@ -210,6 +218,19 @@ export const MAX_DESTINATION_LEN = 56;
  * Matches `PerihelionEscrow.MAX_DEST_ASSET_LEN`.
  */
 export const MAX_DEST_ASSET_LEN = 69;
+
+/**
+ * Maximum deadline horizon, in seconds from the current time, accepted for
+ * `Intent.deadline`. Matches `settlement::MAX_DEADLINE_HORIZON` on the Soroban
+ * side: a `FillInstruction` carrying a deadline further out than this is
+ * rejected there to prevent trivially pinning an entry at MAX_TTL with a
+ * far-future deadline. Enforcing the same ceiling here, before the intent is
+ * ever signed or submitted to the EVM escrow, avoids a stuck state where
+ * funds are locked and the LayerZero fee paid for an intent that the
+ * destination chain will never register.
+ * 7 days = 604_800 s.
+ */
+export const MAX_DEADLINE_HORIZON = 604_800;
 
 /**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
