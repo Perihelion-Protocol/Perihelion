@@ -120,8 +120,10 @@ const MIN_SECS_PER_LEDGER: u64 = 4;
 /// Maximum deadline horizon, in seconds from the current ledger timestamp.
 /// FillInstructions with `deadline > now + MAX_DEADLINE_HORIZON` are rejected
 /// to prevent trivially pinning an entry at MAX_TTL with a far-future deadline.
-/// 7 days = 604_800 s is aligned with the SDK's intent builder maximum and
-/// covers any realistic cross-chain settlement window.
+/// 7 days = 604_800 s matches `MAX_DEADLINE_HORIZON` in the SDK's
+/// `validateIntent` (sdk/src/intent.ts), which enforces the same ceiling
+/// client-side before an intent is ever signed, and covers any realistic
+/// cross-chain settlement window.
 pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 
 /// Minimum time window (seconds) required after deliver_intent for dispatch_confirmation
