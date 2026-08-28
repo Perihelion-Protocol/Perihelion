@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🌌 Perihelion Protocol
+# 🌌 Perihelion Protocol .............
 
-**The shortest path between Stellar and every other chain.**
+**The shortest path between Stellar and every other chain.**ff
 
 An open-source, intent-based cross-chain bridge connecting Stellar to
 EVM-compatible networks — Ethereum, Base, Arbitrum, and beyond.
