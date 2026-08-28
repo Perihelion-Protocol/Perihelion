@@ -131,6 +131,10 @@ export const ESCROW_ABI = [
       { name: "user", type: "address", indexed: true },
       { name: "asset", type: "address", indexed: false },
       { name: "amount", type: "uint256", indexed: false },
+      { name: "destination", type: "string", indexed: false },
+      { name: "destAsset", type: "string", indexed: false },
+      { name: "minDestAmount", type: "uint128", indexed: false },
+      { name: "deadline", type: "uint64", indexed: false },
     ],
   },
   {

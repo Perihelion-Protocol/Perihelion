@@ -271,7 +271,11 @@ contract PerihelionEscrowTest is Test {
         address indexed solver,
         address indexed user,
         address asset,
-        uint256 amount
+        uint256 amount,
+        string destination,
+        string destAsset,
+        uint128 minDestAmount,
+        uint64 deadline
     );
     event Released(
         bytes32 indexed intentHash,
@@ -389,7 +393,17 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = escrow.hashIntent(intent);
 
         vm.expectEmit(true, true, true, true);
-        emit Locked(h, solver, user, address(token), 100_000);
+        emit Locked(
+            h,
+            solver,
+            user,
+            address(token),
+            100_000,
+            intent.destination,
+            intent.destAsset,
+            uint128(intent.minDestAmount),
+            uint64(intent.deadline)
+        );
 
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig);

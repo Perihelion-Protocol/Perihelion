@@ -39,9 +39,9 @@ import {
 ///      Changes to event topics or payloads MUST be reflected in the Soroban
 ///      contract (see `contracts/soroban/settlement/src/lib.rs`).
 ///
-///      | Event                  | Topics                                              | Data                          |
-///      |------------------------|-----------------------------------------------------|-------------------------------|
-///      | Locked                 | intentHash, solver, user                             | asset, amount                 |
+///      | Event                  | Topics                                              | Data                                                          |
+///      |------------------------|-----------------------------------------------------|---------------------------------------------------------------|
+///      | Locked                 | intentHash, solver, user                             | asset, amount, destination, destAsset, minDestAmount, deadline|
 ///      | Released               | intentHash, solver                                  | amount, fillAmount, fillLedger |
 ///      | Refunded               | intentHash, user                                    | amount, reason                |
 ///      | RefundedLocalTimeout   | intentHash, user                                    | amount                        |
@@ -272,7 +272,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         address indexed solver,
         address indexed user,
         address asset,
-        uint256 amount
+        uint256 amount,
+        string destination,
+        string destAsset,
+        uint128 minDestAmount,
+        uint64 deadline
     );
     /// @param fillAmount Stellar-side delivery amount (informational; the escrow releases
     ///                   `l.amount`, not this value — see `_decodeFillConfirmed`).
@@ -657,7 +661,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // Increment the aggregate liability counter so skim() can compute surplus.
         totalLocked[intent.sourceAsset] += received;
 
-        emit Locked(intentHash, msg.sender, intent.user, intent.sourceAsset, received);
+        emit Locked(
+            intentHash,
+            msg.sender,
+            intent.user,
+            intent.sourceAsset,
+            received,
+            intent.destination,
+            intent.destAsset,
+            uint128(intent.minDestAmount),
+            uint64(intent.deadline)
+        );
 
         bytes memory message = _encodeFillInstruction(intentHash, intent);
         MessagingParams memory params = _buildMessagingParams(message, msg.value);
