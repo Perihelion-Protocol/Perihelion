@@ -58,6 +58,7 @@ mod events {
     pub const NATIVE_TOKEN_SET: Symbol = symbol_short!("native_tok");
     pub const KEEPER_REWARD_SET: Symbol = symbol_short!("reward_set");
     pub const KEEPER_REWARD_PAID: Symbol = symbol_short!("reward_pd");
+    pub const KEEPER_REWARD_SKIPPED: Symbol = symbol_short!("reward_sk");
     pub const REGISTERED: Symbol = symbol_short!("registered");
     pub const FILLED: Symbol = symbol_short!("filled");
     pub const CONFIRMATION_SENT: Symbol = symbol_short!("confirmed");
@@ -92,6 +93,7 @@ mod events {
 // | `native_token_set`     | ("native_token_set",)            | (native_token: Address)                          |
 // | `keeper_reward_set`    | ("keeper_reward_set",)           | (reward: i128)                                   |
 // | `keeper_reward_paid`   | ("keeper_reward_paid", intent_hash) | (caller: Address, reward: i128)               |
+// | `keeper_reward_skipped` | ("keeper_reward_skipped", intent_hash) | (caller: Address, reward: i128)            |
 // | `registered`           | ("registered", intent_hash)        | (src_eid: u32, deadline: u64)                    |
 // | `filled`               | ("filled", intent_hash)          | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32) |
 // | `confirmation_sent`    | ("confirmation_sent", intent_hash) | (solver: Address)                                |
@@ -989,11 +991,23 @@ impl Perihelion {
                     (events::KEEPER_REWARD_PAID, intent_hash.clone()),
                     (caller.clone(), keeper_reward),
                 );
+            } else {
+                // native_token is not configured: skip the reward rather than
+                // failing the cancellation. This allows deployment to proceed
+                // before the native token address is set, though keeper rewards
+                // will not be paid. Operators must call set_native_token and
+                // then re-enable rewards via set_keeper_reward.
+                //
+                // Emit an event so this misconfigured state (a positive
+                // keeper_reward advertised via the view but not payable) is
+                // observable off-chain instead of failing silently — a keeper
+                // that funded the LayerZero fee expecting this reward would
+                // otherwise have no signal explaining the missing payout.
+                env.events().publish(
+                    (events::KEEPER_REWARD_SKIPPED, intent_hash.clone()),
+                    (caller.clone(), keeper_reward),
+                );
             }
-            // If native_token is not configured, silently skip the reward.
-            // This allows deployment to proceed before the native token address
-            // is set, though keeper rewards will not be paid. Operators must call
-            // set_native_token and then re-enable rewards via set_keeper_reward.
         }
 
         env.events().publish(
