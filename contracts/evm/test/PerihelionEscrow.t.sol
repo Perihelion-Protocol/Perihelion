@@ -476,6 +476,28 @@ contract PerihelionEscrowTest is Test {
         assertEq(token.balanceOf(address(escrow)), 100_000);
     }
 
+    function test_LockExactFeeSucceeds() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        // Under mockEndpoint, mockFee is returned
+        uint256 quotedFee = escrow.quoteFee(intent, solver);
+
+        vm.prank(solver);
+        escrow.lock{ value: quotedFee }(intent, sig);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    function test_QuoteFee_MatchesPayerFee() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        uint256 feeWithSolver = escrow.quoteFee(intent, solver);
+        assertEq(feeWithSolver, endpoint.mockFee());
+
+        vm.prank(solver);
+        uint256 feeMsgSender = escrow.quoteFee(intent);
+        assertEq(feeMsgSender, feeWithSolver);
+    }
+
     function test_RevertWhen_AlreadyLocked() public {
         PerihelionEscrow.Intent memory intent = _intent();
         bytes memory sig = _sign(intent);

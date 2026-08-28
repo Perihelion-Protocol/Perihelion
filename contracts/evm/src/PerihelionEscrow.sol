@@ -842,17 +842,25 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Views ---------------------------------------------------------------
 
-    /// @notice Quote the LayerZero native fee for a FillInstruction to Stellar.
-    ///         Solvers should call this off-chain and pass the result (with a small
-    ///         buffer) as `msg.value` to {lock}. Any excess is refunded by the
-    ///         endpoint to the caller per the LayerZero V2 convention.
+    /// @notice Quote the LayerZero native fee for a FillInstruction to Stellar for a specific payer.
+    ///         Solvers should call this off-chain passing their own address as `payer` and pass
+    ///         the result (with a small buffer) as `msg.value` to {lock}. Any excess is refunded by
+    ///         the endpoint to the caller per the LayerZero V2 convention.
     /// @param intent Intent whose FillInstruction message size determines the fee.
+    /// @param payer The address that will call lock (refund destination for LayerZero endpoint).
     /// @return nativeFee Estimated native token fee in wei.
-    function quoteFee(Intent calldata intent) external view returns (uint256 nativeFee) {
+    function quoteFee(Intent calldata intent, address payer) public view returns (uint256 nativeFee) {
         // Use a placeholder hash — the fee depends only on message size, not content.
         bytes memory message = _encodeFillInstruction(bytes32(0), intent);
         MessagingParams memory params = _buildMessagingParams(message, 0);
-        return endpoint.quote(params, msg.sender).nativeFee;
+        return endpoint.quote(params, payer).nativeFee;
+    }
+
+    /// @notice Backward-compatible overload passing msg.sender as payer.
+    /// @param intent Intent whose FillInstruction message size determines the fee.
+    /// @return nativeFee Estimated native token fee in wei.
+    function quoteFee(Intent calldata intent) external view returns (uint256 nativeFee) {
+        return quoteFee(intent, msg.sender);
     }
 
     /// @notice Compute the canonical EIP-712 intent hash (I5).
