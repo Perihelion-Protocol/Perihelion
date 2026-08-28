@@ -347,6 +347,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error RollingWindowCapExceeded();
     error RollingWindowCapAlreadyTriggered();
     error RollingWindowNotYetResettable();
+    error InvalidDuration();
     error NativeTransferFailed();
     /// @dev skim() would draw into funds locked by active intents.
     error ExceedsSurplus();
@@ -503,6 +504,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @param _cap Maximum aggregate locked amount within each window (in token's native units).
     ///             Zero means unlimited. Ignored if windowDuration is zero.
     function setRollingWindowCap(uint256 _windowDuration, uint256 _cap) external onlyOwner {
+        if (_cap > 0 && _windowDuration == 0) revert InvalidDuration();
+        if (_windowDuration > block.timestamp) revert InvalidDuration();
         rollingWindowDuration = _windowDuration;
         rollingWindowCap = _cap;
         emit RollingWindowCapSet(_windowDuration, _cap);
@@ -703,8 +706,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             // Advance memoized window if time has moved to a new bucket.
             if (windowStart > _latestWindowStart) {
                 _latestWindowStart = windowStart;
-                // In a new window; prior bucket is abandoned (orphaned). Restart accumulator.
-                delete _rollingWindowBuckets[windowStart - rollingWindowDuration];
+                // In a new window; prior buckets are orphaned and expire implicitly.
             }
 
             // Accumulate this lock's amount into the current window.
