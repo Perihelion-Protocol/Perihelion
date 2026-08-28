@@ -6,5 +6,6 @@ export type IntentStatus = MempoolIntentStatus;
 
 export interface MempoolIntentRecord extends SignedIntent {
   status: IntentStatus;
+  /** Unix timestamp in seconds when the record was created. */
   createdAt: number;
 }

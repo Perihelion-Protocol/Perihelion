@@ -581,10 +581,10 @@ components:
             createdAt:
               type: integer
               description: |
-                Unix timestamp **in milliseconds** (`Date.now()`) at which the
+                Unix timestamp **in seconds** (`Math.floor(Date.now() / 1000)`) at which the
                 record was created in the mempool.
               examples:
-                - 1751270400000
+                - 1751270400
 
     # ─── Request / response envelopes ──────────────────────────────────────
 
