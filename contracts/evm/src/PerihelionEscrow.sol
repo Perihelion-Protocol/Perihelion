@@ -468,6 +468,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @param asset Address of the ERC-20 token to allow or disallow.
     /// @param allowed True to add to allowlist, false to remove.
     function setAssetAllowed(address asset, bool allowed) external onlyOwner {
+        if (allowed && asset.code.length == 0) revert TransferFailed();
         assetAllowed[asset] = allowed;
         emit AssetAllowed(asset, allowed);
     }
