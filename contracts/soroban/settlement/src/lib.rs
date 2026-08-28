@@ -68,6 +68,9 @@ mod events {
     pub const CANCELLED_INBOUND: Symbol = symbol_short!("canl_in");
     pub const CANCEL_IGNORED: Symbol = symbol_short!("canl_ign");
     pub const ROLLING_WINDOW_CAP_TRIGGERED: Symbol = symbol_short!("roll_cap");
+    /// Issue #500: delayed endpoint rotation, mirroring the peer-change events.
+    pub const ENDPOINT_CHANGE_PROPOSED: Symbol = symbol_short!("endp_prop");
+    pub const ENDPOINT_CHANGE_CANCELLED: Symbol = symbol_short!("endp_canl");
 }
 
 // =============================================================================
@@ -225,6 +228,131 @@ impl Perihelion {
             (old, new_endpoint),
         );
         Ok(())
+    }
+
+    /// Propose a new trusted endpoint, subject to the same delayed two-step
+    /// flow as `propose_peer` (issue #500). Admin-only.
+    ///
+    /// `set_endpoint` above rotates the endpoint instantly; this is an
+    /// additive, delayed alternative for admins who want the same one-day
+    /// public delay / `PEER_CHANGE_GRACE` confirmation window already used
+    /// for peer rotations, since the endpoint is the stronger of the two
+    /// authorities (`lz_receive` trusts it unconditionally before the peer
+    /// check even runs). `set_endpoint` is left in place unchanged; callers
+    /// choose which path to use.
+    ///
+    /// Emits `endp_prop(old, new, ready_at)`.
+    pub fn propose_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
+        let now = env.ledger().timestamp();
+        let ready_at = now + MIN_PEER_CHANGE_DELAY;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingEndpoint, &new_endpoint);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingEndpointTime, &now);
+        env.events().publish(
+            (events::ENDPOINT_CHANGE_PROPOSED,),
+            (old, new_endpoint, ready_at),
+        );
+        Ok(())
+    }
+
+    /// Confirm and apply a pending endpoint change (issue #500). Admin-only.
+    /// Must be called after `MIN_PEER_CHANGE_DELAY` has elapsed since
+    /// `propose_endpoint` and within `PEER_CHANGE_GRACE` of that delay
+    /// elapsing, mirroring `confirm_peer`.
+    ///
+    /// Emits `endpoint_set(old, new)` on success — the same event
+    /// `set_endpoint` emits, so existing monitors need not distinguish
+    /// which path rotated the endpoint.
+    ///
+    /// # Errors
+    /// - `NotPendingEndpointChange` if no endpoint change is pending
+    /// - `EndpointChangeNotReady` if the minimum delay has not yet elapsed
+    /// - `EndpointChangeExpired` if the grace period has elapsed since the proposal
+    pub fn confirm_endpoint(env: Env) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+
+        let proposed_endpoint: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingEndpoint)
+            .ok_or(PerihelionError::NotPendingEndpointChange)?;
+
+        let proposed_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingEndpointTime)
+            .ok_or(PerihelionError::NotPendingEndpointChange)?;
+
+        let now = env.ledger().timestamp();
+        if now < proposed_at + MIN_PEER_CHANGE_DELAY {
+            return Err(PerihelionError::EndpointChangeNotReady);
+        }
+
+        if now > proposed_at + MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE {
+            env.storage().instance().remove(&DataKey::PendingEndpoint);
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingEndpointTime);
+            return Err(PerihelionError::EndpointChangeExpired);
+        }
+
+        let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
+        env.storage()
+            .instance()
+            .set(&DataKey::Endpoint, &proposed_endpoint);
+        env.storage().instance().remove(&DataKey::PendingEndpoint);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingEndpointTime);
+
+        env.events().publish(
+            (events::ENDPOINT_SET,),
+            (old, proposed_endpoint),
+        );
+        Ok(())
+    }
+
+    /// Cancel a pending endpoint change (issue #500). Admin-only. Mirrors
+    /// `cancel_pending_peer`.
+    ///
+    /// Emits `endp_canl()`.
+    pub fn cancel_pending_endpoint(env: Env) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+
+        env.storage().instance().remove(&DataKey::PendingEndpoint);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingEndpointTime);
+
+        env.events().publish((events::ENDPOINT_CHANGE_CANCELLED,), ());
+        Ok(())
+    }
+
+    /// Retrieve a pending endpoint change, if one exists (issue #500).
+    /// Returns (proposed_endpoint, proposed_at_timestamp, ready_at, expires_at)
+    /// or None if no change is pending. Mirrors `get_pending_peer`.
+    pub fn get_pending_endpoint(
+        env: Env,
+    ) -> Result<Option<(Address, u64, u64, u64)>, PerihelionError> {
+        let endpoint: Option<Address> = env.storage().instance().get(&DataKey::PendingEndpoint);
+        let time: Option<u64> = env.storage().instance().get(&DataKey::PendingEndpointTime);
+
+        Ok(match (endpoint, time) {
+            (Some(e), Some(t)) => {
+                let ready_at = t.saturating_add(MIN_PEER_CHANGE_DELAY);
+                let expires_at = t
+                    .saturating_add(MIN_PEER_CHANGE_DELAY)
+                    .saturating_add(PEER_CHANGE_GRACE);
+                Some((e, t, ready_at, expires_at))
+            }
+            _ => None,
+        })
     }
 
     /// Propose a new peer (EVM escrow address) for a source endpoint id (issue #165).

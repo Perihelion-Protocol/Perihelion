@@ -35,6 +35,12 @@ pub enum PerihelionError {
     PeerChangeNotReady = 136,
     /// Peer change proposal has expired (confirm_peer guard, issue #292).
     PeerChangeExpired = 137,
+    /// No pending endpoint change exists (confirm_endpoint / cancel_pending_endpoint
+    /// guard, issue #500).
+    NotPendingEndpointChange = 138,
+    /// Minimum endpoint-change delay has not yet elapsed (confirm_endpoint guard,
+    /// issue #500).
+    EndpointChangeNotReady = 139,
 
     // --- Intent preconditions ---
     /// No registered intent for the given hash.
@@ -59,6 +65,10 @@ pub enum PerihelionError {
     RollingWindowCapExceeded = 149,
     /// Rolling-window cap is triggered; new intents paused until reset.
     RollingWindowCapTriggered = 150,
+    /// Endpoint change proposal has expired (confirm_endpoint guard, issue
+    /// #500). Placed here rather than the 13x authorization band, which is
+    /// fully allocated.
+    EndpointChangeExpired = 151,
 
     // --- Messaging ---
     /// Payload failed structural validation.
