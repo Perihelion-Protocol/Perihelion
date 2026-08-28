@@ -44,6 +44,7 @@ import {
 ///      | Locked                 | intentHash, solver, user                             | asset, amount                 |
 ///      | Released               | intentHash, solver                                  | amount, fillAmount, fillLedger |
 ///      | Refunded               | intentHash, user                                    | amount, reason                |
+///      | RefundedLocalTimeout   | intentHash, user                                    | amount                        |
 ///      | PeerSet                | -                                                   | peer                          |
 ///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  |
 ///      | GuardianSet            | guardian                                            | -                             |
@@ -287,6 +288,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         uint128 minDestAmount
     );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
+    event RefundedLocalTimeout(bytes32 indexed intentHash, address indexed user, uint256 amount);
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
@@ -837,7 +839,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         l.refunded = true;
         totalLocked[l.asset] -= l.amount;
         _safeTransfer(l.asset, l.user, l.amount);
-        emit Refunded(intentHash, l.user, l.amount, CANCEL_REASON_EXPIRED);
+        emit RefundedLocalTimeout(intentHash, l.user, l.amount);
     }
 
     // --- Views ---------------------------------------------------------------

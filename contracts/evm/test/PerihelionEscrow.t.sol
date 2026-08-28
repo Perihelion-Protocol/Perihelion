@@ -282,6 +282,7 @@ contract PerihelionEscrowTest is Test {
         uint128 minDestAmount
     );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
+    event RefundedLocalTimeout(bytes32 indexed intentHash, address indexed user, uint256 amount);
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
@@ -749,7 +750,7 @@ contract PerihelionEscrowTest is Test {
 
         vm.warp(intent.deadline + escrow.confirmationGrace());
         vm.expectEmit(true, true, false, true);
-        emit Refunded(h, user, 100_000, 0);
+        emit RefundedLocalTimeout(h, user, 100_000);
         escrow.cancelExpired(h);
 
         assertEq(token.balanceOf(user), 1_000_000);
@@ -1346,13 +1347,13 @@ contract PerihelionEscrowTest is Test {
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msg_);
     }
 
-    function test_CancelExpiredEmitsExpiredReason() public {
+    function test_CancelExpiredEmitsRefundedLocalTimeout() public {
         bytes32 h = _lock();
         PerihelionEscrow.Intent memory intent = _intent();
         vm.warp(intent.deadline + escrow.confirmationGrace());
 
         vm.expectEmit(true, true, false, true);
-        emit Refunded(h, user, 100_000, 0x00); // CANCEL_REASON_EXPIRED
+        emit RefundedLocalTimeout(h, user, 100_000);
         escrow.cancelExpired(h);
     }
 

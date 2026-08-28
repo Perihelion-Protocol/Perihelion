@@ -144,6 +144,15 @@ export const ESCROW_ABI = [
     ],
   },
   {
+    type: "event",
+    name: "RefundedLocalTimeout",
+    inputs: [
+      { name: "intentHash", type: "bytes32", indexed: true },
+      { name: "user", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
     type: "error",
     name: "NotLocked",
   },
