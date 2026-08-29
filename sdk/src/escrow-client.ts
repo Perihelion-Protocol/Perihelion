@@ -5,7 +5,8 @@
  *
  * The SDK constructs, signs, and submits intents to the mempool, but users
  * still need to call escrow functions for critical operations:
- * - `lock()` to stake funds as a solver
+ * - `lock()` for a solver to claim an intent: pulls the user's pre-approved
+ *   source funds into escrow and dispatches the fill instruction to Stellar
  * - `cancelExpired()` to recover expired intents
  * - `confirmationGrace()` and `getLock()` to verify intent status
  *
@@ -13,6 +14,7 @@
  * WalletClient to perform these on-chain actions directly.
  */
 
+import { zeroAddress } from "viem";
 import type {
   PublicClient,
   WalletClient,
@@ -73,11 +75,19 @@ export class PerihelionEscrowClient {
   }
 
   /**
-   * Lock funds as a solver for an intent.
+   * Claim an intent as a solver.
+   *
+   * Transfers the user's pre-approved `sourceAmount` of `sourceAsset` from
+   * the user into escrow (not the solver's own funds) and dispatches the
+   * FillInstruction to Stellar over LayerZero. The user must have granted
+   * this contract an ERC-20 allowance of at least `sourceAmount` before this
+   * call, or the transaction reverts.
    *
    * @param intent The intent being locked (must match the signed version).
    * @param signature The EIP-712 signature authorizing the intent.
-   * @param value The amount of native token to send (covers escrow + LayerZero fee).
+   * @param value The native token amount funding the LayerZero send — see
+   *   {@link quoteFee}. The escrow itself charges no native fee; any excess
+   *   over the actual LayerZero cost is refunded by the endpoint to the caller.
    * @returns The transaction hash.
    */
   async lock(
@@ -125,21 +135,24 @@ export class PerihelionEscrowClient {
   /**
    * Retrieve the lock record for an intent.
    *
+   * `getLock` is a public mapping getter and does not revert for an unknown
+   * hash — it returns a zero-valued struct — so absence is determined from
+   * `lock.user` rather than from a caught exception. RPC/transport failures
+   * are not caught here and propagate to the caller, since they must not be
+   * confused with "no lock exists".
+   *
    * @param intentHash The hash of the intent.
    * @returns The lock record, or undefined if no lock exists.
+   * @throws If the underlying RPC call fails (network, timeout, etc.).
    */
   async getLock(intentHash: Hex): Promise<Lock | undefined> {
-    try {
-      const lock = await this.publicClient.readContract({
-        address: this.escrowAddress,
-        abi: ESCROW_ABI,
-        functionName: "getLock",
-        args: [intentHash],
-      });
-      return lock as Lock;
-    } catch {
-      return undefined;
-    }
+    const lock = (await this.publicClient.readContract({
+      address: this.escrowAddress,
+      abi: ESCROW_ABI,
+      functionName: "getLock",
+      args: [intentHash],
+    })) as Lock;
+    return lock.user === zeroAddress ? undefined : lock;
   }
 
   /**
