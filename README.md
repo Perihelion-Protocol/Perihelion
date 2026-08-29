@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🌌 Perihelion Protocol
+# 🌌 Perihelion Protocol .............
 
-**The shortest path between Stellar and every other chain.**
+**The shortest path between Stellar and every other chain.**ff
 
 An open-source, intent-based cross-chain bridge connecting Stellar to
 EVM-compatible networks — Ethereum, Base, Arbitrum, and beyond.
@@ -350,7 +350,7 @@ fails if a row here links to a closed issue (`scripts/check-status-links.mjs`).
 | Component | Status | Details |
 | --- | --- | --- |
 | **LayerZero Endpoint (Soroban)** | Interface + Mock | `contracts/soroban/settlement/src/endpoint.rs` defines the `LzEndpoint` trait as a minimal, swappable abstraction. During this phase, a mock contract implements this surface; the real endpoint (or a thin adapter) will implement the same signature once the Soroban LayerZero stack is GA. The Soroban side does not yet communicate with a live LayerZero endpoint. |
-| **Inbound FillInstruction Codec** | Implemented, wire format under revision | `messages.rs` decodes `FillInstruction`, `CancelIntent`, and confirmation payloads from LayerZero bytes. The wire format is not frozen: field widths and address encoding are still being revised, so a decoder built against it today may need updating. |
+| **Inbound FillInstruction Codec** | Decoder implemented, not wired to production | `messages.rs` decodes `FillInstruction`, `CancelIntent`, and confirmation payloads from LayerZero bytes, and the format is pinned by the differential-fuzz harness (see [docs/differential-fuzzing.md](./docs/differential-fuzzing.md)). But `Perihelion::lz_receive` (`lib.rs`) takes an already-typed `LzMessage`, not raw `Bytes`, so `decode_message`/`decode_fill_instruction`/`decode_cancel_intent` are marked `#[allow(dead_code)]` and are exercised only by `messages.rs`'s test and fuzz modules, which the release `cdylib` does not compile. No component on the Stellar side currently parses raw inbound wire bytes in production; an adapter contract or a `Bytes`-taking `lz_receive` is still needed before this codec is load-bearing. |
 | **Relayer EVM Watcher** | Implemented | `relayer/src/evm-watcher.ts` polls source-chain logs through viem with bounded block ranges and concurrent transaction fetches. |
 | **Relayer Soroban Delivery** | Implemented, archived-entry restore incomplete | `relayer/src/soroban-delivery.ts` builds, simulates, and submits `lz_receive` calls against the settlement contract. Archived ledger entries are detected but the `RestoreFootprint` operation is not yet constructed from the simulation footprint, so delivery to an archived contract still fails. Tracked by the `TODO(#303)` in that file; [#303](https://github.com/Perihelion-Protocol/Perihelion/issues/303) is closed, no successor filed yet. |
 | **Solver Executor** | Stub | `solver/src/executor.ts` implements the orchestration flow, but `lockOnEvm`, `fillOnSoroban`, and `isSettled` all throw `Executor not implemented`. No solver can execute an intent end to end. |
@@ -390,17 +390,12 @@ Scoped honestly, per role:
 |---|---|---|---|
 | **Solver / Relayer / Keeper** | Delay or decline to act | Steal funds, forge a fill, censor permanently (anyone can take over) | Permissionless; wire-format and signature checks |
 | **LayerZero DVN set** | — | — | Root of message authenticity; a colluding DVN set can forge a fill (see [T16](./docs/threat-model.md#t16--layerzero-endpoint-compromise--malicious-origin-spoofing)) |
-| **Guardian (EVM)** | Pause new locks and local refunds, for up to 72h per 144h cycle | Move funds, change config, unpause | Auto-expiry + cooldown ([T11](./docs/threat-model.md#t11--guardian-key-dos-via-repeated-instant-pause)) |
-| **EVM timelock owner set** | Rotate the peer, guardian, or grace period; **withdraw *any* token balance the escrow holds via `skim`, with no on-chain bound relating it to locked funds** | Bypass the timelock delay for peer/grace/guardian changes | M-of-N confirmation + public delay for config changes; **`skim` itself has no delay, no cap, and no per-token accounting** ([T17](./docs/threat-model.md#t17--governance-extractable-escrow-balance)) |
+| **Guardian (EVM)** | Pause new locks, for up to 72h per 144h cycle | Move funds, change config, unpause, block local refunds | Auto-expiry + cooldown ([T11](./docs/threat-model.md#t11--guardian-key-dos-via-repeated-instant-pause)) |
+| **EVM timelock owner set** | Rotate the peer, guardian, or grace period; withdraw genuine surplus token balance via `skim` | Withdraw locked user deposits; bypass the timelock delay for peer/grace/guardian changes | M-of-N confirmation + public delay for config changes; `skim` is bounded on-chain by `totalLocked[token]` accounting (`balanceOf(this) - totalLocked[token]`) ([T17](./docs/threat-model.md#t17--governance-extractable-escrow-balance)) |
 | **A single EVM timelock owner** | Cancel any pending operation, including a legitimate unpause or guardian rotation | Execute an operation alone | None at present — this is a liveness single point of failure ([T20](./docs/threat-model.md#t20--governance-liveness)) |
 | **Soroban admin** | Rotate the LayerZero endpoint **instantly, with no delay** | — | `propose_peer`/`confirm_peer` have a 1-day delay; `set_endpoint` does not ([T18](./docs/threat-model.md#t18--instant-endpoint-rotation-on-soroban)) |
 
-**The practical implication:** the escrow's custody guarantee is only as strong
-as the timelock owner set's honesty, because `skim` is unbounded and the
-refund path (`cancelExpired`) is itself pausable. This is the single largest
-concentration of risk in the protocol today and is not yet mitigated on-chain
-— see [`docs/threat-model.md`](./docs/threat-model.md) §0 and T17–T20 for the
-full trust model, likelihood/impact assessment, and tracked mitigation issues.
+**The practical implication:** `skim` is bounded on-chain by per-token liability accounting (`totalLocked`), preventing the owner set from extracting active user deposits. The residual governance risk is that the owner can withdraw genuine surplus (e.g. fee-on-transfer residue, accidentally sent / donated tokens, or upward rebase surplus), while single-owner cancellation remains a liveness single point of failure ([T20](./docs/threat-model.md#t20--governance-liveness)) and Soroban endpoint rotation is instant ([T18](./docs/threat-model.md#t18--instant-endpoint-rotation-on-soroban)) — see [`docs/threat-model.md`](./docs/threat-model.md) §0 and T17–T20 for the full trust model, likelihood/impact assessment, and tracked mitigation issues.
 
 ## Security
 

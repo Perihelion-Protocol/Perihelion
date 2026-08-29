@@ -52,14 +52,22 @@ export class PerihelionEscrowClient {
    * Add a small buffer and pass the result as `msg.value` to {@link lock}.
    *
    * @param intent The intent to quote a fee for.
+   * @param payer Optional solver/payer address. Defaults to wallet client account or preferredSolver.
    * @returns The estimated native token fee in wei.
    */
-  async quoteFee(intent: Intent): Promise<bigint> {
+  async quoteFee(intent: Intent, payer?: Address): Promise<bigint> {
+    const solverAddress =
+      payer ??
+      this.walletClient.account?.address ??
+      (intent.preferredSolver !== "0x0000000000000000000000000000000000000000"
+        ? (intent.preferredSolver as Address)
+        : (intent.user as Address));
+
     const fee = await this.publicClient.readContract({
       address: this.escrowAddress,
       abi: ESCROW_ABI,
       functionName: "quoteFee",
-      args: [this._intentToContract(intent)],
+      args: [this._intentToContract(intent), solverAddress],
     });
     return fee as bigint;
   }

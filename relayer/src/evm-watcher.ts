@@ -13,7 +13,7 @@
  * 2. It emits `Locked(bytes32 indexed intentHash, address indexed solver,
  *    address indexed user, address asset, uint256 amount)`.
  * 3. It calls `endpoint.send(params, refundAddress)` with the encoded
- *    `FillInstruction` payload (158 bytes) directed to the Stellar settlement
+ *    `FillInstruction` payload (227 bytes) directed to the Stellar settlement
  *    contract.
  *
  * The relayer must watch for `Locked` events and reconstruct the full
@@ -34,20 +34,21 @@
  * `Intent` struct is the first argument, so decoding the transaction input
  * gives every field needed to reconstruct `BridgeMessage`.
  *
- * ### FillInstruction binary layout (for reference)
+ * ### FillInstruction binary layout (canonical 227-byte format)
  * ```
  * offset  size  field
  * 0       1     PROTOCOL_VERSION (0x01)
  * 1       1     MSG_FILL_INSTRUCTION (0x01)
  * 2       32    intentHash
  * 34      4     stellarEid (uint32, big-endian)
- * 38      32    recipient (Stellar strkey, left-padded to 32 bytes)
- * 70      32    destAsset (asset id string, left-padded to 32 bytes)
- * 102     16    minDestAmount (uint128)
- * 118     8     deadline (uint64)
- * 126     32    solver (EVM address, right-padded to 32 bytes)
+ * 38      56    recipient (Stellar strkey, right-zero-padded)
+ * 94      69    destAsset (asset identifier string, right-zero-padded)
+ * 163     16    minDestAmount (uint128, non-negative)
+ * 179     8     deadline (uint64)
+ * 187     32    preferredSolver (EVM address, left-zero-padded)
+ * 219     8     reservationWindow (uint64, zero for legacy EVM intents)
  *         ───
- *         158   total bytes
+ *         227   total bytes
  * ```
  *
  * ## Nonce
@@ -85,7 +86,11 @@ import type { BridgeMessage, PendingMessage, EndpointId } from "./types.js";
  *   address indexed solver,
  *   address indexed user,
  *   address asset,
- *   uint256 amount
+ *   uint256 amount,
+ *   string destination,
+ *   string destAsset,
+ *   uint128 minDestAmount,
+ *   uint64 deadline
  * )
  */
 const LOCKED_EVENT_ABI = [
@@ -93,20 +98,26 @@ const LOCKED_EVENT_ABI = [
     type: "event",
     name: "Locked",
     inputs: [
-      { name: "intentHash", type: "bytes32", indexed: true },
-      { name: "solver",     type: "address", indexed: true },
-      { name: "user",       type: "address", indexed: true },
-      { name: "asset",      type: "address", indexed: false },
-      { name: "amount",     type: "uint256", indexed: false },
+      { name: "intentHash",    type: "bytes32", indexed: true },
+      { name: "solver",        type: "address", indexed: true },
+      { name: "user",          type: "address", indexed: true },
+      { name: "asset",         type: "address", indexed: false },
+      { name: "amount",        type: "uint256", indexed: false },
+      { name: "destination",   type: "string",  indexed: false },
+      { name: "destAsset",     type: "string",  indexed: false },
+      { name: "minDestAmount", type: "uint128", indexed: false },
+      { name: "deadline",      type: "uint64",  indexed: false },
     ],
   },
 ] as const;
 
 /**
  * ABI parameters for decoding the non-indexed `Locked` event data:
- *   (address asset, uint256 amount)
+ *   (address asset, uint256 amount, string destination, string destAsset, uint128 minDestAmount, uint64 deadline)
  */
-const LOCKED_DATA_PARAMS = parseAbiParameters("address asset, uint256 amount");
+const LOCKED_DATA_PARAMS = parseAbiParameters(
+  "address asset, uint256 amount, string destination, string destAsset, uint128 minDestAmount, uint64 deadline",
+);
 
 // ---------------------------------------------------------------------------
 // Config
@@ -200,16 +211,7 @@ export class EVMSourceWatcher implements SourceWatcher {
         if (log.blockNumber !== undefined && log.blockNumber !== null) {
           blocksWithMessages.add(Number(log.blockNumber));
         }
-      }
-
-      // Batch decode with concurrency-limited transaction fetches.
-      const pendingDecodings = logs.map((log) => this.decodeLockedLog(log));
-      const decodedMessages = await this._batchConcurrent(
-        pendingDecodings,
-        this.transactionFetchConcurrency,
-      );
-
-      for (const pending of decodedMessages) {
+        const pending = this.decodeLockedLog(log);
         if (pending !== null) {
           messages.push(pending);
         }
@@ -248,40 +250,18 @@ export class EVMSourceWatcher implements SourceWatcher {
     return msg.includes("range") || msg.includes("too large") || msg.includes("limit");
   }
 
-  private async _batchConcurrent<T>(
-    promises: Promise<T>[],
-    concurrency: number,
-  ): Promise<T[]> {
-    const results: T[] = [];
-    for (let i = 0; i < promises.length; i += concurrency) {
-      const batch = promises.slice(i, i + concurrency);
-      const batchResults = await Promise.allSettled(batch);
-      for (const result of batchResults) {
-        if (result.status === "fulfilled") {
-          results.push(result.value);
-        } else {
-          console.error("EVMSourceWatcher: error in concurrent batch", { err: result.reason });
-          results.push(null as any);
-        }
-      }
-    }
-    return results;
-  }
-
   /**
    * Decode a single `Locked` event log into a `PendingMessage`.
    *
    * Strategy:
    * 1. Extract indexed fields (`intentHash`, `solver`, `user`) from the log
    *    topics.
-   * 2. Decode non-indexed fields (`asset`, `amount`) from `log.data`.
-   * 3. Fetch the originating transaction and decode the `lock(intent, sig)`
-   *    calldata to obtain the full `Intent` struct fields (`destination`,
-   *    `destAsset`, `minDestAmount`, `deadline`).
-   * 4. Assemble a `BridgeMessage` and wrap it in a `PendingMessage`.
+   * 2. Decode non-indexed fields (`asset`, `amount`, `destination`, `destAsset`,
+   *    `minDestAmount`, `deadline`) directly from `log.data`.
+   * 3. Assemble a `BridgeMessage` and wrap it in a `PendingMessage`.
    */
-  private async decodeLockedLog(log: Log): Promise<PendingMessage | null> {
-    if (!log.transactionHash || !log.blockNumber) return null;
+  decodeLockedLog(log: Log): PendingMessage | null {
+    if (!log.blockNumber) return null;
 
     // --- Indexed topics ---
     // topics[0] = event sig, [1] = intentHash, [2] = solver, [3] = user
@@ -293,70 +273,18 @@ export class EVMSourceWatcher implements SourceWatcher {
     // user topic available for future use
 
     // --- Non-indexed data ---
-    // The data field is ABI-encoded (address asset, uint256 amount)
-    // but since asset is fixed-size and amount is fixed-size, we can
-    // use parseAbiParameters for a clean decode.
-    let _asset: string;
-    let _amount: bigint;
+    let destination: string;
+    let destAsset: string;
+    let minDestAmount: bigint;
     try {
-      const [asset, amount] = decodeAbiParameters(LOCKED_DATA_PARAMS, log.data as Hex);
-      _asset  = asset as string;
-      _amount = amount as bigint;
-    } catch {
-      return null;
-    }
-
-    // --- Fetch transaction and decode lock() calldata ---
-    const tx = await this.client.getTransaction({ hash: log.transactionHash });
-    if (!tx?.input || tx.input.length < 10) return null;
-
-    // lock(Intent,bytes) selector = first 4 bytes of keccak256("lock((address,string,uint256,address,uint256,string,uint256,uint256,uint256,address),bytes)")
-    // We skip selector (first 4 bytes) and decode the tuple + bytes.
-    // The calldata is: selector(4) + abi.encode(Intent tuple, bytes signature)
-    // We decode the tuple portion.
-    let intentFields: {
-      user: string;
-      destination: string;
-      sourceChainId: bigint;
-      sourceAsset: string;
-      sourceAmount: bigint;
-      destAsset: string;
-      minDestAmount: bigint;
-      deadline: bigint;
-      nonce: bigint;
-      preferredSolver: string;
-    };
-
-    try {
-      // Skip the 4-byte selector, then decode.
-      // The calldata encodes (Intent intent, bytes signature) as a tuple.
-      // abi.encode packs the Intent struct then the bytes offset+data.
-      // We use the full tuple ABI for the Intent struct:
-      const calldataWithoutSelector = ("0x" + tx.input.slice(10)) as Hex;
-
-      // Decode as (tuple Intent, bytes signature)
-      const decoded = decodeAbiParameters(
-        parseAbiParameters(
-          "(address user, string destination, uint256 sourceChainId, address sourceAsset, uint256 sourceAmount, string destAsset, uint256 minDestAmount, uint256 deadline, uint256 nonce, address preferredSolver) intent, bytes signature",
-        ),
-        calldataWithoutSelector,
+      const [, , dst, assetStr, minDest] = decodeAbiParameters(
+        LOCKED_DATA_PARAMS,
+        log.data as Hex,
       );
-
-      const intent = decoded[0] as typeof intentFields;
-      intentFields = {
-        user: intent.user,
-        destination: intent.destination,
-        sourceChainId: intent.sourceChainId,
-        sourceAsset: intent.sourceAsset,
-        sourceAmount: intent.sourceAmount,
-        destAsset: intent.destAsset,
-        minDestAmount: intent.minDestAmount,
-        deadline: intent.deadline,
-        nonce: intent.nonce,
-        preferredSolver: intent.preferredSolver,
-      };
+      destination = dst as string;
+      destAsset = assetStr as string;
+      minDestAmount = minDest as bigint;
     } catch {
-      // Calldata decode failed — possibly a different call or proxy wrapper.
       return null;
     }
 
@@ -372,15 +300,15 @@ export class EVMSourceWatcher implements SourceWatcher {
       intentHash: intentHash as Hex,
       messageType: "FillInstruction",
       solver: solver as Hex,
-      recipient: intentFields.destination,
-      destAsset: intentFields.destAsset,
-      amount: intentFields.minDestAmount.toString(),
+      recipient: destination,
+      destAsset: destAsset,
+      amount: minDestAmount.toString(),
       nonce,
     };
 
     return {
       message,
-      srcTxHash: log.transactionHash,
+      srcTxHash: log.transactionHash ?? "",
       srcBlock: Number(log.blockNumber),
     };
   }

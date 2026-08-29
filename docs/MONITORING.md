@@ -64,10 +64,15 @@ All EVM events are emitted from the escrow contract (`contracts/evm/src/Periheli
 - **Invariant:** Only after `FillConfirmed` verified; at most one `Released` per hash (`I2`)
 - **Action:** Confirm value conservation (locked ≥ released + refunded)
 
-#### `Refunded(hash: XDRHash, user: Address, amount: uint256, reason: String)`
-- **When:** User refunded via `cancelExpired()` (local timeout) or `lzReceive(RefundBridge)` (cancel path)
-- **Semantics:** Reason is `"local_timeout"` or `"bridge_cancel"`
-- **Action:** Verify refund matches source lock; flag if divergence
+#### `Refunded(intentHash: bytes32, user: address, amount: uint256, reason: uint8)`
+- **When:** `lzReceive()` processes cross-chain `CancelIntent` message from Soroban
+- **Semantics:** Cross-chain cancel succeeded and was confirmed by Stellar; funds returned to user
+- **Action:** Verify reason code matches Soroban cancellation; link to source lock
+
+#### `RefundedLocalTimeout(intentHash: bytes32, user: address, amount: uint256)`
+- **When:** User or keeper calls `cancelExpired()` on EVM after `deadline + confirmationGrace`
+- **Semantics:** Local timeout fallback; cross-chain message failed to complete within grace period
+- **Action:** Alert on anomalous bridge or relayer activity; investigate messaging failure or solver abandonment
 
 #### `MessageReceived(hash: XDRHash, messageType: String, srcChain: String)`
 - **When:** `lzReceive()` processes any inbound LayerZero message
@@ -159,14 +164,15 @@ These indicate anomalies that require investigation but may have benign explanat
   - If unscheduled, escalate immediately (unauthorized upgrade)
   - Broadcast notification to monitoring subscribers
 
-#### Alert H4: Elevated Refund Rate
-- **Condition:** `∑(Refunded) / ∑(Locked)` exceeds threshold for time window
+#### Alert H4: Elevated Refund Rate & Local-Timeout Detection (`RefundedLocalTimeout`)
+- **Condition:** Any `RefundedLocalTimeout` event log detected, or `∑(Refunded + RefundedLocalTimeout) / ∑(Locked)` exceeds threshold for time window
+  - Local-timeout event topic: `RefundedLocalTimeout(bytes32,address,uint256)`
   - Recommend: threshold = 5%, time window = 1 hour
-- **Trigger:** Rate > threshold for rolling window
+- **Why it matters:** `Refunded` means the cross-chain unwind succeeded normally via Stellar. `RefundedLocalTimeout` means the cross-chain path failed to complete within the grace period (relayer down, DVN degraded, or solver abandoned fill).
+- **Trigger:** Immediate alert on `RefundedLocalTimeout` log filter, or rate > threshold for rolling window
 - **Action:**
-  - Check if deadline passed (batch refunds) or relayer is down
-  - If relayer is down, restart it
-  - If deadline is current, may be normal (end of epoch)
+  - Check if relayer or DVN is down and restart if needed
+  - Check if destination chain message delivery is stuck
   - If rate remains elevated, escalate (possible attack or griefing)
 
 #### Alert H5: Timelock Revoke/Re-confirm Griefing (issue #283)

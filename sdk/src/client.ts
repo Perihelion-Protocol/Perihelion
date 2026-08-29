@@ -10,9 +10,12 @@
 import type { TypedDataDomain, WalletClient } from "viem";
 import { hashIntent, INTENT_TYPES, perihelionDomain, toMessage } from "./intent.js";
 import {
+  PerihelionError,
   PerihelionHashMismatchError,
   PerihelionHttpError,
+  PerihelionNetworkError,
   PerihelionTimeoutError,
+  PerihelionValidationError,
 } from "./errors.js";
 import { parseIntentRecord, parseIntentRecordArray } from "./validate.js";
 import type {
@@ -45,7 +48,25 @@ export interface ClientOptions {
   readonly fetch?: typeof fetch;
 }
 
-/** Thin client over a Perihelion mempool endpoint. */
+export interface ListPendingPageResult {
+  /** Intent records returned in this page. */
+  readonly records: IntentRecord[];
+  /** Continuation cursor to fetch the subsequent page, or undefined if this was the last page. */
+  readonly nextCursor?: string;
+}
+
+/**
+ * Thin client over a Perihelion mempool endpoint.
+ *
+ * ## Retry Policy Summary
+ * - **Writes ({@link submitIntent}, {@link reportStatus})**: Do NOT retry automatically.
+ *   `submitIntent` is non-idempotent from the server's perspective (duplicate submissions return HTTP 409).
+ * - **Reads ({@link getIntent}, {@link listPending}, {@link listPendingPage})**: Retry transient failures
+ *   (network connection errors and 5xx HTTP responses) up to `maxRetries` times with exponential backoff.
+ *   Timeouts and caller-initiated aborts are never retried.
+ * - **Polling ({@link waitForSettlement})**: Repeatedly calls {@link getIntent} until a terminal status
+ *   (`settled`, `refunded`, `expired`) is reached or `timeoutMs` elapses.
+ */
 export class PerihelionClient {
   private readonly base: string;
   private readonly fetchImpl: typeof fetch;
@@ -63,7 +84,7 @@ export class PerihelionClient {
 
   private get domain(): TypedDataDomain {
     if (this.opts.chainId == null || this.opts.verifyingContract == null) {
-      throw new Error(
+      throw new PerihelionValidationError(
         "[Perihelion] chainId and verifyingContract are required for signing",
       );
     }
@@ -76,7 +97,7 @@ export class PerihelionClient {
     intent: Intent,
   ): Promise<SignedIntent> {
     const account = wallet.account;
-    if (!account) throw new Error("wallet client has no account");
+    if (!account) throw new PerihelionValidationError("wallet client has no account");
     const signature = (await wallet.signTypedData({
       account,
       domain: this.domain,
@@ -90,19 +111,54 @@ export class PerihelionClient {
   /**
    * Submit a signed intent to the mempool. Returns its hash (id).
    *
+   * **Retry policy**: Does NOT retry automatically. Mempool intent submissions
+   * are non-idempotent from the server's perspective; duplicate submissions return HTTP 409.
+   *
    * The locally-computed `signed.hash` is treated as authoritative. If the
    * server echoes a different hash, {@link PerihelionHashMismatchError} is thrown.
+   *
+   * @throws {@link PerihelionHttpError} on non-2xx responses (e.g. 400 validation, 409 conflict).
+   * @throws {@link PerihelionTimeoutError} if the request exceeds `requestTimeoutMs`.
+   * @throws {@link PerihelionNetworkError} on network / transport failure.
+   * @throws {@link PerihelionHashMismatchError} if the server returns a different hash.
    */
   async submitIntent(signed: SignedIntent): Promise<Hex> {
-    const res = await this.fetchWithTimeout(`${this.base}/intents`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(signed),
-    });
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(`${this.base}/intents`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(signed),
+      });
+    } catch (e) {
+      if (e instanceof PerihelionError) throw e;
+      if (isTimeoutError(e)) {
+        throw new PerihelionTimeoutError(
+          `[Perihelion] submitIntent timed out after ${this.requestTimeoutMs}ms`,
+          signed.hash,
+          undefined,
+          { cause: e },
+        );
+      }
+      throw new PerihelionNetworkError(
+        `[Perihelion] submitIntent network error: ${e instanceof Error ? e.message : String(e)}`,
+        "submitIntent",
+        { cause: e },
+      );
+    }
     if (!res.ok) {
       throw new PerihelionHttpError("submitIntent", res.status, await res.text());
     }
-    const body = (await res.json()) as { hash?: Hex };
+    let body: { hash?: Hex };
+    try {
+      body = (await res.json()) as { hash?: Hex };
+    } catch (e) {
+      throw new PerihelionNetworkError(
+        `[Perihelion] submitIntent failed to parse response: ${e instanceof Error ? e.message : String(e)}`,
+        "submitIntent",
+        { cause: e },
+      );
+    }
     if (body.hash && body.hash.toLowerCase() !== signed.hash.toLowerCase()) {
       throw new PerihelionHashMismatchError(signed.hash, body.hash);
     }
@@ -113,34 +169,140 @@ export class PerihelionClient {
    * Report a status transition for an intent (e.g. `"claimed"`, `"settled"`).
    * Restricted server-side to holders of the mempool's shared status token —
    * intended for relayer/solver services, not end users.
+   *
+   * **Retry policy**: Does NOT retry automatically (PATCH updates intent state).
+   *
+   * @throws {@link PerihelionHttpError} on non-2xx responses (401 unauthorized, 404 not found, 409 conflict).
+   * @throws {@link PerihelionTimeoutError} if the request exceeds `requestTimeoutMs`.
+   * @throws {@link PerihelionNetworkError} on network / transport failure.
    */
   async reportStatus(hash: Hex, status: IntentStatus, statusToken: string): Promise<void> {
-    const res = await this.fetchWithTimeout(`${this.base}/intents/${hash}/status`, {
-      method: "PATCH",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${statusToken}`,
-      },
-      body: JSON.stringify({ status }),
-    });
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(`${this.base}/intents/${hash}/status`, {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${statusToken}`,
+        },
+        body: JSON.stringify({ status }),
+      });
+    } catch (e) {
+      if (e instanceof PerihelionError) throw e;
+      if (isTimeoutError(e)) {
+        throw new PerihelionTimeoutError(
+          `[Perihelion] reportStatus timed out for ${hash} after ${this.requestTimeoutMs}ms`,
+          hash,
+          undefined,
+          { cause: e },
+        );
+      }
+      throw new PerihelionNetworkError(
+        `[Perihelion] reportStatus network error for ${hash}: ${e instanceof Error ? e.message : String(e)}`,
+        "reportStatus",
+        { cause: e },
+      );
+    }
     if (!res.ok) {
       throw new PerihelionHttpError("reportStatus", res.status, await res.text());
     }
   }
 
-  /** Fetch the current record for an intent by its hash. */
+  /**
+   * Fetch the current record for an intent by its hash.
+   *
+   * **Retry policy**: Retries transient failures (network errors and 5xx HTTP responses)
+   * up to `maxRetries` times with exponential backoff. Aborts and timeouts are never retried.
+   *
+   * @throws {@link PerihelionHttpError} on non-2xx responses (e.g. 404 not found).
+   * @throws {@link PerihelionTimeoutError} if the request exceeds `requestTimeoutMs`.
+   * @throws {@link PerihelionNetworkError} on non-retryable network failure.
+   */
   async getIntent(hash: Hex, signal?: AbortSignal): Promise<IntentRecord> {
-    const res = await this.fetchWithRetry(`${this.base}/intents/${hash}`, {}, signal);
+    const res = await this.fetchWithRetry("getIntent", `${this.base}/intents/${hash}`, {}, signal);
     if (!res.ok) {
       throw new PerihelionHttpError("getIntent", res.status, await res.text());
     }
-    return parseIntentRecord(await res.json());
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch (e) {
+      throw new PerihelionNetworkError(
+        `[Perihelion] getIntent failed to parse JSON: ${e instanceof Error ? e.message : String(e)}`,
+        "getIntent",
+        { cause: e },
+      );
+    }
+    return parseIntentRecord(json);
+  }
+
+  /**
+   * Fetch a single page of intents filtered by status, returning records and
+   * an optional `nextCursor` for pagination.
+   *
+   * **Retry policy**: Retries transient failures (network errors and 5xx HTTP responses)
+   * up to `maxRetries` times with exponential backoff.
+   *
+   * @throws {@link PerihelionHttpError} on non-2xx responses (e.g. 400 invalid status).
+   * @throws {@link PerihelionTimeoutError} if the request exceeds `requestTimeoutMs`.
+   * @throws {@link PerihelionNetworkError} on non-retryable network failure.
+   */
+  async listPendingPage(
+    status: IntentStatus = "pending",
+    cursor?: string,
+    limit?: number,
+  ): Promise<ListPendingPageResult> {
+    const qs = new URLSearchParams({ status });
+    if (cursor) qs.set("cursor", cursor);
+    if (limit != null) qs.set("limit", String(limit));
+    const url = `${this.base}/intents?${qs}`;
+
+    const res = await this.fetchWithRetry("listPendingPage", url, {});
+    if (!res.ok) {
+      throw new PerihelionHttpError("listPendingPage", res.status, await res.text());
+    }
+
+    let body: { records?: unknown; nextCursor?: unknown };
+    try {
+      body = (await res.json()) as { records?: unknown; nextCursor?: unknown };
+    } catch (e) {
+      throw new PerihelionNetworkError(
+        `[Perihelion] listPendingPage failed to parse response: ${e instanceof Error ? e.message : String(e)}`,
+        "listPendingPage",
+        { cause: e },
+      );
+    }
+    return {
+      records: parseIntentRecordArray(body.records),
+      nextCursor: typeof body.nextCursor === "string" ? body.nextCursor : undefined,
+    };
+  }
+
+  /**
+   * Async generator that yields pages of intent records one by one, following
+   * `nextCursor` until no further pages remain.
+   *
+   * **Retry policy**: Each page request retries transient failures up to `maxRetries` times.
+   */
+  async *listPendingPages(
+    status: IntentStatus = "pending",
+    limit?: number,
+  ): AsyncGenerator<IntentRecord[], void, unknown> {
+    let cursor: string | undefined;
+    do {
+      const page: ListPendingPageResult = await this.listPendingPage(status, cursor, limit);
+      yield page.records;
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
   }
 
   /**
    * List intents filtered by status, following pagination cursors until all
    * pages are exhausted. Defaults to `"pending"`, which is the primary solver
    * use-case.
+   *
+   * **Retry policy**: Retries each page request up to `maxRetries` times on
+   * transient network errors and 5xx server responses.
    *
    * The server caps each page at `DEFAULT_LIST_LIMIT` (100) records and
    * returns a `nextCursor` when more remain. This method accumulates all pages
@@ -149,7 +311,7 @@ export class PerihelionClient {
    * misbehaving server from looping the client forever.
    *
    * For callers that need explicit pagination control (e.g. a solver that wants
-   * to rate-limit its own page fetches), use {@link listPendingPage} directly.
+   * to rate-limit its own page fetches), use {@link listPendingPage} or {@link listPendingPages} directly.
    */
   async listPending(
     status: IntentStatus = "pending",
@@ -160,20 +322,9 @@ export class PerihelionClient {
     let pages = 0;
 
     do {
-      const qs = new URLSearchParams({ status });
-      if (cursor) qs.set("cursor", cursor);
-      const url = `${this.base}/intents?${qs}`;
-
-      const res = await this.fetchWithRetry(url, {});
-      if (!res.ok) {
-        throw new PerihelionHttpError("listPending", res.status, await res.text());
-      }
-
-      const body = (await res.json()) as { records?: unknown; nextCursor?: unknown };
-      const page = parseIntentRecordArray(body.records);
-      all.push(...page);
-
-      cursor = typeof body.nextCursor === "string" ? body.nextCursor : undefined;
+      const page = await this.listPendingPage(status, cursor);
+      all.push(...page.records);
+      cursor = page.nextCursor;
       pages++;
     } while (cursor !== undefined && pages < maxPages);
 
@@ -183,6 +334,10 @@ export class PerihelionClient {
   /**
    * Poll until the intent reaches a terminal state (`settled`, `refunded`, or
    * `expired`) or the timeout elapses.
+   *
+   * **Retry policy**: Repeatedly polls {@link getIntent} at configured `intervalMs`.
+   * Each poll attempt inherits `getIntent`'s retry policy for transient errors,
+   * but the total elapsed polling time is strictly bounded by `timeoutMs`.
    *
    * The `timeoutMs` deadline is wired directly into each `getIntent` request's
    * abort signal, so a hung network call cannot block past the outer deadline.
@@ -224,11 +379,12 @@ export class PerihelionClient {
       try {
         record = await this.getIntent(hash, signal);
       } catch (e) {
-        if (isAbortError(e)) {
+        if (isAbortError(e) || e instanceof PerihelionTimeoutError) {
           throw new PerihelionTimeoutError(
             `[Perihelion] waitForSettlement timed out for ${hash} (last status: ${lastStatus ?? "unknown"})`,
             hash,
             lastStatus,
+            { cause: e },
           );
         }
         throw e;
@@ -308,6 +464,7 @@ export class PerihelionClient {
    * so the outer deadline wins over the per-attempt timeout.
    */
   private async fetchWithRetry(
+    operation: string,
     url: string,
     init: RequestInit,
     externalSignal?: AbortSignal,
@@ -323,7 +480,30 @@ export class PerihelionClient {
       try {
         res = await this.fetchImpl(url, { ...init, signal });
       } catch (e) {
-        if (isAbortError(e) || attempt >= this.maxRetries) throw e;
+        if (isAbortError(e)) {
+          if (isTimeoutError(e)) {
+            throw new PerihelionTimeoutError(
+              `[Perihelion] ${operation} timed out after ${this.requestTimeoutMs}ms`,
+              undefined,
+              undefined,
+              { cause: e },
+            );
+          }
+          if (e instanceof PerihelionError) throw e;
+          throw new PerihelionNetworkError(
+            `[Perihelion] ${operation} aborted: ${e instanceof Error ? e.message : String(e)}`,
+            operation,
+            { cause: e },
+          );
+        }
+        if (attempt >= this.maxRetries) {
+          if (e instanceof PerihelionError) throw e;
+          throw new PerihelionNetworkError(
+            `[Perihelion] ${operation} network error: ${e instanceof Error ? e.message : String(e)}`,
+            operation,
+            { cause: e },
+          );
+        }
         await sleep(backoff(attempt++));
         continue;
       }
@@ -347,8 +527,21 @@ function backoff(attempt: number): number {
   return Math.min(100 * 2 ** attempt, 5_000);
 }
 
+function isTimeoutError(e: unknown): boolean {
+  if (e instanceof PerihelionTimeoutError) return true;
+  if (e instanceof Error) {
+    if (e.name === "TimeoutError") return true;
+    if (e.name === "AbortError" && e.message?.toLowerCase().includes("timed out")) return true;
+  }
+  return false;
+}
+
 function isAbortError(e: unknown): boolean {
-  return e instanceof Error && e.name === "AbortError";
+  if (e instanceof PerihelionTimeoutError) return true;
+  if (e instanceof Error) {
+    return e.name === "AbortError" || e.name === "TimeoutError";
+  }
+  return false;
 }
 
 /**

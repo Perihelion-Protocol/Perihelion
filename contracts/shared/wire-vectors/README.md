@@ -139,3 +139,5 @@ FillInstruction, never decodes it, so rejection is a Soroban-side concern).
 | ---- | ------ | -------- | -------------- |
 | `fill_instruction_short.hex` | 218 | Last byte removed | `MalformedPayload` (length) |
 | `fill_instruction_long.hex` | 220 | Extra `0x00` appended | `MalformedPayload` (length) |
+| `fill_instruction_bad_version.hex` | 219 | `version` changed from `0x01` to `0x02` | `MalformedPayload` (version) |
+| `fill_instruction_bad_type.hex` | 219 | `type` changed from `0x01` to `0x04` | `UnknownMessageType` / `MalformedPayload` |

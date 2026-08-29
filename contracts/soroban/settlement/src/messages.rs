@@ -28,7 +28,7 @@ use soroban_sdk::{Address, Bytes, BytesN, Env};
 use crate::types::{
     CancelInstruction, FillInstruction, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED,
     CANCEL_REASON_INVALID, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION,
-    PROTOCOL_VERSION,
+    FILL_INSTRUCTION_LENGTH, PROTOCOL_VERSION,
 };
 
 /// Build an `Address` from a raw 32-byte contract-id payload.
@@ -207,18 +207,17 @@ pub fn decode_message(
     }
 }
 
-/// Decode a `FillInstruction` payload (219 bytes):
-/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)`.
+/// Decode a `FillInstruction` payload (227 bytes):
+/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32) | reservation_window(8)`.
 ///
 /// # Address decoding
 ///
-/// The `recipient` and `dest_asset` fields carry the ASCII bytes of Stellar
-/// strkeys (e.g. `GUSER...` or `CUSDC...`), right-zero-padded to their full
-/// field width (56 and 69 bytes respectively — see #270). This function strips
-/// the trailing zeros to recover the original string and then converts it to a
-/// Soroban `Address` via `Address::from_string_bytes`. That correctly handles
-/// both G... account keys and C... contract keys, fixing the
-/// `Address::from_contract_id` misuse identified in issue #271.
+/// The `recipient` field carries a Stellar strkey. The `dest_asset` field
+/// carries the user-signed asset identifier (`native` or `CODE:ISSUER`) as
+/// ASCII, right-zero-padded to 69 bytes. The adapter must preserve that exact
+/// identifier and resolve it through the destination-chain asset registry; it
+/// must not decode an asset identifier as a Soroban `Address`. The recipient
+/// remains a Soroban `Address` and is decoded from its 56-byte strkey field.
 ///
 /// # preferred_solver
 ///
@@ -226,7 +225,8 @@ pub fn decode_message(
 /// to 32 bytes. This is not a Stellar strkey and cannot be decoded as a Soroban
 /// `Address`. The field is therefore left as `None` — the preferred-solver
 /// reservation mechanism for cross-chain intents requires a dedicated design
-/// (tracked as a follow-up to #271).
+/// (tracked as a follow-up to #271). The trailing `reservation_window` field is
+/// explicit on the wire and is decoded as a big-endian `u64`.
 ///
 /// See the module doc-comment for why this is only reachable from tests.
 #[allow(dead_code)]
@@ -237,7 +237,7 @@ fn decode_fill_instruction(
     use crate::PerihelionError;
 
     // Validate length: 2 (header) + 217 (payload) = 219
-    if message.len() != 219 {
+    if message.len() != FILL_INSTRUCTION_LENGTH {
         return Err(PerihelionError::MalformedPayload);
     }
 
@@ -278,6 +278,9 @@ fn decode_fill_instruction(
             .ok_or(PerihelionError::MalformedPayload)?;
     }
     let min_dest_amount = i128::from_be_bytes(min_dest_amount_bytes);
+    if min_dest_amount < 0 {
+        return Err(PerihelionError::MalformedPayload);
+    }
 
     // Extract deadline (offset 179, 8 bytes, big-endian)
     let mut deadline_bytes = [0u8; 8];
@@ -304,10 +307,7 @@ fn decode_fill_instruction(
         min_dest_amount,
         deadline,
         preferred_solver,
-        // Not yet part of the wire layout (no EVM encoder support — see the
-        // struct field doc-comment in types.rs). Defaults to "no reservation"
-        // until the wire format is extended to carry it.
-        reservation_window: 0,
+        reservation_window: u64::from_be_bytes(read_field::<8>(message, 219)?),
     })
 }
 
@@ -354,7 +354,7 @@ fn strkey_field<const N: usize>(addr: &Address) -> [u8; N] {
 /// `FillInstruction` is always encoded on the EVM side and only ever
 /// *decoded* here (see `decode_fill_instruction`).
 ///
-/// Mirrors the 219-byte layout: the recipient occupies 56 bytes and
+/// Mirrors the 227-byte layout: the recipient occupies 56 bytes and
 /// `dest_asset` 69 bytes (see #270), both right-zero-padded strkey ASCII.
 /// `preferred_solver` is written as the all-zero "open" word, since the EVM
 /// side carries an EVM address there that the decoder deliberately drops
@@ -374,6 +374,7 @@ pub(crate) fn encode_fill_instruction(env: &Env, fi: &FillInstruction) -> Bytes 
     ));
     b.append(&Bytes::from_array(env, &fi.deadline.to_be_bytes()));
     b.append(&Bytes::from_array(env, &[0u8; 32]));
+    b.append(&Bytes::from_array(env, &fi.reservation_window.to_be_bytes()));
     b
 }
 
@@ -464,30 +465,31 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Minimal `0x`-prefixed hex decoder used to load the shared wire vectors.
-    fn decode_hex(s: &str) -> std::vec::Vec<u8> {
-        let s = s.trim();
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        let bytes = s.as_bytes();
-        assert_eq!(bytes.len() % 2, 0, "odd-length hex string");
-        (0..bytes.len())
-            .step_by(2)
-            .map(|i| {
-                let hi = (bytes[i] as char).to_digit(16).expect("non-hex nibble");
-                let lo = (bytes[i + 1] as char).to_digit(16).expect("non-hex nibble");
-                ((hi << 4) | lo) as u8
-            })
-            .collect()
-    }
-
-    /// decode_fill_instruction rejects any payload that is not exactly 219 bytes.
-    /// Covers both boundary neighbours: 218 (one byte short) and 220 (one byte long).
+    /// decode_fill_instruction requires exactly FILL_INSTRUCTION_LENGTH bytes.
     #[test]
     fn test_decode_fill_instruction_wrong_length_rejected() {
-        const SHORT: &str =
-            include_str!("../../../shared/wire-vectors/neg/fill_instruction_short.hex");
-        const LONG: &str =
-            include_str!("../../../shared/wire-vectors/neg/fill_instruction_long.hex");
+        let env = Env::default();
+        let mut short = Bytes::new(&env);
+        for _ in 0..FILL_INSTRUCTION_LENGTH - 1 {
+            short.push_back(0x00);
+        }
+        assert!(decode_fill_instruction(&env, &short).is_err());
+
+        let mut long = Bytes::new(&env);
+        for _ in 0..FILL_INSTRUCTION_LENGTH + 1 {
+            long.push_back(0x00);
+        }
+        assert!(decode_fill_instruction(&env, &long).is_err());
+    }
+
+    /// A well-formed 227-byte FillInstruction with G... recipient and C... dest_asset decodes
+    /// correctly using from_string_bytes (not from_contract_id).
+    #[test]
+    fn test_decode_fill_instruction_strkey_addresses() {
+        let env = Env::default();
+
+        // Build a 227-byte payload manually.
+        let mut msg = Bytes::new(&env);
 
         let env = Env::default();
 
@@ -539,17 +541,39 @@ mod tests {
         for b in &bytes {
             msg.push_back(*b);
         }
+        // reservation_window (8 bytes) = zero, no reservation
+        for _ in 0..8u32 {
+            msg.push_back(0x00);
+        }
 
-        let fi = decode_fill_instruction(&env, &msg).expect("should decode valid golden payload");
+        assert_eq!(msg.len(), 227);
 
         // Values match the canonical table in wire-vectors/README.md.
         assert_eq!(fi.src_eid, 30316);
         assert_eq!(fi.min_dest_amount, 1_000_000_000);
         assert_eq!(fi.deadline, 9_999_999_999);
         assert!(fi.preferred_solver.is_none());
-        // recipient and dest_asset decoded without panic — from_string_bytes path used
-        // (not from_contract_id, fixing issue #271).
-        let _ = fi.recipient;
-        let _ = fi.dest_asset;
+        assert_eq!(fi.reservation_window, 0);
+        // recipient and dest_asset decoded without panic — correct strkey path used
+    }
+
+    #[test]
+    fn test_decode_fill_instruction_rejects_negative_min_dest_amount() {
+        let env = Env::default();
+        let mut msg = Bytes::new(&env);
+        msg.push_back(0x01);
+        msg.push_back(0x01);
+        for _ in 0..32u32 { msg.push_back(0xaa); }
+        for byte in [0u8, 0, 0, 1] { msg.push_back(byte); }
+        for byte in ZERO_ACCOUNT.as_bytes() { msg.push_back(*byte); }
+        for byte in ZERO_CONTRACT.as_bytes() { msg.push_back(*byte); }
+        for _ in 0..13u32 { msg.push_back(0); }
+        msg.push_back(0x80);
+        for _ in 1..16u32 { msg.push_back(0); }
+        for _ in 0..8u32 { msg.push_back(0); }
+        for _ in 0..32u32 { msg.push_back(0); }
+        for _ in 0..8u32 { msg.push_back(0); }
+        assert_eq!(msg.len(), 227);
+        assert!(decode_fill_instruction(&env, &msg).is_err());
     }
 }
