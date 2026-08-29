@@ -39,6 +39,25 @@ The Soroban decoder strips trailing zeros from the `recipient` and `dest_asset`
 fields to recover the strkey string, then converts it to a native `Address` via
 `Address::from_string_bytes` (issue #271).
 
+### Byte layout
+
+| Field              | Byte offset | Width (bytes) | Encoding                                         | Consumer     |
+| ------------------ | ----------- | ------------- | ------------------------------------------------ | ------------ |
+| `version`          | 0           | 1             | Unsigned integer; must equal `0x01`              | Both sides   |
+| `type`             | 1           | 1             | Unsigned integer; `0x01` = FillInstruction       | Both sides   |
+| `intent_hash`      | 2           | 32            | Raw bytes (EIP-712 keccak256 hash)               | Soroban      |
+| `src_eid`          | 34          | 4             | Big-endian `u32`                                 | Soroban      |
+| `recipient`        | 38          | 56            | ASCII strkey (`G...` or `C...`), right-zero-padded | Soroban    |
+| `dest_asset`       | 94          | 69            | ASCII strkey or `CODE:ISSUER` string, right-zero-padded | Soroban |
+| `min_dest_amount`  | 163         | 16            | Big-endian `u128`                                | Soroban      |
+| `deadline`         | 179         | 8             | Big-endian `u64` (Unix timestamp, seconds)       | Soroban      |
+| `preferred_solver` | 187         | 32            | EVM address left-padded to 32 bytes; all zeros = "open" | Soroban (dropped) |
+
+**Total: 219 bytes.** All integer fields are big-endian. The `recipient` and
+`dest_asset` fields contain ASCII characters — not raw key material — and are
+decoded by stripping trailing zero bytes and calling `Address::from_string_bytes`
+on the resulting string.
+
 The canonical inputs below produce the strkeys by encoding the raw byte arrays
 via the Stellar SEP-0023 base32 algorithm. Specifically, `[0xBB; 32]` encodes
 to `CC53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53WQD5` and `[0xCC; 32]`
