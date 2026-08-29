@@ -157,6 +157,17 @@ cast send $TIMELOCK "execute(address,uint256,bytes,bytes32)" $ESCROW 0 $ACCEPT $
 Any subsequent EVM admin change (peer rotation, grace, unpause) follows this
 same four-step pattern, just with different calldata.
 
+### 4.4 Record the deployment
+
+There is no automated sync between a deployment and the SDK. In the same PR:
+
+- Add `chainId → $ESCROW` to `DEPLOYMENTS` in `sdk/src/deployments.ts`.
+- Record the chain, address, and deployment commit in the table below.
+
+| Chain | Chain ID | Escrow address | Deployed |
+| ----- | -------- | --------------- | -------- |
+| —     | —        | —                | —        |
+
 ---
 
 ## 5. Soroban deployment

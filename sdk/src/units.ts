@@ -18,15 +18,28 @@
  * toSmallestUnits("0.99", 7)
  */
 
+/** Upper bound on `decimals`, generous for any real asset but small enough to rule out unbounded BigInt exponentiation. */
+const MAX_DECIMALS = 36;
+
+/** Reject a `decimals` argument that is not a small non-negative integer. */
+function assertValidDecimals(decimals: number, fn: string): void {
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_DECIMALS) {
+    throw new Error(
+      `${fn}: decimals must be an integer between 0 and ${MAX_DECIMALS}, got ${decimals}`,
+    );
+  }
+}
+
 /**
  * Convert a human-readable amount string to its smallest-unit integer string.
  *
  * @param human    Decimal amount, e.g. `"1.5"` or `"100"`.
  * @param decimals Number of decimal places for the asset (e.g. 6 for EVM USDC, 7 for Stellar USDC).
  * @returns Smallest-unit amount as a decimal string, e.g. `"1500000"`.
- * @throws If `human` is not a valid non-negative decimal number.
+ * @throws If `human` is not a valid non-negative decimal number, or `decimals` is not an integer in `[0, 36]`.
  */
 export function toSmallestUnits(human: string, decimals: number): string {
+  assertValidDecimals(decimals, "toSmallestUnits");
   if (!/^\d+(\.\d+)?$/.test(human.trim())) {
     throw new Error(`toSmallestUnits: invalid amount "${human}"`);
   }
@@ -49,8 +62,10 @@ export function toSmallestUnits(human: string, decimals: number): string {
  * @param smallest Smallest-unit amount string, e.g. `"1500000"`.
  * @param decimals Number of decimal places for the asset.
  * @returns Human-readable string, e.g. `"1.5"`.
+ * @throws If `decimals` is not an integer in `[0, 36]`.
  */
 export function fromSmallestUnits(smallest: string, decimals: number): string {
+  assertValidDecimals(decimals, "fromSmallestUnits");
   const n = BigInt(smallest);
   const factor = 10n ** BigInt(decimals);
   const whole = n / factor;
