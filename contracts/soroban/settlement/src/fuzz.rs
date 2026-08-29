@@ -428,6 +428,40 @@ mod tests {
     /// Regression: the 220-byte FillInstruction negative vector must be rejected
     /// by the Soroban decoder with MalformedPayload (length check: expects 219).
     #[test]
+    fn fill_instruction_bad_version_neg_vector_is_rejected() {
+        const BAD_VERSION: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_bad_version.hex");
+        let env = Env::default();
+        let bytes = decode_hex(BAD_VERSION);
+        assert_eq!(bytes.len(), 219);
+        let mut payload = Bytes::new(&env);
+        for b in bytes {
+            payload.push_back(b);
+        }
+        assert!(
+            crate::messages::decode_message(&env, &payload).is_err(),
+            "decoder must reject a FillInstruction with an unknown version"
+        );
+    }
+
+    #[test]
+    fn fill_instruction_bad_type_neg_vector_is_rejected() {
+        const BAD_TYPE: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_bad_type.hex");
+        let env = Env::default();
+        let bytes = decode_hex(BAD_TYPE);
+        assert_eq!(bytes.len(), 219);
+        let mut payload = Bytes::new(&env);
+        for b in bytes {
+            payload.push_back(b);
+        }
+        assert!(
+            crate::messages::decode_message(&env, &payload).is_err(),
+            "decoder must reject an unknown FillInstruction message type"
+        );
+    }
+
+    #[test]
     fn fill_instruction_long_neg_vector_is_rejected() {
         const LONG: &str =
             include_str!("../../../shared/wire-vectors/neg/fill_instruction_long.hex");
