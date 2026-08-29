@@ -19,19 +19,16 @@ on:
 # Cancel in-progress runs on the same branch/PR.
 env:
   # Keep in step with .github/workflows/evm.yml and CONTRIBUTING.md.
-  FOUNDRY_VERSION: stable
+  FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
   # Soroban CLI and SDK versions must match major versions
   SOROBAN_CLI_VERSION: "22.0.0"
+  FOUNDRY_PROFILE: ci
+  
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  # Keep in step with .github/workflows/evm.yml and CONTRIBUTING.md.
-  FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
-  FOUNDRY_PROFILE: ci
-
+  
 jobs:
   differential-fuzz-evm:
     name: EVM Differential Fuzzing
