@@ -76,6 +76,31 @@ export class PerihelionValidationError extends PerihelionError {
 }
 
 /**
+ * Thrown when an intent fails field-level validation in `validateIntent` or
+ * `buildIntent`. Extends {@link PerihelionValidationError} so callers can
+ * catch either the specific type or the broader validation superclass.
+ *
+ * `field` names the first intent field that failed; `message` describes the
+ * constraint that was violated.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   validateIntent(params);
+ * } catch (e) {
+ *   if (e instanceof IntentValidationError) {
+ *     console.error(`Intent field '${e.field}' is invalid: ${e.message}`);
+ *   }
+ * }
+ * ```
+ */
+export class IntentValidationError extends PerihelionValidationError {
+  constructor(field: string, message: string, options?: ErrorOptions) {
+    super(message, field, options);
+  }
+}
+
+/**
  * Thrown when the mempool returns a hash that does not match the locally-computed
  * hash. This indicates a server bug or tampering attempt.
  */

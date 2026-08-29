@@ -10,6 +10,8 @@ import {
   DEFAULT_V_MIN,
   hashIntent,
   I128_MAX,
+  MAX_DEADLINE_HORIZON,
+  MAX_DEADLINE_HORIZON_SEC,
   MAX_DESTINATION_LEN,
   MAX_DEST_ASSET_LEN,
   perihelionDomain,
@@ -21,7 +23,7 @@ import {
 import { PerihelionClient } from "../src/client.js";
 import { toSmallestUnits, fromSmallestUnits } from "../src/units.js";
 import { isStellarAddress, isStellarAsset } from "../src/stellar.js";
-import { PerihelionValidationError } from "../src/errors.js";
+import { PerihelionValidationError, IntentValidationError } from "../src/errors.js";
 
 const PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const account = privateKeyToAccount(PK);
@@ -817,5 +819,273 @@ test("#524 validateIntent rejects a destAsset with a lowercase issuer code char-
         deadline: FUTURE_DEADLINE,
       }),
     PerihelionValidationError
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Issue #522 — IntentValidationError is instanceof PerihelionError
+// ---------------------------------------------------------------------------
+
+test("#522 validateIntent throws IntentValidationError for invalid user", () => {
+  const params = { ...sampleParams(), user: "not-an-address" as unknown as `0x${string}` };
+  let caught: unknown;
+  try {
+    validateIntent(params);
+  } catch (e) {
+    caught = e;
+  }
+  assert.ok(caught instanceof IntentValidationError, "should be IntentValidationError");
+  assert.ok(caught instanceof PerihelionValidationError, "should be PerihelionValidationError");
+  assert.equal((caught as IntentValidationError).field, "user");
+});
+
+test("#522 validateIntent throws IntentValidationError for invalid destination", () => {
+  const params = { ...sampleParams(), destination: "NOTASTELLARADDRESS" };
+  let caught: unknown;
+  try {
+    validateIntent(params);
+  } catch (e) {
+    caught = e;
+  }
+  assert.ok(caught instanceof IntentValidationError);
+  assert.equal((caught as IntentValidationError).field, "destination");
+});
+
+test("#522 validateIntent throws IntentValidationError for invalid deadline", () => {
+  const params = { ...sampleParams(), deadline: Math.floor(Date.now() / 1000) - 1 };
+  let caught: unknown;
+  try {
+    validateIntent(params);
+  } catch (e) {
+    caught = e;
+  }
+  assert.ok(caught instanceof IntentValidationError);
+  assert.equal((caught as IntentValidationError).field, "deadline");
+});
+
+test("#522 all validateIntent errors are instanceof PerihelionError", () => {
+  const invalidCases = [
+    { ...sampleParams(), user: "bad" as unknown as `0x${string}` },
+    { ...sampleParams(), destination: "BADADDRESS" },
+    { ...sampleParams(), sourceChainId: -1 },
+    { ...sampleParams(), sourceAmount: "0" },
+    { ...sampleParams(), minDestAmount: "0" },
+    { ...sampleParams(), deadline: Math.floor(Date.now() / 1000) - 1 },
+  ];
+  for (const params of invalidCases) {
+    let caught: unknown;
+    try {
+      validateIntent(params);
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(
+      caught instanceof IntentValidationError,
+      `expected IntentValidationError for params: ${JSON.stringify(params)}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #523 — MAX_DEADLINE_HORIZON_SEC constant and upper-bound enforcement
+// ---------------------------------------------------------------------------
+
+test("#523 MAX_DEADLINE_HORIZON_SEC equals 604_800 (7 days in seconds)", () => {
+  assert.equal(MAX_DEADLINE_HORIZON_SEC, 604_800);
+});
+
+test("#523 MAX_DEADLINE_HORIZON_SEC equals MAX_DEADLINE_HORIZON (alias check)", () => {
+  assert.equal(MAX_DEADLINE_HORIZON_SEC, MAX_DEADLINE_HORIZON);
+});
+
+test("#523 validateIntent accepts deadline exactly at MAX_DEADLINE_HORIZON_SEC boundary", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const params = { ...sampleParams(), deadline: now + MAX_DEADLINE_HORIZON_SEC };
+  assert.doesNotThrow(() => validateIntent(params, now));
+});
+
+test("#523 validateIntent rejects deadline one second beyond MAX_DEADLINE_HORIZON_SEC", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const params = { ...sampleParams(), deadline: now + MAX_DEADLINE_HORIZON_SEC + 1 };
+  let caught: unknown;
+  try {
+    validateIntent(params, now);
+  } catch (e) {
+    caught = e;
+  }
+  assert.ok(caught instanceof IntentValidationError, "expected IntentValidationError");
+  assert.equal((caught as IntentValidationError).field, "deadline");
+  assert.ok(
+    (caught as IntentValidationError).message.includes(`${MAX_DEADLINE_HORIZON_SEC}`),
+    "error message should mention MAX_DEADLINE_HORIZON_SEC value",
+  );
+});
+
+test("#523 validateIntent rejects deadline far in the future (10 days)", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const tenDays = 10 * 24 * 60 * 60;
+  assert.throws(
+    () => validateIntent({ ...sampleParams(), deadline: now + tenDays }, now),
+    IntentValidationError,
+  );
+});
+
+test("#523 buildIntent rejects deadline beyond MAX_DEADLINE_HORIZON_SEC", () => {
+  const now = Math.floor(Date.now() / 1000);
+  assert.throws(
+    () =>
+      buildIntent(
+        { ...sampleParams(), deadline: now + MAX_DEADLINE_HORIZON_SEC + 1 },
+      ),
+    IntentValidationError,
+  );
+});
+
+test("#523 buildIntent accepts deadline at exact MAX_DEADLINE_HORIZON_SEC boundary", () => {
+  const now = Math.floor(Date.now() / 1000);
+  // Pass the same `now` via the validateIntent call; buildIntent uses wall clock
+  // internally, so we can't inject it. Use a deadline slightly inside the window
+  // but which will be inside MAX_DEADLINE_HORIZON_SEC at any reasonable wall-clock drift.
+  const deadline = now + MAX_DEADLINE_HORIZON_SEC - 5; // 5s inside the window
+  assert.doesNotThrow(() =>
+    buildIntent(
+      {
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "9900000",
+        deadline,
+      },
+      { suppressWarning: true },
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Issue #525 — strict CRC-16 checksum validation for destination strkeys
+// ---------------------------------------------------------------------------
+
+test("#525 validateIntent rejects destination with single-character transcription error", () => {
+  // VALID_DESTINATION starts with GA5Z... We change one base32 char to produce
+  // a string of the right length and char-class but with an invalid checksum.
+  // Changing 'A' at position 1 to 'B' (GA → GB) corrupts the checksum.
+  const corrupted = "G" + "B" + VALID_DESTINATION.slice(2);
+  assert.equal(corrupted.length, 56, "corrupted key should still be 56 chars");
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: corrupted,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "900000",
+        deadline: FUTURE_DEADLINE,
+      }),
+    IntentValidationError,
+  );
+});
+
+test("#525 validateIntent rejects destination with last-character corruption", () => {
+  // Change the final character, which is part of the CRC checksum encoding.
+  const lastChar = VALID_DESTINATION[55]!;
+  const altChar = lastChar === "A" ? "B" : "A";
+  const corrupted = VALID_DESTINATION.slice(0, 55) + altChar;
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: corrupted,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "900000",
+        deadline: FUTURE_DEADLINE,
+      }),
+    IntentValidationError,
+  );
+});
+
+test("#525 validateIntent rejects destination with middle-character corruption", () => {
+  // Change a character in the middle of the payload (not the CRC bytes) to corrupt
+  // the checksum without changing the overall length or character class.
+  const mid = 28;
+  const ch = VALID_DESTINATION[mid]!;
+  const altCh = ch === "A" ? "B" : "A";
+  const corrupted = VALID_DESTINATION.slice(0, mid) + altCh + VALID_DESTINATION.slice(mid + 1);
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: corrupted,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "900000",
+        deadline: FUTURE_DEADLINE,
+      }),
+    IntentValidationError,
+  );
+});
+
+test("#525 validateIntent accepts unchanged VALID_DESTINATION (CRC correct)", () => {
+  assert.doesNotThrow(() =>
+    validateIntent({
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000000",
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "900000",
+      deadline: FUTURE_DEADLINE,
+    }),
+  );
+});
+
+test("#525 validateIntent rejects destination with C... prefix and corrupted checksum", () => {
+  // Construct a C... destination with an invalid checksum by replacing G with C
+  // and changing another character to corrupt the checksum for the 0x10 version byte.
+  // Since we're not constructing a truly valid C address, any C... that isn't a valid
+  // Soroban contract address (correct version byte 0x10) will fail.
+  const fakeC = "C" + VALID_DESTINATION.slice(1); // valid length/charset but wrong checksum for C
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: fakeC,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "900000",
+        deadline: FUTURE_DEADLINE,
+      }),
+    IntentValidationError,
+  );
+});
+
+test("#525 validateIntent rejects destination with invalid char in base32", () => {
+  // Insert a '1' which is not in the Stellar base32 alphabet (uses 2-7, not 1).
+  const withOne = "G" + "1" + VALID_DESTINATION.slice(2);
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: withOne,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "900000",
+        deadline: FUTURE_DEADLINE,
+      }),
+    IntentValidationError,
   );
 });
