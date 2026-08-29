@@ -491,50 +491,55 @@ mod tests {
         // Build a 227-byte payload manually.
         let mut msg = Bytes::new(&env);
 
-        // version + type
-        msg.push_back(0x01);
-        msg.push_back(0x01);
+        let env = Env::default();
 
-        // intent_hash (32 bytes)
-        for _ in 0..32u32 {
-            msg.push_back(0xaa);
+        // 218-byte payload (one byte short) — must be rejected.
+        let short_bytes = decode_hex(SHORT);
+        assert_eq!(short_bytes.len(), 218, "fill_instruction_short.hex must be 218 bytes");
+        let mut short_msg = Bytes::new(&env);
+        for b in short_bytes {
+            short_msg.push_back(b);
         }
+        assert!(
+            decode_fill_instruction(&env, &short_msg).is_err(),
+            "decoder must reject a 218-byte payload (one byte short)"
+        );
 
-        // src_eid (4 bytes) = 1
-        msg.push_back(0x00);
-        msg.push_back(0x00);
-        msg.push_back(0x00);
-        msg.push_back(0x01);
-
-        // recipient (56 bytes): Use a real G... account strkey (ZERO_ACCOUNT).
-        // Stellar strkeys are exactly 56 ASCII characters; no zero-padding needed.
-        let recip_bytes = ZERO_ACCOUNT.as_bytes();
-        for i in 0..56usize {
-            msg.push_back(if i < recip_bytes.len() { recip_bytes[i] } else { 0 });
+        // 220-byte payload (one byte long) — must be rejected.
+        let long_bytes = decode_hex(LONG);
+        assert_eq!(long_bytes.len(), 220, "fill_instruction_long.hex must be 220 bytes");
+        let mut long_msg = Bytes::new(&env);
+        for b in long_bytes {
+            long_msg.push_back(b);
         }
+        assert!(
+            decode_fill_instruction(&env, &long_msg).is_err(),
+            "decoder must reject a 220-byte payload (one byte long)"
+        );
+    }
 
-        // dest_asset (69 bytes): Use a real C... contract strkey (ZERO_CONTRACT).
-        // ZERO_CONTRACT is 56 chars; pad the remaining 13 bytes with zeros.
-        let asset_bytes = ZERO_CONTRACT.as_bytes();
-        for i in 0..69usize {
-            msg.push_back(if i < asset_bytes.len() { asset_bytes[i] } else { 0 });
-        }
+    /// A well-formed FillInstruction derived from the shared golden wire vector
+    /// (`contracts/shared/wire-vectors/fill_instruction.hex`) decodes correctly.
+    ///
+    /// Using the shared vector (rather than hand-assembling bytes) ensures this
+    /// test and the EVM conformance test cannot drift from each other — if either
+    /// encoder or decoder diverges from the documented layout, a test goes red.
+    #[test]
+    fn test_decode_fill_instruction_strkey_addresses() {
+        // The canonical 219-byte golden vector (see wire-vectors/README.md for
+        // the full field table). Loaded via include_str! so it is baked into the
+        // test binary at compile time and cannot differ between runs.
+        const GOLDEN: &str =
+            include_str!("../../../shared/wire-vectors/fill_instruction.hex");
 
-        // min_dest_amount (16 bytes) = 1_000_000
-        let amount: i128 = 1_000_000;
-        for b in amount.to_be_bytes() {
-            msg.push_back(b);
-        }
+        let env = Env::default();
 
-        // deadline (8 bytes) = 9_999_999
-        let deadline: u64 = 9_999_999;
-        for b in deadline.to_be_bytes() {
-            msg.push_back(b);
-        }
+        let bytes = decode_hex(GOLDEN);
+        assert_eq!(bytes.len(), 219, "golden fill_instruction.hex must be 219 bytes");
 
-        // preferred_solver (32 bytes) = all zeros → None
-        for _ in 0..32u32 {
-            msg.push_back(0x00);
+        let mut msg = Bytes::new(&env);
+        for b in &bytes {
+            msg.push_back(*b);
         }
         // reservation_window (8 bytes) = zero, no reservation
         for _ in 0..8u32 {
@@ -543,10 +548,10 @@ mod tests {
 
         assert_eq!(msg.len(), 227);
 
-        let fi = decode_fill_instruction(&env, &msg).expect("should decode valid payload");
-        assert_eq!(fi.src_eid, 1);
-        assert_eq!(fi.min_dest_amount, 1_000_000);
-        assert_eq!(fi.deadline, 9_999_999);
+        // Values match the canonical table in wire-vectors/README.md.
+        assert_eq!(fi.src_eid, 30316);
+        assert_eq!(fi.min_dest_amount, 1_000_000_000);
+        assert_eq!(fi.deadline, 9_999_999_999);
         assert!(fi.preferred_solver.is_none());
         assert_eq!(fi.reservation_window, 0);
         // recipient and dest_asset decoded without panic — correct strkey path used
