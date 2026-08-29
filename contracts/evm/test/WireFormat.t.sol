@@ -29,6 +29,10 @@ contract DecoderHarness is PerihelionEscrow {
         return _encodeFillInstruction(intentHash, intent);
     }
 
+    function fillInstructionLength() external pure returns (uint256) {
+        return FILL_INSTRUCTION_LENGTH;
+    }
+
     /// @dev Mirrors lzReceive's message routing without endpoint/peer auth —
     ///      used by conformance tests to verify version and type rejection.
     function routeInbound(bytes calldata m) external {
@@ -120,7 +124,7 @@ contract WireFormatConformanceTest is Test {
     ///      69-byte dest_asset) and issue #271 (strkey ASCII text, not raw bytes).
     function test_FillInstructionVectorMatchesSolidityEncoder() public view {
         bytes memory golden = _readVector("fill_instruction.hex");
-        assertEq(golden.length, 219, "fill_instruction.hex must be 219 bytes");
+        assertEq(golden.length, harness.fillInstructionLength(), "fill_instruction.hex has the wrong length");
 
         // Build the canonical intent using the same inputs as the Rust test.
         PerihelionEscrow.Intent memory intent = PerihelionEscrow.Intent({
@@ -137,8 +141,17 @@ contract WireFormatConformanceTest is Test {
         });
 
         bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent);
-        assertEq(encoded.length, 219, "encoder must produce 219 bytes");
+        assertEq(encoded.length, harness.fillInstructionLength(), "encoder must produce the FillInstruction length");
         assertEq(encoded, golden, "Solidity encoder output must match fill_instruction.hex golden vector");
+    }
+
+    /// @dev Asserts the golden vector length matches the expected constant.
+    /// This test catches stale vectors immediately rather than surfacing as
+    /// a decode error in an unrelated test.
+    function test_FillInstructionVectorLength() public view {
+        bytes memory golden = _readVector("fill_instruction.hex");
+        assertEq(golden.length, FILL_INSTRUCTION_LENGTH, "fill_instruction.hex must be exactly FILL_INSTRUCTION_LENGTH bytes");
+        assertEq(golden.length, 219, "fill_instruction.hex must be exactly 219 bytes");
     }
 
     // -------------------------------------------------------------------------

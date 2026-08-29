@@ -10,6 +10,9 @@ pub const MSG_FILL_INSTRUCTION: u8 = 0x01;
 pub const MSG_FILL_CONFIRMED: u8 = 0x02;
 pub const MSG_CANCEL_INTENT: u8 = 0x03;
 
+/// Fixed wire length of a FillInstruction payload.
+pub const FILL_INSTRUCTION_LENGTH: u32 = 219;
+
 /// Cancellation reason codes carried in a CancelIntent message.
 pub const CANCEL_REASON_EXPIRED: u8 = 0x00;
 pub const CANCEL_REASON_ADMIN: u8 = 0x01;
