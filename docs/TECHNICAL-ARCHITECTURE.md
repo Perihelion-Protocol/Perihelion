@@ -2182,6 +2182,8 @@ not by the nonce.
 `lzReceive` by the LayerZero endpoint. Tracked by:
 - `_inboundNonceBitmap[srcEid][wordIndex]` (EVM, unbounded per-word bitmap),
   in `PerihelionEscrow.sol` → `_isNonceConsumed` / `_consumeNonce`.
+  (Note: EVM also maintains `inboundNonce[srcEid]` as an observational high-water
+  mark for off-chain monitoring, but `_inboundNonceBitmap` is the authoritative guard).
 - `InboundNonceWord(eid, word_index)` (Soroban, unbounded per-word bitmap),
   in `contracts/soroban/settlement/src/lib.rs` → `accept_nonce`.
 
@@ -2284,7 +2286,7 @@ in-progress or completed intent.
 | Threat | Mechanism | Where enforced |
 |---|---|---|
 | Two intents with identical fields map to the same hash | Intent nonce (§11.1) — 256-bit random, signed | SDK (`randomNonce`), EIP-712 struct hash |
-| LayerZero message delivered twice by the transport | Transport nonce (§11.2) — per-eid monotonic counter | EVM `inboundNonce` / Soroban `accept_nonce` |
+| LayerZero message delivered twice by the transport | Transport nonce (§11.2) — per-eid monotonic counter (bitmap-tracked) | EVM `_inboundNonceBitmap` / Soroban `accept_nonce` (`InboundNonceWord`) |
 | Same intent locked twice on the EVM | `locks` mapping presence check (§11.3) | `PerihelionEscrow.lock` |
 | Same intent settled and refunded on the EVM | `Lock.released` + `Lock.refunded` flags (§11.3) | `_onFillConfirmed`, `_onCancelIntent`, `cancelExpired` |
 | Same intent filled twice on Soroban | `Settled` marker + `IntentStatus` check (§11.3) | `fill_intent`, `deliver_intent` |

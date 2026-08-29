@@ -73,7 +73,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         ///      nonce. Two intents with identical fields but different nonces hash to
         ///      different intent_hash values, so a user can bridge the same amount twice
         ///      without the second intent colliding with the first.
-        ///      Transport-layer replay is prevented separately by `inboundNonce`.
+        ///      Transport-layer replay is prevented separately by `_inboundNonceBitmap`.
         ///      See docs/TECHNICAL-ARCHITECTURE.md §11.
         uint256 nonce;
         address preferredSolver;
@@ -226,23 +226,28 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Latest window start timestamp (memoized for efficiency).
     uint256 private _latestWindowStart;
 
-    /// @notice Lazy-nonce high-water mark per source endpoint id.
+    /// @notice Observational high-water mark for inbound nonces per source endpoint id.
     ///
-    /// This is the **LayerZero transport nonce** — it prevents the same
-    /// LayerZero message from being delivered twice (message-replay protection).
+    /// Maintained as a monitoring and lag signal for off-chain observers.
+    /// This is NOT the authoritative replay guard: replay protection is enforced
+    /// by {_inboundNonceBitmap}, which allows unordered message delivery under
+    /// LayerZero's lazy-nonce model.
+    mapping(uint32 => uint64) public inboundNonce;
+    /// @notice Bitmap-based nonce tracking for unordered delivery (LayerZero
+    ///         lazy-nonce model) — authoritative transport-layer replay guard.
+    ///
+    /// Prevents the same LayerZero message from being delivered twice (message-replay protection).
+    /// Each bit represents whether a specific nonce has been consumed:
+    /// word index = nonce / 256, bit index = nonce % 256.
+    ///
     /// It is NOT the `Intent.nonce` field, which is a 256-bit random value
     /// chosen by the SDK to prevent two otherwise-identical intents from
     /// mapping to the same `intent_hash` (collision prevention).
     ///
-    /// Any `origin.nonce <= inboundNonce[origin.srcEid]` is rejected as stale.
     /// The complementary application-layer guard against double-settlement is
     /// `Lock.released` and `Lock.refunded` in each `locks` entry.
     ///
     /// See docs/TECHNICAL-ARCHITECTURE.md §11 for the full anti-replay story.
-    mapping(uint32 => uint64) public inboundNonce;
-    /// @notice Bitmap-based nonce tracking for unordered delivery (LayerZero
-    ///         lazy-nonce model). Each bit represents whether a specific nonce
-    ///         has been consumed: word index = nonce / 256, bit index = nonce % 256.
     mapping(uint32 => mapping(uint256 => uint256)) private _inboundNonceBitmap;
 
     // --- Reentrancy invariant (I-RE) -----------------------------------------
@@ -342,6 +347,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error RollingWindowCapExceeded();
     error RollingWindowCapAlreadyTriggered();
     error RollingWindowNotYetResettable();
+    error InvalidDuration();
     error NativeTransferFailed();
     /// @dev skim() would draw into funds locked by active intents.
     error ExceedsSurplus();
@@ -498,6 +504,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @param _cap Maximum aggregate locked amount within each window (in token's native units).
     ///             Zero means unlimited. Ignored if windowDuration is zero.
     function setRollingWindowCap(uint256 _windowDuration, uint256 _cap) external onlyOwner {
+        if (_cap > 0 && _windowDuration == 0) revert InvalidDuration();
+        if (_windowDuration > block.timestamp) revert InvalidDuration();
         rollingWindowDuration = _windowDuration;
         rollingWindowCap = _cap;
         emit RollingWindowCapSet(_windowDuration, _cap);
@@ -572,7 +580,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Recover surplus native ETH held by the contract (e.g. from direct
-    ///         transfers or overpaid lock calls that were not refunded locally).
+    ///         transfers, overpaid lock calls, or inbound lzReceive value).
     /// @param to Recipient address.
     /// @param amount Amount of native ETH to transfer.
     function skimNative(address to, uint256 amount) external onlyOwner {
@@ -623,8 +631,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
 
-        // Check value caps before committing to the lock.
-        _enforceValueCaps(intent.sourceAmount, intent.sourceAsset);
+        // Check value caps before pulling funds.
+        _checkValueCaps(intent.sourceAmount, intent.sourceAsset);
 
         // Measured-delta accounting: store exactly what the escrow received, so
         // fee-on-transfer / rebasing tokens can never release more than is held.
@@ -636,6 +644,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // fully-taxed token). Safe under `nonReentrant`.
         // slither-disable-next-line incorrect-equality,reentrancy-balance
         if (received == 0) revert NothingReceived();
+
+        // Commit the actual received amount to the rolling window accumulator.
+        _commitValueCaps(received);
 
         // The lock is written after the pull because measured-delta needs the
         // post-transfer balance; safe because `lock` and every fund-moving path
@@ -674,9 +685,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Value cap enforcement -----------------------------------------------
 
-    /// @dev Check per-intent and rolling-window value caps. Reverts if exceeded.
-    ///      Must be called before the lock is recorded.
-    function _enforceValueCaps(uint256 sourceAmount, address asset) private {
+    /// @dev Pre-flight check per-intent and rolling-window value caps against requested sourceAmount.
+    ///      Reverts if exceeded. Must be called before funds are transferred.
+    function _checkValueCaps(uint256 sourceAmount, address asset) private {
         // Check 1: Per-intent maximum (per-asset takes precedence, then global)
         uint256 maxAmount = maxIntentAmountPerAsset[asset] > 0
             ? maxIntentAmountPerAsset[asset]
@@ -695,31 +706,42 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             // Calculate current window start. Each window spans [windowStart, windowStart + duration).
             uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
 
-            // Advance memoized window if time has moved to a new bucket.
-            if (windowStart > _latestWindowStart) {
-                _latestWindowStart = windowStart;
-                // In a new window; prior bucket is abandoned (orphaned). Restart accumulator.
-                delete _rollingWindowBuckets[windowStart - rollingWindowDuration];
-            }
+            // If time has moved to a new window, existing bucket for this window is 0.
+            uint256 currentBucket = windowStart > _latestWindowStart
+                ? 0
+                : _rollingWindowBuckets[windowStart];
 
-            // Accumulate this lock's amount into the current window.
-            uint256 accumulated = _rollingWindowBuckets[windowStart] + sourceAmount;
-            if (accumulated > rollingWindowCap) {
+            uint256 projected = currentBucket + sourceAmount;
+            if (projected > rollingWindowCap) {
                 // Cap exceeded: trigger halt and record the window + amount for diagnostics.
                 rollingWindowTriggered = true;
                 rollingWindowResetEarliestAt = block.timestamp + rollingWindowDuration;
-                emit RollingWindowCapTriggered(windowStart, accumulated);
+                emit RollingWindowCapTriggered(windowStart, projected);
                 revert RollingWindowCapExceeded();
             }
+        }
+    }
 
-            // Update the bucket.
-            _rollingWindowBuckets[windowStart] = accumulated;
+    /// @dev Commit the measured delta (actual received tokens) to the rolling-window bucket.
+    ///      Ensures fee-on-transfer tokens do not cause accumulator drift.
+    function _commitValueCaps(uint256 receivedAmount) private {
+        if (rollingWindowDuration > 0 && rollingWindowCap > 0) {
+            uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
+            if (windowStart > _latestWindowStart) {
+                _latestWindowStart = windowStart;
+                // In a new window; prior buckets are orphaned and expire implicitly.
+            }
+            _rollingWindowBuckets[windowStart] += receivedAmount;
         }
     }
 
     // --- LayerZero inbound ---------------------------------------------------
-
+ 
     /// @inheritdoc ILayerZeroReceiver
+    /// @dev `lzReceive` is declared `payable` to satisfy the `ILayerZeroReceiver` interface.
+    ///      The contract does not process native value on inbound messages; any native value
+    ///      delivered by the endpoint/executor remains as contract surplus and can be recovered
+    ///      by the owner via {skimNative}.
     function lzReceive(
         Origin calldata origin,
         bytes32, /* guid */
@@ -749,10 +771,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             _onCancelIntent(message);
         } else {
             revert UnknownMessageType();
-        }
-        if (msg.value > 0) {
-            (bool ok,) = msg.sender.call{ value: msg.value }("");
-            if (!ok) revert NativeTransferFailed();
         }
     }
 
