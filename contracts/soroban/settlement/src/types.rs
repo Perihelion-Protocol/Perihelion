@@ -115,6 +115,15 @@ pub enum DataKey {
     /// Kept to avoid breaking any archived storage entries; never written by
     /// `accept_nonce` after this change.
     InboundNonceBase(u32),
+
+    // Instance tier (delayed endpoint rotation, issue #500).
+    /// Pending endpoint address proposed by admin, awaiting confirmation
+    /// after the minimum delay. Mirrors `PendingPeer` for the analogous
+    /// two-step peer-change flow.
+    PendingEndpoint,
+    /// Timestamp when the current pending endpoint change was proposed.
+    /// Used to enforce `MIN_PEER_CHANGE_DELAY` / `PEER_CHANGE_GRACE`.
+    PendingEndpointTime,
 }
 
 /// Lifecycle state of a registered intent.
