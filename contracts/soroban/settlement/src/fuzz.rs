@@ -210,6 +210,11 @@ fn fill_instruction_matches_golden_vector() {
     let encoded = crate::messages::encode_fill_instruction(&env, &fi);
 
     let expected = decode_hex(GOLDEN);
+    assert_eq!(
+        expected.len() as u32,
+        crate::types::FILL_INSTRUCTION_LENGTH,
+        "golden FillInstruction vector has the wrong length"
+    );
     assert_eq!(encoded.len() as usize, expected.len(), "length mismatch: encoder produced {} bytes, golden vector is {} bytes", encoded.len(), expected.len());
     for (i, b) in expected.iter().enumerate() {
         assert_eq!(encoded.get(i as u32).unwrap(), *b, "byte {} mismatch", i);
@@ -278,8 +283,12 @@ fn fill_instruction_recipient_round_trips_with_227_byte_format() {
     payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes()));
     payload.append(&Bytes::from_array(&env, &9_999_999_999u64.to_be_bytes()));
     payload.append(&Bytes::from_array(&env, &[0u8; 32])); // preferred_solver: open
-    payload.append(&Bytes::from_array(&env, &0u64.to_be_bytes())); // reservation_window: no reservation
-    assert_eq!(payload.len(), 227, "payload must be 227 bytes");
+
+    assert_eq!(
+        payload.len(),
+        crate::types::FILL_INSTRUCTION_LENGTH,
+        "payload must be the FillInstruction wire length"
+    );
 
     let (msg_type, fi, _) =
         decode_message(&env, &payload).expect("decoder must accept a well-formed 227-byte payload");
@@ -419,6 +428,40 @@ mod tests {
 
     /// Regression: the 220-byte FillInstruction negative vector must be rejected
     /// by the Soroban decoder with MalformedPayload (length check: expects 227).
+    #[test]
+    fn fill_instruction_bad_version_neg_vector_is_rejected() {
+        const BAD_VERSION: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_bad_version.hex");
+        let env = Env::default();
+        let bytes = decode_hex(BAD_VERSION);
+        assert_eq!(bytes.len(), 219);
+        let mut payload = Bytes::new(&env);
+        for b in bytes {
+            payload.push_back(b);
+        }
+        assert!(
+            crate::messages::decode_message(&env, &payload).is_err(),
+            "decoder must reject a FillInstruction with an unknown version"
+        );
+    }
+
+    #[test]
+    fn fill_instruction_bad_type_neg_vector_is_rejected() {
+        const BAD_TYPE: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_bad_type.hex");
+        let env = Env::default();
+        let bytes = decode_hex(BAD_TYPE);
+        assert_eq!(bytes.len(), 219);
+        let mut payload = Bytes::new(&env);
+        for b in bytes {
+            payload.push_back(b);
+        }
+        assert!(
+            crate::messages::decode_message(&env, &payload).is_err(),
+            "decoder must reject an unknown FillInstruction message type"
+        );
+    }
+
     #[test]
     fn fill_instruction_long_neg_vector_is_rejected() {
         const LONG: &str =

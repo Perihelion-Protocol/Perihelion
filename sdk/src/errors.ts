@@ -24,8 +24,8 @@
 
 /** Base class for all Perihelion SDK errors. */
 export class PerihelionError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = this.constructor.name;
   }
 }
@@ -35,8 +35,8 @@ export class PerihelionHttpError extends PerihelionError {
   readonly status: number;
   readonly body: string;
   readonly operation: string;
-  constructor(operation: string, status: number, body: string) {
-    super(`[Perihelion] ${operation} failed: HTTP ${status} — ${body}`);
+  constructor(operation: string, status: number, body: string, options?: ErrorOptions) {
+    super(`[Perihelion] ${operation} failed: HTTP ${status} — ${body}`, options);
     this.operation = operation;
     this.status = status;
     this.body = body;
@@ -50,18 +50,27 @@ export class PerihelionHttpError extends PerihelionError {
 export class PerihelionTimeoutError extends PerihelionError {
   readonly intentHash?: string;
   readonly lastStatus?: string;
-  constructor(message: string, intentHash?: string, lastStatus?: string) {
-    super(message);
+  constructor(message: string, intentHash?: string, lastStatus?: string, options?: ErrorOptions) {
+    super(message, options);
     this.intentHash = intentHash;
     this.lastStatus = lastStatus;
+  }
+}
+
+/** Thrown when a network or transport failure occurs communicating with the mempool. */
+export class PerihelionNetworkError extends PerihelionError {
+  readonly operation?: string;
+  constructor(message: string, operation?: string, options?: ErrorOptions) {
+    super(message, options);
+    this.operation = operation;
   }
 }
 
 /** Thrown when intent fields fail client-side validation before submission. */
 export class PerihelionValidationError extends PerihelionError {
   readonly field?: string;
-  constructor(message: string, field?: string) {
-    super(message);
+  constructor(message: string, field?: string, options?: ErrorOptions) {
+    super(message, options);
     this.field = field;
   }
 }
@@ -73,10 +82,11 @@ export class PerihelionValidationError extends PerihelionError {
 export class PerihelionHashMismatchError extends PerihelionError {
   readonly localHash: string;
   readonly serverHash: string;
-  constructor(localHash: string, serverHash: string) {
+  constructor(localHash: string, serverHash: string, options?: ErrorOptions) {
     super(
       `[Perihelion] Server returned hash ${serverHash} but locally-computed hash is ${localHash}. ` +
         `This may indicate a server bug or tampering. The local hash is authoritative.`,
+      options,
     );
     this.localHash = localHash;
     this.serverHash = serverHash;

@@ -18,6 +18,8 @@ import {
 } from "viem";
 import type { Address, Hex, Intent } from "./types.js";
 import { isStellarAddress, isStellarAsset } from "./stellar.js";
+import { PerihelionValidationError } from "./errors.js";
+
 
 /**
  * Build the EIP-712 domain for a specific Perihelion escrow deployment.
@@ -54,15 +56,7 @@ export const INTENT_TYPES = {
 export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
   Partial<Pick<Intent, "nonce" | "preferredSolver">>;
 
-/** Thrown by {@link validateIntent} and {@link buildIntent} when a field is malformed. */
-export class IntentValidationError extends RangeError {
-  readonly field: string;
-  constructor(field: string, message: string) {
-    super(`[Perihelion] Invalid '${field}': ${message}`);
-    this.name = "IntentValidationError";
-    this.field = field;
-  }
-}
+
 
 // Stellar strkey: G (account) or C (contract), followed by 55 base32 chars (A-Z, 2-7).
 const STRKEY_RE = /^[GC][A-Z2-7]{55}$/;
@@ -79,7 +73,7 @@ function isNonNegIntString(s: string): boolean {
 }
 
 /**
- * Validate all fields of intent parameters, throwing {@link IntentValidationError}
+ * Validate all fields of intent parameters, throwing {@link PerihelionValidationError}
  * on the first failure. Called automatically by {@link buildIntent}; can also be
  * called independently before signing.
  *
@@ -91,109 +85,96 @@ export function validateIntent(
   now = Math.floor(Date.now() / 1000),
 ): void {
   if (!isAddress(params.user)) {
-    throw new IntentValidationError("user", `must be a valid 20-byte EVM address (got '${params.user}')`);
+    throw new PerihelionValidationError(`must be a valid 20-byte EVM address (got '${params.user}')`, "user");
   }
   if (!STRKEY_RE.test(params.destination)) {
-    throw new IntentValidationError(
-      "destination",
+    throw new PerihelionValidationError(
       `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7 (got '${params.destination}')`,
+      "destination",
     );
   }
   // Enforce byte-length bounds as defence-in-depth, independent of regex.
   // Bounds are measured in UTF-8 bytes, matching the contract's bytes(intent.destination).length.
   const destBytes = new TextEncoder().encode(params.destination).length;
   if (destBytes > MAX_DESTINATION_LEN) {
-    throw new IntentValidationError(
-      "destination",
-      `exceeds ${MAX_DESTINATION_LEN} bytes (got ${destBytes} bytes)`,
+    throw new PerihelionValidationError(
+      `exceeds ${MAX_DESTINATION_LEN} bytes (got ${destBytes} bytes)`, "destination",
     );
   }
   if (!Number.isInteger(params.sourceChainId) || params.sourceChainId <= 0) {
-    throw new IntentValidationError(
-      "sourceChainId",
-      `must be a positive integer chain ID (got ${params.sourceChainId})`,
+    throw new PerihelionValidationError(
+      `must be a positive integer chain ID (got ${params.sourceChainId})`, "sourceChainId",
     );
   }
   if (!isAddress(params.sourceAsset)) {
-    throw new IntentValidationError(
-      "sourceAsset",
-      `must be a valid 20-byte EVM address (got '${params.sourceAsset}')`,
+    throw new PerihelionValidationError(
+      `must be a valid 20-byte EVM address (got '${params.sourceAsset}')`, "sourceAsset",
     );
   }
   if (!isPositiveIntString(params.sourceAmount)) {
-    throw new IntentValidationError(
-      "sourceAmount",
-      `must be a positive integer string with no leading zeros (got '${params.sourceAmount}')`,
+    throw new PerihelionValidationError(
+      `must be a positive integer string with no leading zeros (got '${params.sourceAmount}')`, "sourceAmount",
     );
   }
   try {
     const sourceAmountBig = BigInt(params.sourceAmount);
     if (sourceAmountBig > U128_MAX) {
-      throw new IntentValidationError(
-        "sourceAmount",
-        `exceeds maximum bridgeable amount (${U128_MAX})`,
+      throw new PerihelionValidationError(
+        `exceeds maximum bridgeable amount (${U128_MAX})`, "sourceAmount",
       );
     }
   } catch (err) {
-    if (err instanceof IntentValidationError) throw err;
-    throw new IntentValidationError("sourceAmount", `is not a valid integer string`);
+    if (err instanceof PerihelionValidationError) throw err;
+    throw new PerihelionValidationError(`is not a valid integer string`, "sourceAmount");
   }
   if (!DEST_ASSET_RE.test(params.destAsset)) {
-    throw new IntentValidationError(
-      "destAsset",
-      `must be 'native' or '<CODE>:<G...ISSUER>' (got '${params.destAsset}')`,
+    throw new PerihelionValidationError(
+      `must be 'native' or '<CODE>:<G...ISSUER>' (got '${params.destAsset}')`, "destAsset",
     );
   }
   // Enforce byte-length bound on destAsset as defence-in-depth, independent of regex.
   const destAssetBytes = new TextEncoder().encode(params.destAsset).length;
   if (destAssetBytes > MAX_DEST_ASSET_LEN) {
-    throw new IntentValidationError(
-      "destAsset",
-      `exceeds ${MAX_DEST_ASSET_LEN} bytes (got ${destAssetBytes} bytes)`,
+    throw new PerihelionValidationError(
+      `exceeds ${MAX_DEST_ASSET_LEN} bytes (got ${destAssetBytes} bytes)`, "destAsset",
     );
   }
   if (!isPositiveIntString(params.minDestAmount)) {
-    throw new IntentValidationError(
-      "minDestAmount",
-      `must be a positive integer string with no leading zeros (got '${params.minDestAmount}')`,
+    throw new PerihelionValidationError(
+      `must be a positive integer string with no leading zeros (got '${params.minDestAmount}')`, "minDestAmount",
     );
   }
   try {
     const minDestAmountBig = BigInt(params.minDestAmount);
     if (minDestAmountBig > I128_MAX) {
-      throw new IntentValidationError(
-        "minDestAmount",
-        `exceeds maximum bridgeable amount (${I128_MAX})`,
+      throw new PerihelionValidationError(
+        `exceeds maximum bridgeable amount (${I128_MAX})`, "minDestAmount",
       );
     }
   } catch (err) {
-    if (err instanceof IntentValidationError) throw err;
-    throw new IntentValidationError("minDestAmount", `is not a valid integer string`);
+    if (err instanceof PerihelionValidationError) throw err;
+    throw new PerihelionValidationError(`is not a valid integer string`, "minDestAmount");
   }
   if (!Number.isInteger(params.deadline) || params.deadline <= now) {
-    throw new IntentValidationError(
-      "deadline",
-      `must be a Unix timestamp strictly in the future (got ${params.deadline}, now is ${now})`,
+    throw new PerihelionValidationError(
+      `must be a Unix timestamp strictly in the future (got ${params.deadline}, now is ${now})`, "deadline",
     );
   }
   if (params.nonce !== undefined) {
     if (!isNonNegIntString(params.nonce)) {
-      throw new IntentValidationError(
-        "nonce",
-        `must be a non-negative decimal integer string (got '${params.nonce}')`,
+      throw new PerihelionValidationError(
+        `must be a non-negative decimal integer string (got '${params.nonce}')`, "nonce",
       );
     }
     if (BigInt(params.nonce) > (1n << 256n) - 1n) {
-      throw new IntentValidationError(
-        "nonce",
-        `exceeds uint256 maximum (got ${params.nonce})`,
+      throw new PerihelionValidationError(
+        `exceeds uint256 maximum (got ${params.nonce})`, "nonce",
       );
     }
   }
   if (params.preferredSolver !== undefined && !isAddress(params.preferredSolver)) {
-    throw new IntentValidationError(
-      "preferredSolver",
-      `must be a valid 20-byte EVM address or zero address (got '${params.preferredSolver}')`,
+    throw new PerihelionValidationError(
+      `must be a valid 20-byte EVM address or zero address (got '${params.preferredSolver}')`, "preferredSolver",
     );
   }
 }
@@ -247,7 +228,7 @@ export const I128_MAX = 170141183460469231731687303715884105727n;
  * - `sourceAmount`: must be in [1, u128::MAX] (wire-safe for EVM uint256 encoding)
  * - `minDestAmount`: must be in [1, i128::MAX] (wire-safe for Soroban i128 storage)
  *
- * Throws a `RangeError` with a descriptive message on violation.
+ * Throws a {@link PerihelionValidationError} with a descriptive message on violation.
  *
  * @param value  Decimal string amount.
  * @param field  Field name for the error message.
@@ -258,15 +239,14 @@ export function validateAmount(value: string, field: string, max = I128_MAX): vo
   try {
     n = BigInt(value);
   } catch {
-    throw new IntentValidationError(field, `is not a valid integer string`);
+    throw new PerihelionValidationError(`is not a valid integer string`, field);
   }
   if (n <= 0n) {
-    throw new IntentValidationError(field, `must be > 0 (got ${value})`);
+    throw new PerihelionValidationError(`must be > 0 (got ${value})`, field);
   }
   if (n > max) {
-    throw new IntentValidationError(
-      field,
-      `exceeds maximum bridgeable amount (${max})`
+    throw new PerihelionValidationError(
+      `exceeds maximum bridgeable amount (${max})`, field
     );
   }
 }
@@ -284,7 +264,7 @@ export interface BuildOptions {
 /**
  * Build a fully-formed {@link Intent}, filling in an open solver and a random
  * nonce when not provided. Validates all caller-supplied fields and throws
- * {@link IntentValidationError} if any are malformed. Emits a non-fatal warning
+ * {@link PerihelionValidationError} if any are malformed. Emits a non-fatal warning
  * if the intent's source amount is below the economical threshold (V_min).
  *
  * **V_min warning behavior:**
@@ -307,13 +287,15 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
   const suppressWarning = options?.suppressWarning ?? false;
 
   if (!isStellarAddress(params.destination)) {
-    throw new Error(
+    throw new PerihelionValidationError(
       `buildIntent: invalid destination "${params.destination}" — must be a G... or C... Stellar strkey`,
+      "destination"
     );
   }
   if (!isStellarAsset(params.destAsset)) {
-    throw new Error(
+    throw new PerihelionValidationError(
       `buildIntent: invalid destAsset "${params.destAsset}" — must be "native" or "CODE:ISSUER"`,
+      "destAsset"
     );
   }
 
@@ -343,8 +325,8 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
         : "";
       console.warn(
         `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
-          `economical minimum V_min (${vMin})${decimalNote}. The fixed LayerZero messaging fee may ` +
-          `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
+        `economical minimum V_min (${vMin})${decimalNote}. The fixed LayerZero messaging fee may ` +
+        `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
       );
     }
   }

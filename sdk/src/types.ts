@@ -82,6 +82,6 @@ export interface IntentRecord extends SignedIntent {
   readonly solver?: Address;
   /** Stellar tx hash of the settlement, once settled. */
   readonly settlementTx?: string;
-  /** Unix seconds the record was created. */
+  /** Unix timestamp in seconds when the record was created in the mempool. */
   readonly createdAt: number;
 }

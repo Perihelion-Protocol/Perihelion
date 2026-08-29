@@ -28,7 +28,7 @@ use soroban_sdk::{Address, Bytes, BytesN, Env};
 use crate::types::{
     CancelInstruction, FillInstruction, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED,
     CANCEL_REASON_INVALID, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION,
-    PROTOCOL_VERSION,
+    FILL_INSTRUCTION_LENGTH, PROTOCOL_VERSION,
 };
 
 /// Build an `Address` from a raw 32-byte contract-id payload.
@@ -236,8 +236,8 @@ fn decode_fill_instruction(
 ) -> Result<FillInstruction, crate::PerihelionError> {
     use crate::PerihelionError;
 
-    // Validate length: 2 (header) + 225 (payload) = 227
-    if message.len() != 227 {
+    // Validate length: 2 (header) + 217 (payload) = 219
+    if message.len() != FILL_INSTRUCTION_LENGTH {
         return Err(PerihelionError::MalformedPayload);
     }
 
@@ -465,16 +465,21 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// decode_fill_instruction requires exactly 227 bytes.
+    /// decode_fill_instruction requires exactly FILL_INSTRUCTION_LENGTH bytes.
     #[test]
     fn test_decode_fill_instruction_wrong_length_rejected() {
         let env = Env::default();
         let mut short = Bytes::new(&env);
-        for _ in 0..218u32 {
+        for _ in 0..FILL_INSTRUCTION_LENGTH - 1 {
             short.push_back(0x00);
         }
-        let result = decode_fill_instruction(&env, &short);
-        assert!(result.is_err());
+        assert!(decode_fill_instruction(&env, &short).is_err());
+
+        let mut long = Bytes::new(&env);
+        for _ in 0..FILL_INSTRUCTION_LENGTH + 1 {
+            long.push_back(0x00);
+        }
+        assert!(decode_fill_instruction(&env, &long).is_err());
     }
 
     /// A well-formed 227-byte FillInstruction with G... recipient and C... dest_asset decodes

@@ -139,8 +139,12 @@ preferred solver from indefinitely blocking settlement.
 
 ### Nonce-degradation path
 
-Soroban's `InboundNonceBitmap` and `InboundNonceBase` track LayerZero
-transport nonces to prevent message replay. If `InboundNonceBase` (a
+Soroban's `InboundNonceWord(eid, word_index)` entries track LayerZero
+transport nonces to prevent message replay. Soroban uses 64-bit storage words
+(`word_index = nonce / 64`, `bit_index = nonce % 64`), whereas the EVM
+`_inboundNonceBitmap[eid][wordIndex]` uses 256-bit `uint256` words
+(`wordIndex = nonce / 256`, `bitIndex = nonce % 256`). These are different
+storage granularities implementing the same per-nonce replay invariant. If `InboundNonceBase` (a
 `Persistent` storage entry) is archived due to insufficient TTL, its value
 is treated as 0 on restore, resetting the bitmap window. This could re-allow
 a previously-consumed nonce to be accepted again. Mitigation: the contract
@@ -931,9 +935,9 @@ privileged operations (§6 admin-key, §8 trust assumptions per phase).
 All payloads are the OApp `message` bytes that ride inside the LayerZero V2
 packet envelope (the envelope itself carries `nonce`, `srcEid`, `sender`,
 `dstEid`, `receiver`, `guid` and is not duplicated here). All integers are
-**big-endian**. Addresses are 32 bytes: EVM addresses are left-padded to 32;
-Stellar account/contract identifiers are the 32-byte strkey body. Amounts are
-unsigned 128-bit in the asset's smallest unit.
+**big-endian**. EVM addresses are represented in 32-byte words, while Stellar
+recipient and asset values use their canonical text representation in fixed-width
+fields. Amounts are unsigned 128-bit in the asset's smallest unit.
 
 **Common header (2 bytes):**
 
@@ -948,12 +952,12 @@ unsigned 128-bit in the asset's smallest unit.
 |--------|------|-------|-------------|
 | 2 | 32 | `intent_hash` | EIP-712 id (I5). |
 | 34 | 4 | `src_eid` | LayerZero eid of the locking chain (redundant with envelope; included for self-containment of the record). |
-| 38 | 32 | `recipient` | Stellar recipient (strkey body). |
-| 70 | 32 | `dest_asset` | Stellar Asset Contract address of the asset to deliver. |
-| 102 | 16 | `min_dest_amount` | u128 slippage floor. |
-| 118 | 8 | `deadline` | u64 unix seconds. |
-| 126 | 32 | `preferred_solver` | Stellar address, or 32 zero bytes for open. |
-| **158** | | **total** | |
+| 38 | 56 | `recipient` | Full Stellar account or contract strkey text, right-zero-padded if needed. |
+| 94 | 69 | `dest_asset` | Canonical Stellar asset text, including `CODE:ISSUER`, right-zero-padded if needed. |
+| 163 | 16 | `min_dest_amount` | u128 slippage floor. |
+| 179 | 8 | `deadline` | u64 unix seconds. |
+| 187 | 32 | `preferred_solver` | EVM address in a 32-byte word, or 32 zero bytes for open. |
+| **219** | | **total** | |
 
 **`FillConfirmed` (Stellar → source)** — authorizes solver payout on source.
 
@@ -1163,7 +1167,11 @@ interface IPerihelionEscrow {
         address indexed solver,
         address indexed user,
         address asset,
-        uint256 amount
+        uint256 amount,
+        string destination,
+        string destAsset,
+        uint128 minDestAmount,
+        uint64 deadline
     );
 
     /// @notice Emitted when locked funds are released to the solver.
@@ -2182,6 +2190,8 @@ not by the nonce.
 `lzReceive` by the LayerZero endpoint. Tracked by:
 - `_inboundNonceBitmap[srcEid][wordIndex]` (EVM, unbounded per-word bitmap),
   in `PerihelionEscrow.sol` → `_isNonceConsumed` / `_consumeNonce`.
+  (Note: EVM also maintains `inboundNonce[srcEid]` as an observational high-water
+  mark for off-chain monitoring, but `_inboundNonceBitmap` is the authoritative guard).
 - `InboundNonceWord(eid, word_index)` (Soroban, unbounded per-word bitmap),
   in `contracts/soroban/settlement/src/lib.rs` → `accept_nonce`.
 
@@ -2284,7 +2294,7 @@ in-progress or completed intent.
 | Threat | Mechanism | Where enforced |
 |---|---|---|
 | Two intents with identical fields map to the same hash | Intent nonce (§11.1) — 256-bit random, signed | SDK (`randomNonce`), EIP-712 struct hash |
-| LayerZero message delivered twice by the transport | Transport nonce (§11.2) — per-eid monotonic counter | EVM `inboundNonce` / Soroban `accept_nonce` |
+| LayerZero message delivered twice by the transport | Transport nonce (§11.2) — per-eid monotonic counter (bitmap-tracked) | EVM `_inboundNonceBitmap` / Soroban `accept_nonce` (`InboundNonceWord`) |
 | Same intent locked twice on the EVM | `locks` mapping presence check (§11.3) | `PerihelionEscrow.lock` |
 | Same intent settled and refunded on the EVM | `Lock.released` + `Lock.refunded` flags (§11.3) | `_onFillConfirmed`, `_onCancelIntent`, `cancelExpired` |
 | Same intent filled twice on Soroban | `Settled` marker + `IntentStatus` check (§11.3) | `fill_intent`, `deliver_intent` |

@@ -10,6 +10,9 @@ pub const MSG_FILL_INSTRUCTION: u8 = 0x01;
 pub const MSG_FILL_CONFIRMED: u8 = 0x02;
 pub const MSG_CANCEL_INTENT: u8 = 0x03;
 
+/// Fixed wire length of a FillInstruction payload.
+pub const FILL_INSTRUCTION_LENGTH: u32 = 219;
+
 /// Cancellation reason codes carried in a CancelIntent message.
 pub const CANCEL_REASON_EXPIRED: u8 = 0x00;
 pub const CANCEL_REASON_ADMIN: u8 = 0x01;
@@ -80,16 +83,18 @@ pub enum DataKey {
     /// Aggregate reputation metrics for a solver, keyed by solver address.
     SolverReputation(Address),
     /// Unbounded per-(eid, word_index) nonce bitmap for unordered delivery
-    /// (issue #285). Mirrors the EVM `_inboundNonceBitmap[srcEid][wordIndex]`
-    /// layout exactly.
+    /// (issue #285). Soroban stores each bitmap word as a `u64`; this is
+    /// semantically equivalent to the EVM bitmap but uses 64-bit storage words
+    /// rather than the EVM's 256-bit `uint256` words.
     ///
     /// A nonce `n` is tracked at:
     ///   word_index = n / 64
     ///   bit_index  = n % 64
     ///
-    /// Each storage word covers 64 consecutive nonces. Words are written
-    /// lazily on first use and are never discarded, so nonces from any
-    /// message-in-flight window are always accepted exactly once regardless
+    /// Each Soroban storage word covers 64 consecutive nonces. The equivalent
+    /// EVM word uses `wordIndex = nonce / 256` and `bitIndex = nonce % 256`.
+    /// Words are written lazily on first use and are never discarded, so nonces
+    /// from any message-in-flight window are accepted exactly once regardless
     /// of delivery order.
     ///
     /// This is the per-eid **LayerZero transport nonce** state — distinct from
@@ -178,17 +183,13 @@ pub const RECIPIENT_TYPE_CONTRACT: u8 = 0x10; // C... contract (0x02 << 3)
 /// A registration instruction from the source chain (FillInstruction), decoded
 /// at the endpoint/adapter boundary into native Soroban types.
 ///
-/// Canonical wire format (227 bytes):
+/// Wire format (219 bytes):
 ///   version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56)
-///   | dest_asset(69) | min_dest_amount(16) | deadline(8)
-///   | preferred_solver(32) | reservation_window(8)
+///   | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
 ///
-/// `recipient` is a right-zero-padded Stellar strkey. `dest_asset` is the
-/// user-signed Stellar asset identifier (`native` or `CODE:ISSUER`), also
-/// right-zero-padded to preserve the EVM wire representation. The adapter must
-/// resolve that identifier to the configured Soroban token address before
-/// constructing an `IntentRecord`; it must not interpret the bytes as a strkey
-/// address.
+/// `recipient` contains the full Stellar strkey text (56 bytes), while `dest_asset`
+/// contains its canonical text form (up to 69 bytes). Both are decoded into Soroban
+/// `Address` objects at the adapter boundary.
 #[contracttype]
 #[derive(Clone)]
 pub struct FillInstruction {

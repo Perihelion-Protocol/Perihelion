@@ -271,7 +271,11 @@ contract PerihelionEscrowTest is Test {
         address indexed solver,
         address indexed user,
         address asset,
-        uint256 amount
+        uint256 amount,
+        string destination,
+        string destAsset,
+        uint128 minDestAmount,
+        uint64 deadline
     );
     event Released(
         bytes32 indexed intentHash,
@@ -282,6 +286,7 @@ contract PerihelionEscrowTest is Test {
         uint128 minDestAmount
     );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
+    event RefundedLocalTimeout(bytes32 indexed intentHash, address indexed user, uint256 amount);
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
@@ -388,7 +393,17 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = escrow.hashIntent(intent);
 
         vm.expectEmit(true, true, true, true);
-        emit Locked(h, solver, user, address(token), 100_000);
+        emit Locked(
+            h,
+            solver,
+            user,
+            address(token),
+            100_000,
+            intent.destination,
+            intent.destAsset,
+            uint128(intent.minDestAmount),
+            uint64(intent.deadline)
+        );
 
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig);
@@ -474,6 +489,28 @@ contract PerihelionEscrowTest is Test {
         vm.prank(preferred);
         escrow.lock{ value: 0.01 ether }(intent, sig);
         assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    function test_LockExactFeeSucceeds() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        // Under mockEndpoint, mockFee is returned
+        uint256 quotedFee = escrow.quoteFee(intent, solver);
+
+        vm.prank(solver);
+        escrow.lock{ value: quotedFee }(intent, sig);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    function test_QuoteFee_MatchesPayerFee() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        uint256 feeWithSolver = escrow.quoteFee(intent, solver);
+        assertEq(feeWithSolver, endpoint.mockFee());
+
+        vm.prank(solver);
+        uint256 feeMsgSender = escrow.quoteFee(intent);
+        assertEq(feeMsgSender, feeWithSolver);
     }
 
     function test_RevertWhen_AlreadyLocked() public {
@@ -727,7 +764,7 @@ contract PerihelionEscrowTest is Test {
 
         vm.warp(intent.deadline + escrow.confirmationGrace());
         vm.expectEmit(true, true, false, true);
-        emit Refunded(h, user, 100_000, 0);
+        emit RefundedLocalTimeout(h, user, 100_000);
         escrow.cancelExpired(h);
 
         assertEq(token.balanceOf(user), 1_000_000);
@@ -1324,13 +1361,13 @@ contract PerihelionEscrowTest is Test {
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msg_);
     }
 
-    function test_CancelExpiredEmitsExpiredReason() public {
+    function test_CancelExpiredEmitsRefundedLocalTimeout() public {
         bytes32 h = _lock();
         PerihelionEscrow.Intent memory intent = _intent();
         vm.warp(intent.deadline + escrow.confirmationGrace());
 
         vm.expectEmit(true, true, false, true);
-        emit Refunded(h, user, 100_000, 0x00); // CANCEL_REASON_EXPIRED
+        emit RefundedLocalTimeout(h, user, 100_000);
         escrow.cancelExpired(h);
     }
 
