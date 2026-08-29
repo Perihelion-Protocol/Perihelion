@@ -43,7 +43,7 @@
     },
     {
       "id": "truncated_64",
-      "description": "Signature truncated to 64 bytes (missing v byte). Must be rejected.",
+      "description": "64-byte signature (missing the v byte). Note this is also the exact EIP-2098 'compact' encoding of valid_canonical's r/s (its v=27 means yParity=0, so no bit needs folding into s) — i.e. a permissive verifier that falls back to compact-signature recovery for 64-byte inputs would recover the *correct* signer here. Must be rejected on length alone (== 64, not 65), matching PerihelionEscrow._verify's `signature.length != 65` guard, independent of what it would recover to.",
       "signature": "0x7c5e289af9831456d79a81b665e2e37d72e2289bb775354c8a9d9f161455539e7fe04b2ec0a4981de3777a340f01ed18575ad5a913566ac552ec3caa0728f940",
       "expectedResult": "reject"
     },
