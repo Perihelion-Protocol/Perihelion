@@ -200,7 +200,7 @@ export class MempoolServer {
         intent,
         signature: signed.signature,
         status: "pending",
-        createdAt: Date.now(),
+        createdAt: Math.floor(Date.now() / 1_000),
       };
 
       this.store.set(hash, record);

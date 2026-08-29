@@ -9,6 +9,7 @@
 
 import { isAddress } from "viem";
 import { isStellarAddress, isStellarAsset } from "./stellar.js";
+import { PerihelionError } from "./errors.js";
 import type {
   Address,
   Hex,
@@ -20,9 +21,9 @@ import type {
 } from "./types.js";
 
 /** Thrown when a mempool response does not conform to the expected shape. */
-export class MempoolResponseError extends Error {
-  constructor(message: string) {
-    super(`[Perihelion] invalid mempool response: ${message}`);
+export class MempoolResponseError extends PerihelionError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(`[Perihelion] invalid mempool response: ${message}`, options);
     this.name = "MempoolResponseError";
   }
 }
@@ -62,6 +63,16 @@ function asFiniteNumber(value: unknown, field: string): number {
     throw new MempoolResponseError(`'${field}' must be a finite number (got ${JSON.stringify(value)})`);
   }
   return value;
+}
+
+function asTimestampInSeconds(value: unknown, field: string): number {
+  const n = asFiniteNumber(value, field);
+  if (!Number.isInteger(n) || n < 0 || n >= 100_000_000_000) {
+    throw new MempoolResponseError(
+      `'${field}' must be a Unix timestamp in seconds (got ${JSON.stringify(value)})`,
+    );
+  }
+  return n;
 }
 
 function asPositiveInteger(value: unknown, field: string): number {
@@ -162,7 +173,7 @@ export function parseIntentRecord(value: unknown): IntentRecord {
     status: v.status as IntentStatus,
     solver: v.solver as Address | undefined,
     settlementTx: v.settlementTx as string | undefined,
-    createdAt: asFiniteNumber(v.createdAt, "createdAt"),
+    createdAt: asTimestampInSeconds(v.createdAt, "createdAt"),
   };
 }
 
