@@ -18,7 +18,7 @@ import {
 } from "viem";
 import type { Address, Hex, Intent } from "./types.js";
 import { isStellarAddress, isStellarAsset } from "./stellar.js";
-import { PerihelionValidationError } from "./errors.js";
+import { IntentValidationError, PerihelionValidationError } from "./errors.js";
 
 
 /**
@@ -79,104 +79,117 @@ export function validateIntent(
   now = Math.floor(Date.now() / 1000),
 ): void {
   if (!isAddress(params.user)) {
-    throw new PerihelionValidationError(`must be a valid 20-byte EVM address (got '${params.user}')`, "user");
+    throw new IntentValidationError("user", `must be a valid 20-byte EVM address (got '${params.user}')`);
   }
   if (!isStellarAddress(params.destination)) {
-    throw new PerihelionValidationError(
-      `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7, with a valid checksum (got '${params.destination}')`,
+    throw new IntentValidationError(
       "destination",
+      `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7, with a valid checksum (got '${params.destination}')`,
     );
   }
   // Enforce byte-length bounds as defence-in-depth, independent of regex.
   // Bounds are measured in UTF-8 bytes, matching the contract's bytes(intent.destination).length.
   const destBytes = new TextEncoder().encode(params.destination).length;
   if (destBytes > MAX_DESTINATION_LEN) {
-    throw new PerihelionValidationError(
-      `exceeds ${MAX_DESTINATION_LEN} bytes (got ${destBytes} bytes)`, "destination",
+    throw new IntentValidationError(
+      "destination",
+      `exceeds ${MAX_DESTINATION_LEN} bytes (got ${destBytes} bytes)`,
     );
   }
   if (!Number.isInteger(params.sourceChainId) || params.sourceChainId <= 0) {
-    throw new PerihelionValidationError(
-      `must be a positive integer chain ID (got ${params.sourceChainId})`, "sourceChainId",
+    throw new IntentValidationError(
+      "sourceChainId",
+      `must be a positive integer chain ID (got ${params.sourceChainId})`,
     );
   }
   if (!isAddress(params.sourceAsset)) {
-    throw new PerihelionValidationError(
-      `must be a valid 20-byte EVM address (got '${params.sourceAsset}')`, "sourceAsset",
+    throw new IntentValidationError(
+      "sourceAsset",
+      `must be a valid 20-byte EVM address (got '${params.sourceAsset}')`,
     );
   }
   if (!isPositiveIntString(params.sourceAmount)) {
-    throw new PerihelionValidationError(
-      `must be a positive integer string with no leading zeros (got '${params.sourceAmount}')`, "sourceAmount",
+    throw new IntentValidationError(
+      "sourceAmount",
+      `must be a positive integer string with no leading zeros (got '${params.sourceAmount}')`,
     );
   }
   try {
     const sourceAmountBig = BigInt(params.sourceAmount);
     if (sourceAmountBig > U128_MAX) {
-      throw new PerihelionValidationError(
-        `exceeds maximum bridgeable amount (${U128_MAX})`, "sourceAmount",
+      throw new IntentValidationError(
+        "sourceAmount",
+        `exceeds maximum bridgeable amount (${U128_MAX})`,
       );
     }
   } catch (err) {
     if (err instanceof PerihelionValidationError) throw err;
-    throw new PerihelionValidationError(`is not a valid integer string`, "sourceAmount");
+    throw new IntentValidationError("sourceAmount", `is not a valid integer string`);
   }
   if (!isStellarAsset(params.destAsset)) {
-    throw new PerihelionValidationError(
-      `must be 'native' or '<CODE>:<G...ISSUER>' (got '${params.destAsset}')`, "destAsset",
+    throw new IntentValidationError(
+      "destAsset",
+      `must be 'native' or '<CODE>:<G...ISSUER>' (got '${params.destAsset}')`,
     );
   }
   // Enforce byte-length bound on destAsset as defence-in-depth, independent of regex.
   const destAssetBytes = new TextEncoder().encode(params.destAsset).length;
   if (destAssetBytes > MAX_DEST_ASSET_LEN) {
-    throw new PerihelionValidationError(
-      `exceeds ${MAX_DEST_ASSET_LEN} bytes (got ${destAssetBytes} bytes)`, "destAsset",
+    throw new IntentValidationError(
+      "destAsset",
+      `exceeds ${MAX_DEST_ASSET_LEN} bytes (got ${destAssetBytes} bytes)`,
     );
   }
   if (!isPositiveIntString(params.minDestAmount)) {
-    throw new PerihelionValidationError(
-      `must be a positive integer string with no leading zeros (got '${params.minDestAmount}')`, "minDestAmount",
+    throw new IntentValidationError(
+      "minDestAmount",
+      `must be a positive integer string with no leading zeros (got '${params.minDestAmount}')`,
     );
   }
   try {
     const minDestAmountBig = BigInt(params.minDestAmount);
     if (minDestAmountBig > I128_MAX) {
-      throw new PerihelionValidationError(
-        `exceeds maximum bridgeable amount (${I128_MAX})`, "minDestAmount",
+      throw new IntentValidationError(
+        "minDestAmount",
+        `exceeds maximum bridgeable amount (${I128_MAX})`,
       );
     }
   } catch (err) {
     if (err instanceof PerihelionValidationError) throw err;
-    throw new PerihelionValidationError(`is not a valid integer string`, "minDestAmount");
+    throw new IntentValidationError("minDestAmount", `is not a valid integer string`);
   }
   if (!Number.isInteger(params.deadline) || params.deadline <= now) {
-    throw new PerihelionValidationError(
-      `must be a Unix timestamp strictly in the future (got ${params.deadline}, now is ${now})`, "deadline",
+    throw new IntentValidationError(
+      "deadline",
+      `must be a Unix timestamp strictly in the future (got ${params.deadline}, now is ${now})`,
     );
   }
-  if (params.deadline > now + MAX_DEADLINE_HORIZON) {
-    throw new PerihelionValidationError(
-      `exceeds the maximum deadline horizon of ${MAX_DEADLINE_HORIZON}s from now ` +
-        `(got ${params.deadline}, now is ${now}); the Soroban settlement contract ` +
-        `rejects FillInstructions with a deadline further out than this`,
+  if (params.deadline > now + MAX_DEADLINE_HORIZON_SEC) {
+    throw new IntentValidationError(
       "deadline",
+      `must be at most ${MAX_DEADLINE_HORIZON_SEC}s in the future (= 7 days); ` +
+        `got ${params.deadline}, now is ${now}; the Soroban settlement contract ` +
+        `rejects FillInstructions with a deadline further out than this`,
     );
   }
   if (params.nonce !== undefined) {
     if (!isNonNegIntString(params.nonce)) {
-      throw new PerihelionValidationError(
-        `must be a non-negative decimal integer string (got '${params.nonce}')`, "nonce",
+      throw new IntentValidationError(
+        "nonce",
+        `must be a non-negative decimal integer string (got '${params.nonce}')`,
       );
     }
     if (BigInt(params.nonce) > (1n << 256n) - 1n) {
-      throw new PerihelionValidationError(
-        `exceeds uint256 maximum (got ${params.nonce})`, "nonce",
+      throw new IntentValidationError(
+        "nonce",
+        `exceeds uint256 maximum (got ${params.nonce})`,
       );
     }
   }
   if (params.preferredSolver !== undefined && !isAddress(params.preferredSolver)) {
-    throw new PerihelionValidationError(
-      `must be a valid 20-byte EVM address or zero address (got '${params.preferredSolver}')`, "preferredSolver",
+    throw new IntentValidationError(
+      "preferredSolver",
+      `must be a valid 20-byte EVM address or zero address (got '${params.preferredSolver}')`,
     );
   }
 }
@@ -206,6 +219,13 @@ export const MAX_DEST_ASSET_LEN = 69;
  * 7 days = 604_800 s.
  */
 export const MAX_DEADLINE_HORIZON = 604_800;
+
+/**
+ * Alias for {@link MAX_DEADLINE_HORIZON}. Exported under the `_SEC` suffix so
+ * it is unambiguous at call sites and consistent with the issue #523
+ * requirement for an explicit unit suffix in the public API.
+ */
+export const MAX_DEADLINE_HORIZON_SEC = MAX_DEADLINE_HORIZON;
 
 /**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
@@ -302,15 +322,15 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
   const suppressWarning = options?.suppressWarning ?? false;
 
   if (!isStellarAddress(params.destination)) {
-    throw new PerihelionValidationError(
+    throw new IntentValidationError(
+      "destination",
       `buildIntent: invalid destination "${params.destination}" — must be a G... or C... Stellar strkey`,
-      "destination"
     );
   }
   if (!isStellarAsset(params.destAsset)) {
-    throw new PerihelionValidationError(
+    throw new IntentValidationError(
+      "destAsset",
       `buildIntent: invalid destAsset "${params.destAsset}" — must be "native" or "CODE:ISSUER"`,
-      "destAsset"
     );
   }
 

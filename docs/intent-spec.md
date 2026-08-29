@@ -23,6 +23,44 @@ All amounts are decimal strings in the asset's smallest unit. The canonical
 per-asset decimals, corridor conversion rule, and human-unit ceilings are in
 [Asset Decimals and Corridors](./assets.md).
 
+### `destination` field — Stellar strkey with CRC-16 checksum
+
+`destination` must be a valid **Stellar strkey**: a 56-character Base32 string
+beginning with `G` (ED25519 account address, version byte `0x30`) or `C`
+(contract address, version byte `0x10`). The last two bytes encode a
+**CRC-16/XMODEM checksum** over the preceding payload bytes; the SDK validates
+this checksum via `isStellarAddress` (in `sdk/src/stellar.ts`) before signing.
+
+Shape-only regex checks are **not sufficient** — a 56-character string in the
+right character class can have a corrupted checksum and be undeliverable. A
+single transcription error (one character changed) will fail the checksum, and
+`validateIntent` will throw an `IntentValidationError` on the `destination`
+field before the intent is ever signed or submitted.
+
+### `deadline` field — lower and upper bounds
+
+`deadline` is a Unix timestamp (integer seconds) and must satisfy:
+
+```
+now < deadline ≤ now + MAX_DEADLINE_HORIZON_SEC
+```
+
+| Bound | Value | Source |
+|---|---|---|
+| **Lower** | strictly after `now` | prevents immediately-expired intents |
+| **Upper** | `now + 604_800` (7 days) | `MAX_DEADLINE_HORIZON_SEC` in SDK; `MAX_DEADLINE_HORIZON` in Soroban contract |
+
+The upper bound is enforced both **client-side** by `validateIntent` /
+`buildIntent` (SDK constant `MAX_DEADLINE_HORIZON_SEC = 604_800`) and
+**server-side** by the Soroban settlement contract
+(`settlement::MAX_DEADLINE_HORIZON = 604_800`). An intent whose deadline
+exceeds `now + 604_800` seconds will be rejected by `validateIntent` before it
+is signed, preventing a stuck state where funds are locked and a LayerZero fee
+is paid for an intent that the Soroban contract will never register.
+
+The 7-day window covers any realistic cross-chain settlement cycle while
+bounding the per-intent storage TTL on Stellar.
+
 ### preferredSolver Limitation
 
 **`preferredSolver` controls solver reservation on the EVM source chain only.**
