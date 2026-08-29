@@ -44,24 +44,24 @@ cargo check --target wasm32-unknown-unknown --release
 - Issue #270 tracks the layout expansion
 
 **Fix Applied (Commit 0922dd5):**
-- Expanded FillInstruction to 219 bytes:
+- Expanded FillInstruction to 227 bytes:
   - recipient: 32 → 56 bytes (full Stellar strkey text)
   - dest_asset: 32 → 69 bytes (supports CODE:ISSUER format)
-  - Updated layout: `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)`
+  - Updated layout: `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32) | reservation_window(8)`
 - Updated golden vector: `contracts/shared/wire-vectors/fill_instruction.hex`
-- Updated all tests to use 219-byte layout
+- Updated all tests to use the 227-byte layout
 
 **Verification:**
 ```bash
 # EVM side
 cd contracts/evm
 forge test --match-test "test_FillInstructionVectorMatchesSolidityEncoder" -vv
-# ✓ Encoder produces correct 219-byte golden vector
+# ✓ Encoder produces correct 227-byte golden vector
 
 # Soroban side
 cd contracts/soroban/settlement
 cargo test fill_instruction_matches_golden_vector
-# ✓ Decoder accepts 219-byte payload
+# ✓ Decoder accepts 227-byte payload
 ```
 
 ---
@@ -85,8 +85,8 @@ cargo test fill_instruction_matches_golden_vector
 **Verification:**
 ```bash
 cd contracts/soroban/settlement
-cargo test fill_instruction_recipient_round_trips_with_219_byte_format
-# ✓ Recipient address survives round-trip through 219-byte wire format
+cargo test fill_instruction_recipient_round_trips_with_227_byte_format
+# ✓ Recipient address survives round-trip through 227-byte wire format
 ```
 
 **Test Case:**
@@ -94,7 +94,7 @@ cargo test fill_instruction_recipient_round_trips_with_219_byte_format
 // Original address (Stellar strkey)
 let original = Address::from_str(&env, "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4");
 
-// Encode and decode through 219-byte wire format
+// Encode and decode through 227-byte wire format
 // ...payload construction...
 let (msg_type, fi, _) = decode_message(&env, &payload);
 
@@ -147,11 +147,12 @@ PROPTEST_CASES=100 cargo test fuzz -- --test-threads=1
 
 All three message types are now fully specified with consistent layouts across EVM and Soroban:
 
-### FillInstruction (219 bytes)
+### FillInstruction (227 bytes)
 Sent: Stellar ← Source Chain
 ```
 version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | 
-dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
+dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32) |
+reservation_window(8)
 ```
 
 ### FillConfirmed (90 bytes)
@@ -169,7 +170,7 @@ version(1) | type(1) | intent_hash(32) | reason(1)
 ## Test Vectors
 
 ### Golden Vectors (accepted by both sides)
-- `fill_instruction.hex` - 219 bytes, canonical payload
+- `fill_instruction.hex` - 227 bytes, canonical payload
 - `fill_confirmed.hex` - 90 bytes, canonical payload  
 - `cancel_intent.hex` - 35 bytes, canonical payload
 
