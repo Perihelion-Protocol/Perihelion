@@ -95,6 +95,65 @@ test("verifyIntent accepts a valid signature and rejects a tampered intent", asy
   assert.equal(await verifyIntent(tampered, signed.signature, DOMAIN), false);
 });
 
+// ---------------------------------------------------------------------------
+// Issue #529 — Strict 65-byte, low-s signature acceptance
+// ---------------------------------------------------------------------------
+
+test("verifyIntent rejects a 64-byte EIP-2098 compact re-encoding of an otherwise-valid signature", async () => {
+  const intent = sampleIntent();
+  const client = new PerihelionClient({
+    mempoolUrl: "http://localhost",
+    chainId: CHAIN_ID,
+    verifyingContract: CONTRACT_ADDRESS,
+  });
+  const wallet = createWalletClient({ account, chain: base, transport: http() });
+  const signed = await client.signIntent(wallet, intent);
+
+  // Re-encode the valid 65-byte (r,s,v) signature as a 64-byte EIP-2098
+  // compact signature (r ‖ yParityAndS). This recovers to the exact same
+  // signer as the original — it's a pure re-encoding — which is precisely
+  // why it must be rejected on length alone, matching
+  // PerihelionEscrow._verify's `signature.length != 65` guard.
+  const hex = signed.signature.slice(2);
+  const r = hex.slice(0, 64);
+  const s = BigInt(`0x${hex.slice(64, 128)}`);
+  const v = parseInt(hex.slice(128, 130), 16);
+  const yParity = v - 27;
+  const yParityAndS = yParity === 1 ? s | (1n << 255n) : s;
+  const compact = `0x${r}${yParityAndS.toString(16).padStart(64, "0")}` as `0x${string}`;
+  assert.equal(compact.length, 130); // "0x" + 128 hex chars = 64 bytes
+
+  assert.equal(await verifyIntent(intent, compact, DOMAIN), false);
+});
+
+test("verifyIntent rejects a 65-byte signature with a high-s (malleated) value", async () => {
+  const intent = sampleIntent();
+  const client = new PerihelionClient({
+    mempoolUrl: "http://localhost",
+    chainId: CHAIN_ID,
+    verifyingContract: CONTRACT_ADDRESS,
+  });
+  const wallet = createWalletClient({ account, chain: base, transport: http() });
+  const signed = await client.signIntent(wallet, intent);
+
+  // Construct the mathematically-valid high-s malleated counterpart:
+  // same r, s' = n - s, v flipped. Still recovers the correct signer via
+  // ecrecover/secp256k1, but must be rejected under EIP-2 low-s enforcement.
+  const SECP256K1_N =
+    0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+  const hex = signed.signature.slice(2);
+  const r = hex.slice(0, 64);
+  const s = BigInt(`0x${hex.slice(64, 128)}`);
+  const v = parseInt(hex.slice(128, 130), 16);
+  const highS = SECP256K1_N - s;
+  const flippedV = v === 27 ? 28 : 27;
+  const malleated =
+    `0x${r}${highS.toString(16).padStart(64, "0")}${flippedV.toString(16).padStart(2, "0")}` as `0x${string}`;
+  assert.equal(malleated.length, 132); // "0x" + 130 hex chars = 65 bytes
+
+  assert.equal(await verifyIntent(intent, malleated, DOMAIN), false);
+});
+
 test("buildIntent warns when sourceAmount is below V_min", () => {
   const logged: string[] = [];
   const warnStub = (msg: string) => logged.push(msg);
@@ -161,6 +220,193 @@ test("buildIntent does not warn when sourceAmount equals V_min", () => {
     assert.equal(logged.length, 0, "expected no warning at the V_min boundary");
   } finally {
     console.warn = originalWarn;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #527 — V_min threshold normalized by sourceDecimals
+// ---------------------------------------------------------------------------
+
+test("buildIntent warns for a 6-decimal (USDC) amount just below the default V_min", () => {
+  const logged: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
+
+  try {
+    buildIntent(
+      {
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "9999999", // $9.999999 at 6dp — just under the $10 default V_min
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "9000000",
+        deadline: 4102444800,
+      },
+      { sourceDecimals: 6 }
+    );
+    assert.ok(logged.length > 0, "expected warning just below V_min for a 6-decimal asset");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("buildIntent warns for the economically-equivalent 18-decimal (WETH) amount", () => {
+  const logged: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
+
+  try {
+    buildIntent(
+      {
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x4200000000000000000000000000000000000006", // 18dp asset (e.g. WETH)
+        // 9.999999 in 18-decimal units — economically identical to "9999999" at 6dp.
+        // A raw-unit comparison against vMin would wrongly skip this: the raw
+        // value (9.999999e18) is far larger than vMin's raw value (1e7).
+        sourceAmount: "9999999000000000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "9000000",
+        deadline: 4102444800,
+      },
+      { sourceDecimals: 18 }
+    );
+    assert.ok(
+      logged.length > 0,
+      "expected warning: sourceAmount must be normalized by sourceDecimals before comparing to V_min"
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("buildIntent does not warn at the exact V_min boundary for an 18-decimal asset", () => {
+  const logged: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
+
+  try {
+    buildIntent(
+      {
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x4200000000000000000000000000000000000006",
+        // Exactly $10 in 18-decimal units — boundary is exclusive, so no warning.
+        sourceAmount: "10000000000000000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "9000000",
+        deadline: 4102444800,
+      },
+      { sourceDecimals: 18 }
+    );
+    assert.equal(logged.length, 0, "expected no warning at the V_min boundary for an 18-decimal asset");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("buildIntent does not warn for an 18-decimal amount comfortably above V_min", () => {
+  const logged: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
+
+  try {
+    buildIntent(
+      {
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x4200000000000000000000000000000000000006",
+        sourceAmount: "1000000000000000000000", // 1000 token-units @ 18dp — normalizes to $1000
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "900000",
+        deadline: 4102444800,
+      },
+      { sourceDecimals: 18 }
+    );
+    // 1e21 raw @ 18dp normalizes to $1000, well above the $10 default V_min.
+    assert.equal(logged.length, 0, "expected no warning for an 18-decimal amount well above V_min");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #526 — validateIntent performs checksum-aware destination/destAsset validation
+// ---------------------------------------------------------------------------
+
+test("validateIntent rejects a destination with an invalid CRC-16 checksum", () => {
+  // Same strkey shape/length/version as VALID_DESTINATION but with the final
+  // character flipped, which corrupts the checksum while leaving the shape valid.
+  const lastChar = VALID_DESTINATION.at(-1);
+  const badChecksumDestination =
+    VALID_DESTINATION.slice(0, -1) + (lastChar === "A" ? "B" : "A");
+
+  try {
+    validateIntent({
+      user: account.address,
+      destination: badChecksumDestination,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000000",
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "900000",
+      deadline: 4102444800,
+    });
+    assert.fail("expected validateIntent to throw for a bad destination checksum");
+  } catch (err) {
+    assert.ok(err instanceof PerihelionValidationError);
+    assert.equal((err as PerihelionValidationError).field, "destination");
+  }
+});
+
+test("validateIntent rejects a destAsset whose issuer has an invalid CRC-16 checksum", () => {
+  const lastChar = VALID_DESTINATION.at(-1);
+  const badChecksumIssuer =
+    VALID_DESTINATION.slice(0, -1) + (lastChar === "A" ? "B" : "A");
+
+  try {
+    validateIntent({
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000000",
+      destAsset: `USDC:${badChecksumIssuer}`,
+      minDestAmount: "900000",
+      deadline: 4102444800,
+    });
+    assert.fail("expected validateIntent to throw for a bad destAsset issuer checksum");
+  } catch (err) {
+    assert.ok(err instanceof PerihelionValidationError);
+    assert.equal((err as PerihelionValidationError).field, "destAsset");
+  }
+});
+
+test("buildIntent rejects a destination with an invalid checksum via validateIntent, not a separate check", () => {
+  const lastChar = VALID_DESTINATION.at(-1);
+  const badChecksumDestination =
+    VALID_DESTINATION.slice(0, -1) + (lastChar === "A" ? "B" : "A");
+
+  try {
+    buildIntent({
+      user: account.address,
+      destination: badChecksumDestination,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000000",
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "900000",
+      deadline: 4102444800,
+    });
+    assert.fail("expected buildIntent to throw for a bad destination checksum");
+  } catch (err) {
+    assert.ok(err instanceof PerihelionValidationError);
+    assert.equal((err as PerihelionValidationError).field, "destination");
   }
 });
 

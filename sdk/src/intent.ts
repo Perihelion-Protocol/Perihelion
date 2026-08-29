@@ -87,7 +87,7 @@ export function validateIntent(
       `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7, with a valid checksum (got '${params.destination}')`,
     );
   }
-  // Enforce byte-length bounds as defence-in-depth, independent of regex.
+  // Enforce byte-length bounds as defence-in-depth, independent of isStellarAddress.
   // Bounds are measured in UTF-8 bytes, matching the contract's bytes(intent.destination).length.
   const destBytes = new TextEncoder().encode(params.destination).length;
   if (destBytes > MAX_DESTINATION_LEN) {
@@ -127,12 +127,11 @@ export function validateIntent(
     throw new IntentValidationError("sourceAmount", `is not a valid integer string`);
   }
   if (!isStellarAsset(params.destAsset)) {
-    throw new IntentValidationError(
-      "destAsset",
-      `must be 'native' or '<CODE>:<G...ISSUER>' (got '${params.destAsset}')`,
+    throw new PerihelionValidationError(
+      `must be 'native' or '<CODE>:<G...ISSUER>' with a valid issuer checksum (got '${params.destAsset}')`, "destAsset",
     );
   }
-  // Enforce byte-length bound on destAsset as defence-in-depth, independent of regex.
+  // Enforce byte-length bound on destAsset as defence-in-depth, independent of isStellarAsset.
   const destAssetBytes = new TextEncoder().encode(params.destAsset).length;
   if (destAssetBytes > MAX_DEST_ASSET_LEN) {
     throw new IntentValidationError(
@@ -229,7 +228,10 @@ export const MAX_DEADLINE_HORIZON_SEC = MAX_DEADLINE_HORIZON;
 
 /**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
- * messaging fee makes the intent unprofitable to fill. Override via {@link BuildOptions.minNotional}.
+ * messaging fee makes the intent unprofitable to fill. Override via {@link BuildOptions.vMin}.
+ * Denominated in a fixed 6-decimal basis (1_000_000 = $1), independent of the
+ * source asset's own decimal precision — see {@link BuildOptions.vMin} for how
+ * this is reconciled with `sourceAmount` when the two differ.
  * Default: $10 USD equivalent.
  */
 export const DEFAULT_V_MIN = "10000000"; // 10 USD in 6-decimal units
@@ -288,9 +290,21 @@ export function validateAmount(value: string, field: string, max = I128_MAX): vo
 
 /** Options for {@link buildIntent}. */
 export interface BuildOptions {
-  /** Minimum notional (in source-asset smallest units) below which a warning is emitted. */
+  /**
+   * Minimum notional below which a warning is emitted, denominated in a fixed
+   * 6-decimal basis (1_000_000 = $1 USD-equivalent) — the same basis as
+   * {@link DEFAULT_V_MIN} — regardless of the source asset's own decimal
+   * precision. `buildIntent` normalizes `sourceAmount` (which is denominated in
+   * `sourceDecimals`) into this 6-decimal basis before comparing, so a `vMin`
+   * of `"10000000"` always means "$10" whether the source asset has 6, 7, or 18
+   * decimals. Defaults to {@link DEFAULT_V_MIN}.
+   */
   vMin?: string;
-  /** Decimal places of the source asset (e.g. 6 for USDC, 18 for WETH). Required to validate vMin. */
+  /**
+   * Decimal places of the source asset (e.g. 6 for USDC, 18 for WETH), used to
+   * normalize `sourceAmount` onto `vMin`'s 6-decimal basis. Defaults to 6
+   * (i.e. `sourceAmount` is assumed to already be in `vMin`'s basis) when omitted.
+   */
   sourceDecimals?: number;
   /** If true, suppress the warning even if below vMin. */
   suppressWarning?: boolean;
@@ -303,14 +317,20 @@ export interface BuildOptions {
  * if the intent's source amount is below the economical threshold (V_min).
  *
  * **V_min warning behavior:**
- * - The warning is always emitted when `sourceAmount < vMin` and `suppressWarning` is false.
- * - DEFAULT_V_MIN assumes 6 decimal places (suitable for USDC, USDT, etc.).
- * - If `sourceDecimals` is provided, the warning note clarifies the precision assumption.
- * - If `sourceDecimals` is omitted, the warning includes a note that the default
- *   6-decimal assumption is being used.
+ * - `sourceAmount` (denominated in `sourceDecimals`) is normalized onto `vMin`'s
+ *   fixed 6-decimal basis before comparing, so economically equivalent amounts
+ *   warn identically regardless of the source asset's decimal precision — see
+ *   {@link BuildOptions.vMin}.
+ * - The warning is emitted when the normalized `sourceAmount < vMin` and
+ *   `suppressWarning` is false. The boundary is exclusive: `sourceAmount === vMin`
+ *   does not warn.
+ * - If `sourceDecimals` is omitted, `sourceAmount` is assumed to already be in
+ *   `vMin`'s 6-decimal basis (matching {@link DEFAULT_V_MIN}'s own assumption),
+ *   and the warning includes a note to that effect.
  *
  * @param params  Intent parameters (user, destination, amounts, etc.)
- * @param options Build options: `vMin` (minimum notional), `sourceDecimals` (asset precision),
+ * @param options Build options: `vMin` (minimum notional, see {@link BuildOptions.vMin}),
+ *                `sourceDecimals` (asset precision, see {@link BuildOptions.sourceDecimals}),
  *                and `suppressWarning` (skip the V_min check)
  * @throws {@link PerihelionValidationError} if any field is malformed
  * @returns A fully-formed Intent with nonce and preferredSolver filled in
@@ -321,18 +341,9 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
   const vMin = options?.vMin ?? DEFAULT_V_MIN;
   const suppressWarning = options?.suppressWarning ?? false;
 
-  if (!isStellarAddress(params.destination)) {
-    throw new IntentValidationError(
-      "destination",
-      `buildIntent: invalid destination "${params.destination}" — must be a G... or C... Stellar strkey`,
-    );
-  }
-  if (!isStellarAsset(params.destAsset)) {
-    throw new IntentValidationError(
-      "destAsset",
-      `buildIntent: invalid destAsset "${params.destAsset}" — must be "native" or "CODE:ISSUER"`,
-    );
-  }
+  // destination/destAsset checksum and shape validation is performed above by
+  // validateIntent(params) (via isStellarAddress/isStellarAsset), so no need
+  // to repeat it here — see #526.
 
   const intent: Intent = {
     ...params,
@@ -348,16 +359,25 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
   validateAmount(intent.minDestAmount, "minDestAmount", I128_MAX);
 
   // Warn if below minimum economical size.
-  // The vMin check is performed in the source asset's smallest units (e.g., wei for WETH, stroops for XLM).
-  // DEFAULT_V_MIN assumes 6 decimal places; pass sourceDecimals to adjust the threshold for different
-  // token precisions. If sourceDecimals is provided, V_min is normalized; otherwise, the raw check proceeds.
+  // vMin is denominated in a fixed 6-decimal basis (see BuildOptions.vMin / DEFAULT_V_MIN),
+  // while sourceAmount is denominated in sourceDecimals units (e.g. wei for 18dp WETH,
+  // stroops for 7dp XLM). Comparing the two raw values directly would over- or under-warn
+  // for any asset whose decimals differ from 6 (#527) — e.g. a tiny-but-nonzero WETH amount
+  // has a huge raw wei value that would never trip a raw comparison against vMin. Instead,
+  // cross-multiply so both sides are compared on a common (sourceDecimals + 6)-scale without
+  // any rounding loss:
+  //   sourceAmount / 10^sourceDecimals  <  vMin / 10^6
+  //   sourceAmount * 10^6               <  vMin * 10^sourceDecimals
   if (!suppressWarning) {
     const vMinBig = BigInt(vMin);
     const sourceAmountBig = BigInt(intent.sourceAmount);
-    if (sourceAmountBig < vMinBig) {
+    const sourceDecimals = options?.sourceDecimals ?? 6;
+    const lhs = sourceAmountBig * 10n ** 6n;
+    const rhs = vMinBig * 10n ** BigInt(sourceDecimals);
+    if (lhs < rhs) {
       const decimalNote = options?.sourceDecimals === undefined
         ? " (sourceDecimals not provided; assuming default 6-decimal precision)"
-        : "";
+        : ` (normalized from ${sourceDecimals}-decimal source units)`;
       console.warn(
         `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
         `economical minimum V_min (${vMin})${decimalNote}. The fixed LayerZero messaging fee may ` +
@@ -397,9 +417,19 @@ const SECP256K1_HALF_N =
 /**
  * Recover the signer of an intent and check it matches `intent.user`.
  *
- * Rejects EIP-2 non-canonical (high-s) signatures to prevent malleability.
- * Malformed-length signatures fall through to `recoverTypedDataAddress`, which
- * rejects them.
+ * Matches `PerihelionEscrow._verify` exactly: only a canonical 65-byte
+ * `r ‖ s ‖ v` signature is accepted.
+ * - **64-byte EIP-2098 "compact" signatures are rejected outright.** viem's
+ *   recovery path accepts them, but the on-chain verifier does not (it checks
+ *   `signature.length != 65` before touching `r`/`s`/`v`), so accepting them
+ *   here would let a signature the contract would refuse pass SDK-side checks —
+ *   and, worse, a compact re-encoding of an already-valid 65-byte signature
+ *   recovers to the *same* signer, giving each signed intent a second valid
+ *   byte-string (malleability) purely from the encoding choice.
+ * - Any length other than 65 bytes is rejected immediately.
+ * - The EIP-2 low-s check is applied unconditionally to the one accepted
+ *   length, rejecting the high-s (`s > n/2`) malleable counterpart of every
+ *   signature.
  *
  * @param domain  Must be built with {@link perihelionDomain}.
  */
@@ -408,12 +438,15 @@ export async function verifyIntent(
   signature: Hex,
   domain: TypedDataDomain,
 ): Promise<boolean> {
-  // EIP-2 low-s enforcement for canonical 65-byte signatures
-  // ("0x" + r[32] + s[32] + v[1] = 132 hex chars).
-  if (signature.length === 132) {
-    const s = BigInt(`0x${signature.slice(66, 130)}`);
-    if (s > SECP256K1_HALF_N) return false;
-  }
+  // Strictly require a canonical 65-byte (r, s, v) signature:
+  // "0x" + r[32] + s[32] + v[1] = 132 hex chars. This rejects 64-byte EIP-2098
+  // compact signatures outright, matching PerihelionEscrow._verify's
+  // `signature.length != 65` guard.
+  if (signature.length !== 132) return false;
+
+  // EIP-2 low-s enforcement, unconditional for the one accepted length.
+  const s = BigInt(`0x${signature.slice(66, 130)}`);
+  if (s > SECP256K1_HALF_N) return false;
 
   const recovered = await recoverTypedDataAddress({
     domain,
