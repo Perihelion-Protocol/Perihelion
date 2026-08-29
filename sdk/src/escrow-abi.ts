@@ -93,6 +93,31 @@ export const ESCROW_ABI = [
           { name: "preferredSolver", type: "address" },
         ],
       },
+      { name: "payer", type: "address" },
+    ],
+    outputs: [{ name: "nativeFee", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "quoteFee",
+    inputs: [
+      {
+        name: "intent",
+        type: "tuple",
+        components: [
+          { name: "user", type: "address" },
+          { name: "destination", type: "string" },
+          { name: "sourceChainId", type: "uint256" },
+          { name: "sourceAsset", type: "address" },
+          { name: "sourceAmount", type: "uint256" },
+          { name: "destAsset", type: "string" },
+          { name: "minDestAmount", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+          { name: "preferredSolver", type: "address" },
+        ],
+      },
     ],
     outputs: [{ name: "nativeFee", type: "uint256" }],
     stateMutability: "view",
@@ -106,6 +131,10 @@ export const ESCROW_ABI = [
       { name: "user", type: "address", indexed: true },
       { name: "asset", type: "address", indexed: false },
       { name: "amount", type: "uint256", indexed: false },
+      { name: "destination", type: "string", indexed: false },
+      { name: "destAsset", type: "string", indexed: false },
+      { name: "minDestAmount", type: "uint128", indexed: false },
+      { name: "deadline", type: "uint64", indexed: false },
     ],
   },
   {
@@ -116,6 +145,15 @@ export const ESCROW_ABI = [
       { name: "user", type: "address", indexed: true },
       { name: "amount", type: "uint256", indexed: false },
       { name: "reason", type: "uint8", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "RefundedLocalTimeout",
+    inputs: [
+      { name: "intentHash", type: "bytes32", indexed: true },
+      { name: "user", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
     ],
   },
   {

@@ -39,11 +39,12 @@ import {
 ///      Changes to event topics or payloads MUST be reflected in the Soroban
 ///      contract (see `contracts/soroban/settlement/src/lib.rs`).
 ///
-///      | Event                  | Topics                                              | Data                          |
-///      |------------------------|-----------------------------------------------------|-------------------------------|
-///      | Locked                 | intentHash, solver, user                             | asset, amount                 |
+///      | Event                  | Topics                                              | Data                                                          |
+///      |------------------------|-----------------------------------------------------|---------------------------------------------------------------|
+///      | Locked                 | intentHash, solver, user                             | asset, amount, destination, destAsset, minDestAmount, deadline|
 ///      | Released               | intentHash, solver                                  | amount, fillAmount, fillLedger |
 ///      | Refunded               | intentHash, user                                    | amount, reason                |
+///      | RefundedLocalTimeout   | intentHash, user                                    | amount                        |
 ///      | PeerSet                | -                                                   | peer                          |
 ///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  |
 ///      | GuardianSet            | guardian                                            | -                             |
@@ -276,7 +277,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         address indexed solver,
         address indexed user,
         address asset,
-        uint256 amount
+        uint256 amount,
+        string destination,
+        string destAsset,
+        uint128 minDestAmount,
+        uint64 deadline
     );
     /// @param fillAmount Stellar-side delivery amount (informational; the escrow releases
     ///                   `l.amount`, not this value — see `_decodeFillConfirmed`).
@@ -292,6 +297,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         uint128 minDestAmount
     );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
+    event RefundedLocalTimeout(bytes32 indexed intentHash, address indexed user, uint256 amount);
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
@@ -666,7 +672,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // Increment the aggregate liability counter so skim() can compute surplus.
         totalLocked[intent.sourceAsset] += received;
 
-        emit Locked(intentHash, msg.sender, intent.user, intent.sourceAsset, received);
+        emit Locked(
+            intentHash,
+            msg.sender,
+            intent.user,
+            intent.sourceAsset,
+            received,
+            intent.destination,
+            intent.destAsset,
+            uint128(intent.minDestAmount),
+            uint64(intent.deadline)
+        );
 
         bytes memory message = _encodeFillInstruction(intentHash, intent);
         MessagingParams memory params = _buildMessagingParams(message, msg.value);
@@ -855,22 +871,30 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         l.refunded = true;
         totalLocked[l.asset] -= l.amount;
         _safeTransfer(l.asset, l.user, l.amount);
-        emit Refunded(intentHash, l.user, l.amount, CANCEL_REASON_EXPIRED);
+        emit RefundedLocalTimeout(intentHash, l.user, l.amount);
     }
 
     // --- Views ---------------------------------------------------------------
 
-    /// @notice Quote the LayerZero native fee for a FillInstruction to Stellar.
-    ///         Solvers should call this off-chain and pass the result (with a small
-    ///         buffer) as `msg.value` to {lock}. Any excess is refunded by the
-    ///         endpoint to the caller per the LayerZero V2 convention.
+    /// @notice Quote the LayerZero native fee for a FillInstruction to Stellar for a specific payer.
+    ///         Solvers should call this off-chain passing their own address as `payer` and pass
+    ///         the result (with a small buffer) as `msg.value` to {lock}. Any excess is refunded by
+    ///         the endpoint to the caller per the LayerZero V2 convention.
     /// @param intent Intent whose FillInstruction message size determines the fee.
+    /// @param payer The address that will call lock (refund destination for LayerZero endpoint).
     /// @return nativeFee Estimated native token fee in wei.
-    function quoteFee(Intent calldata intent) external view returns (uint256 nativeFee) {
+    function quoteFee(Intent calldata intent, address payer) public view returns (uint256 nativeFee) {
         // Use a placeholder hash — the fee depends only on message size, not content.
         bytes memory message = _encodeFillInstruction(bytes32(0), intent);
         MessagingParams memory params = _buildMessagingParams(message, 0);
-        return endpoint.quote(params, msg.sender).nativeFee;
+        return endpoint.quote(params, payer).nativeFee;
+    }
+
+    /// @notice Backward-compatible overload passing msg.sender as payer.
+    /// @param intent Intent whose FillInstruction message size determines the fee.
+    /// @return nativeFee Estimated native token fee in wei.
+    function quoteFee(Intent calldata intent) external view returns (uint256 nativeFee) {
+        return quoteFee(intent, msg.sender);
     }
 
     /// @notice Compute the canonical EIP-712 intent hash (I5).

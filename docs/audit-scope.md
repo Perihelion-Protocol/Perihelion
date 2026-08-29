@@ -22,12 +22,8 @@ All reviewable artifacts (source code, compiled bytecode, tests, threat model, t
 **Explicitly in scope: governance-extractable value.** The audit must assess
 what the timelock owner set and the Soroban admin key can extract or disrupt,
 not just what an external attacker can do. In particular:
-- `PerihelionEscrow.skim` — unbounded owner-only withdrawal of any token
-  balance the escrow holds, with no on-chain accounting tying it to actual
-  surplus (see [`docs/threat-model.md` T17](./threat-model.md#t17--governance-extractable-escrow-balance)).
-- The refund path (`cancelExpired` / `cancel_expired_intent`) being pausable
-  on both chains, removing the user's exit during a timelocked proposal (see
-  [T19](./threat-model.md#t19--refund-denial-via-pause)).
+- `PerihelionEscrow.skim` — owner-only withdrawal of surplus token balances, bounded by `totalLocked` per-token accounting (see [`docs/threat-model.md` T17](./threat-model.md#t17--governance-extractable-escrow-balance)).
+- The refund path (`cancelExpired` is unpausable on EVM; `cancel_expired_intent` is pausable on Soroban), see [T19](./threat-model.md#t19--refund-denial-via-pause).
 - `PerihelionTimelock.cancel` being callable by any single owner, a
   governance-liveness gap that can suppress a legitimate recovery action (see
   [T20](./threat-model.md#t20--governance-liveness)).
@@ -35,10 +31,8 @@ not just what an external attacker can do. In particular:
   [T18](./threat-model.md#t18--instant-endpoint-rotation-on-soroban)).
 
 This is a deliberate scope decision: `docs/threat-model.md` identifies
-governance-extractable escrow value as the largest currently unmitigated
-concentration of risk in the protocol, and a point-in-time audit is the
-appropriate venue to assess it before any of T17–T20's proposed mitigations
-land.
+governance-level trust assumptions, and a point-in-time audit is the
+appropriate venue to assess them against the protocol specifications.
 
 **Reproducible build**: Both contracts are built reproducibly using the provided Makefile:
 ```bash

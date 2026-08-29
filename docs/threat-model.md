@@ -19,9 +19,9 @@ and with [deployment.md](./deployment.md) for operational roles.
 | **LayerZero endpoint** | Enforces the OApp's DVN/ULN config; calls `lzReceive` only for verified messages | Accepts unverified messages (bypasses DVN set) | **Steal** (forge a FillConfirmed → release solver funds without a Stellar fill) | `msg.sender == address(endpoint)` guard in `lzReceive`; endpoint trust is the strongest assumption |
 | **DVN set** (LayerZero verifiers) | ≥ threshold DVNs attest the same source event honestly | A colluding DVN set attests a fake source event | **Steal** (forge a FillConfirmed or CancelIntent) | Multi-DVN with 2 required + 1 optional (≥3 distinct verifiers on common path); OApp admin can rotate set |
 | **Stellar validators** | Produce canonical ledger state with economic finality | A cartel finalizes a fraudulent Stellar ledger | **Steal** (forge a fill on Stellar that the Solver never actually funded); destroy the bridge's Stellar-side correctness | Stellar's consensus (Stellar Consensus Protocol); Perihelion inherits Stellar's finality guarantees |
-| **Admin / timelock owner set** (EVM) | Only executes governance actions the M-of-N honestly agreed to | Threshold of owners collude to rotate peer, or call `skim` to drain any token balance the escrow holds | **Steal, unbounded** — `skim` has no on-chain accounting tying it to actual surplus, so it is not limited to the drain scenarios above ([T17](#t17--governance-extractable-escrow-balance)) | M-of-N timelock with delay: any config change (including a `skim` proposal) is public for `delay` seconds before it executes — **but this is a detection window, not a prevention**: a single owner can also unilaterally `cancel` a *legitimate recovery* action ([T20](#t20--governance-liveness)), and the refund path is itself pausable during the delay ([T19](#t19--refund-denial-via-pause)) |
+| **Admin / timelock owner set** (EVM) | Only executes governance actions the M-of-N honestly agreed to | Threshold of owners collude to rotate peer, or call `skim` to extract surplus balances | **Surplus extraction** — `skim` is bounded on-chain by `totalLocked[token]` accounting (`balanceOf(this) - totalLocked[token]`), preventing extraction of active locked deposits ([T17](#t17--governance-extractable-escrow-balance)) | M-of-N timelock with delay: any config change (including peer/guardian rotation) is public for `delay` seconds before it executes — a single owner can also unilaterally `cancel` a *legitimate recovery* action ([T20](#t20--governance-liveness)) |
 | **Admin** (Soroban) | Configures endpoint, peer, and pause correctly | Sets a malicious endpoint/peer → steals Stellar-side funds | **Steal** (redirect settlement messages) | `set_peer` requires a 1-day propose/confirm delay; **`set_endpoint` does not — it takes effect instantly** ([T18](#t18--instant-endpoint-rotation-on-soroban)). Single-key admin on Soroban (future: migrate to multisig); refund liveness (`cancel_expired_intent`) is itself pausable ([T19](#t19--refund-denial-via-pause)) |
-| **Guardian** (EVM) | Only pauses in genuine emergencies | Pauses repeatedly, denying new locks and refunds | Censor (denial of new locks and local refunds for up to 72 h per 144 h cycle) | Auto-expiry (GUARDIAN_PAUSE_TTL) + cooldown; cannot unpause, move funds, or change config |
+| **Guardian** (EVM) | Only pauses in genuine emergencies | Pauses repeatedly, denying new locks | Censor (denial of new locks for up to 72 h per 144 h cycle; local refunds remain unpaused) | Auto-expiry (GUARDIAN_PAUSE_TTL) + cooldown; cannot unpause, move funds, or change config |
 | **Executor** (LayerZero delivery) | Delivers committed messages | Drops execution, censors delivery | Censor/delay | Permissionless: anyone can call `lzReceive` for a committed message; executor is replaceable |
 
 ### Key explicit assumptions
@@ -681,98 +681,46 @@ Even if the endpoint is compromised and funds are incorrectly released:
 ### Threat
 
 **Vector:** `skim(address token, address to, uint256 amount)`
-(`PerihelionEscrow.sol:511`) transfers an arbitrary amount of an arbitrary
-token to an arbitrary address, `onlyOwner`, with no accounting bound:
+(`PerihelionEscrow.sol:564`) allows the contract owner to recover surplus token balances held by the contract.
+
+If unbounded, an owner could call `skim` to drain active user deposits.
+
+### Mitigation: On-chain `totalLocked` liability accounting
+
+`PerihelionEscrow` implements per-token liability accounting via `totalLocked`:
 
 ```solidity
+mapping(address => uint256) public totalLocked;
+
 function skim(address token, address to, uint256 amount) external onlyOwner {
     if (to == address(0)) revert ZeroAddress();
+    uint256 bal = IERC20(token).balanceOf(address(this));
+    uint256 locked = totalLocked[token];
+    uint256 surplus = bal > locked ? bal - locked : 0;
+    if (amount > surplus) revert ExceedsSurplus();
     _safeTransfer(token, to, amount);
     emit Skimmed(token, to, amount);
 }
 ```
 
-The escrow tracks individual `Lock` entries (`locks[intentHash]`) but does not
-maintain a running `totalLocked` per token. There is therefore no on-chain
-value `skim` is checked against — "surplus only" (the function's NatSpec intent:
-recovering rebasing-token gains or accidental direct transfers) is a
-convention enforced by nobody, not a constraint the contract enforces. A
-malicious or compromised owner set can call `skim` for the full balance of any
-token the escrow holds, including funds currently locked against open,
-unfilled intents.
-
-**Why this is the largest single concentration of risk:** every other
-fund-moving path in the escrow (`lock`, `lzReceive`, `cancelExpired`) is gated
-by a specific state transition tied to an individual `Lock`. `skim` is not —
-it is a flat withdrawal of contract balance, scoped only by `onlyOwner`.
-
-**The timelock is a detection window, not a prevention:**
-
-1. **No user exit during the delay.** `cancelExpired` requires
-   `deadline + confirmationGrace` to have elapsed and is itself blocked by
-   `whenNotPaused` (`PerihelionEscrow.sol:743`, see [T19](#t19--refund-denial-via-pause)).
-   An adversarial owner can `pause()` immediately after proposing a `skim`,
-   preventing any user from self-rescuing via refund during the delay window.
-2. **A single owner can veto governance,** including a legitimate emergency
-   response (see [T20](#t20--governance-liveness)) — so the timelock's own
-   liveness against a compromised or rogue owner is not assured.
-3. **The delay bounds detection time, not loss.** Once the delay elapses and
-   the operation executes, the transfer is final — the timelock provides a
-   window to *notice* and socially/legally respond to a malicious proposal,
-   not an on-chain mechanism that prevents it.
-
-**Worst-case impact:** full drain of every token balance the escrow holds —
-strictly larger than any single-intent loss, and not bounded by the
-`_enforceValueCaps` per-intent/rolling-window caps, which apply only to
-`lock()` inflows and are never consulted by `skim`.
-
-### Mitigation status
-
-**Not yet mitigated on-chain.** The only current control is the M-of-N
-timelock delay on the *proposal* (per [T20](#t20--governance-liveness), that
-delay itself has a governance-liveness gap). Tracked in
-[issue #273](https://github.com/Perihelion-Protocol/Perihelion/issues/273)
-("`skim` can transfer locked user funds — no `totalLocked` accounting bounds
-it"), whose proposed fix is to track `totalLocked` per token (incremented on
-`lock`, decremented on `released`/`refunded`) and bound `skim` to
-`balance - totalLocked`. Related: [issue #277](https://github.com/Perihelion-Protocol/Perihelion/issues/277)
-(refund path pausable, see T19) compounds this by removing the user's exit
-during the timelock window.
+`totalLocked` is incremented on `lock()` and decremented on `_onFillConfirmed()`, `_onCancelIntent()`, and `cancelExpired()`. The invariant `balanceOf(this) >= totalLocked[token]` ensures that `skim` can only ever withdraw the genuine surplus (`balance - totalLocked`) and can never touch funds locked against active intents.
 
 ### Trade-offs considered
 
 | Approach | Chosen? | Rationale |
 |----------|---------|-----------|
-| `totalLocked` accounting, bound `skim` to surplus | Proposed (#273) | Directly closes the gap; requires careful accounting at every lock-state transition |
-| Remove `skim` entirely | No | Legitimate need to recover rebasing-token surplus / accidental transfers; the function's purpose is sound, its bound is missing |
-| Multisig-only (no timelock) for `skim` specifically | Not proposed | Does not address the core issue — still unbounded, only changes who can trigger it |
-| Rely on the existing timelock delay as sufficient | No | Detection window ≠ prevention; user has no exit during the delay (T19) and a single owner can extend the exposure window by vetoing recovery governance (T20) |
+| `totalLocked` accounting, bound `skim` to surplus | **Yes** | Directly closes the gap; verified by invariant tests across all lifecycle transitions |
+| Remove `skim` entirely | No | Legitimate need to recover rebasing-token surplus / accidental transfers; the function's purpose is sound |
+| Multisig-only (no timelock) for `skim` specifically | No | `totalLocked` bound provides cryptographic protection regardless of caller |
 
 ### Residual risk
 
-**HIGH — the largest unmitigated concentration of risk in the protocol.**
-Likelihood is low under an honest owner set (the same assumption the
-"Admin / timelock owner set" row in [§0](#0-consolidated-trust-model) already
-makes explicit), but impact is unbounded — full escrow drain, not capped by
-any per-intent or rolling-window mechanism. This is a **trust boundary**, not
-a bug in the sense of unintended behavior: the code does exactly what it
-says. The gap is that the threat model previously did not say so plainly.
-Until [#273](https://github.com/Perihelion-Protocol/Perihelion/issues/273)
-lands, integrators should treat the escrow's custody guarantee as bounded by
-owner-set honesty, not by contract logic.
+**Low.** The owner set can only withdraw genuine surplus (`balanceOf(this) - totalLocked[token]`), which includes fee-on-transfer residue, accidentally sent or donated tokens, upward rebasing gains, and any un-accounted positive balance drift. Active locked user deposits cannot be withdrawn via `skim`.
 
 ### Implementation notes
 
-- **This section:** Documents the gap; no code change here.
-- **Mitigation:** [issue #273](https://github.com/Perihelion-Protocol/Perihelion/issues/273).
-- **Compounding issues:** [#277](https://github.com/Perihelion-Protocol/Perihelion/issues/277)
-  (refund path pausable), [#280](https://github.com/Perihelion-Protocol/Perihelion/issues/280)
-  (`_enforceValueCaps` circuit breaker discarded by the revert it's part of —
-  another reason value caps cannot be relied on to bound this), [#282](https://github.com/Perihelion-Protocol/Perihelion/issues/282)
-  (single-owner `cancel`, see T20).
-- **README / FAQ:** [Trust Assumptions](../README.md#trust-assumptions) and
-  [docs/faq.md](./faq.md#who-do-i-have-to-trust) now scope the "no custodial
-  risk" claim against this entry.
+- **Implemented:** `PerihelionEscrow.sol` enforces `totalLocked` per-token accounting and bounds `skim` to surplus.
+- **Tests:** `contracts/evm/test/PerihelionEscrow.t.sol` (`test_TotalLocked_*`, `test_Skim_*`) and invariant tests in `contracts/evm/test/Invariant.t.sol`.
 
 ---
 
@@ -854,42 +802,18 @@ no time for the community to react before it takes effect.
 **Vector:** the documented "guaranteed refund path" is, on both chains,
 gated by the same pause flag that halts new activity:
 
-- **EVM:** `cancelExpired` (`PerihelionEscrow.sol:743`) carries the
-  `whenNotPaused` modifier, three lines below NatSpec that calls the refund
-  "guaranteed". Tracked in [issue #277](https://github.com/Perihelion-Protocol/Perihelion/issues/277).
+- **EVM:** `cancelExpired` does not carry `whenNotPaused` (`PerihelionEscrow.sol:831`), ensuring the local refund fallback remains available even when the contract is paused.
 - **Soroban:** `cancel_expired_intent` (`lib.rs:691`) calls
   `Self::require_not_paused(&env)?` at `lib.rs:698`. The global `paused` flag
   is set via `set_paused`/`pause`-equivalent admin calls; `lz_receive` itself
   also has its own per-`src_eid` pause gate (`PausedEid`, `lib.rs:432`) — so
   either the global flag or a per-route flag can strand a refund.
 
-**Why it matters:** the guardian is intentionally a hot key with an
-instant, low-friction `pause()` — that design is sound for stopping new
-`lock()` calls quickly during an incident (see [T11](#t11--guardian-key-dos-via-repeated-instant-pause)).
-But because the *same* flag also blocks the refund path, the guardian's
-instant pause is simultaneously an instant, unilateral block on every user's
-ability to exit an expired, unfilled intent. Combined with
-[T11](#t11--guardian-key-dos-via-repeated-instant-pause)'s finding that a
-compromised guardian key can maintain up to a 50% pause duty cycle, a
-compromised guardian can deny refunds for up to 72 hours at a stretch,
-indefinitely, on a repeating cycle.
-
-**Compounding interaction with T17:** an owner who has proposed a malicious
-`skim` (or any other harmful timelocked action) can pause the contract
-immediately after proposing, removing the user's self-service exit for the
-duration of the timelock delay — see [T17](#t17--governance-extractable-escrow-balance).
+**Why it matters:** On Soroban, the admin pause blocks `cancel_expired_intent`, denying user self-service exit during a pause. On EVM, `cancelExpired` is exempt from pause, matching the unpaused status of `lzReceive`.
 
 ### Mitigation status
 
-**Not yet mitigated.** Both `cancelExpired` (EVM, #277) and
-`cancel_expired_intent` (Soroban) currently share the pause gate with the
-non-refund paths they were meant to be independent of. The straightforward
-fix — carve the refund/cancel path out from `whenNotPaused` /
-`require_not_paused` on both chains, so only *new* activity (`lock`, new
-`fill_intent` registrations) is paused, matching the existing exemption
-already given to `lzReceive`/inbound settlement (see
-[T15](#t15--front-running-of-pause-bypass--telegraphed-timelock-actions),
-"pause excludes releases") — has not landed.
+**Partially mitigated:** On EVM, `cancelExpired` is already unpausable. On Soroban, `cancel_expired_intent` remains gated by `require_not_paused`.
 
 ### Trade-offs considered
 

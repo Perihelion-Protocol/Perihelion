@@ -73,12 +73,13 @@ function encodeLockCalldata(): Hex {
 }
 
 /**
- * Encode the Locked event data field: abi.encode(address asset, uint256 amount).
+ * Encode the Locked event data field:
+ * abi.encode(address asset, uint256 amount, string destination, string destAsset, uint128 minDestAmount, uint64 deadline).
  */
 function encodeLockedData(): Hex {
   return encodeAbiParameters(
-    parseAbiParameters("address asset, uint256 amount"),
-    [ASSET as `0x${string}`, 1_000_000n],
+    parseAbiParameters("address asset, uint256 amount, string destination, string destAsset, uint128 minDestAmount, uint64 deadline"),
+    [ASSET as `0x${string}`, 1_000_000n, DESTINATION, DEST_ASSET, MIN_DEST, DEADLINE],
   );
 }
 
@@ -93,8 +94,8 @@ function makeLockedLog() {
     transactionHash: "0xtxhash0000000000000000000000000000000000000000000000000000000001" as Hex,
     logIndex: 0,
     topics: [
-      // event signature topic — Locked(bytes32,address,address,address,uint256)
-      keccak256(toHex("Locked(bytes32,address,address,address,uint256)")),
+      // event signature topic — Locked(bytes32,address,address,address,uint256,string,string,uint128,uint64)
+      keccak256(toHex("Locked(bytes32,address,address,address,uint256,string,string,uint128,uint64)")),
       INTENT_HASH,   // intentHash (bytes32)
       pad(SOLVER),   // solver (address padded to 32 bytes)
       pad(USER),     // user (address padded to 32 bytes)
@@ -171,16 +172,17 @@ test("EVMSourceWatcher: skips logs with insufficient topics", async () => {
   assert.equal(messages.length, 0, "log with insufficient topics skipped");
 });
 
-test("EVMSourceWatcher: skips logs whose transaction calldata cannot be decoded", async () => {
-  const client = {
-    ...makeMockClient(),
-    getTransaction: async () => ({ input: "0xdeadbeef" as Hex }), // garbage calldata
+test("EVMSourceWatcher: skips logs whose event data cannot be decoded", async () => {
+  const log = {
+    ...makeLockedLog(),
+    data: "0xdeadbeef" as Hex, // garbage data
   };
+  const client = makeMockClient(log);
   const watcher = new EVMSourceWatcher(BASE_CONFIG);
   (watcher as unknown as { client: unknown }).client = client;
 
   const { messages } = await watcher.poll(0);
-  assert.equal(messages.length, 0, "log with bad calldata skipped");
+  assert.equal(messages.length, 0, "log with bad data skipped");
 });
 
 test("EVMSourceWatcher: returns empty messages when no logs emitted", async () => {
@@ -212,11 +214,15 @@ test("Locked event topic hash is correctly derived from ABI", () => {
       type: "event" as const,
       name: "Locked",
       inputs: [
-        { name: "intentHash", type: "bytes32", indexed: true },
-        { name: "solver",     type: "address", indexed: true },
-        { name: "user",       type: "address", indexed: true },
-        { name: "asset",      type: "address", indexed: false },
-        { name: "amount",     type: "uint256", indexed: false },
+        { name: "intentHash",    type: "bytes32", indexed: true },
+        { name: "solver",        type: "address", indexed: true },
+        { name: "user",          type: "address", indexed: true },
+        { name: "asset",         type: "address", indexed: false },
+        { name: "amount",        type: "uint256", indexed: false },
+        { name: "destination",   type: "string",  indexed: false },
+        { name: "destAsset",     type: "string",  indexed: false },
+        { name: "minDestAmount", type: "uint128", indexed: false },
+        { name: "deadline",      type: "uint64",  indexed: false },
       ],
     },
   ] as const;

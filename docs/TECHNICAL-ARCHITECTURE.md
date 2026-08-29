@@ -1163,7 +1163,11 @@ interface IPerihelionEscrow {
         address indexed solver,
         address indexed user,
         address asset,
-        uint256 amount
+        uint256 amount,
+        string destination,
+        string destAsset,
+        uint128 minDestAmount,
+        uint64 deadline
     );
 
     /// @notice Emitted when locked funds are released to the solver.
