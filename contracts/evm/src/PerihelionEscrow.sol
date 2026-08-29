@@ -485,6 +485,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @param asset Address of the ERC-20 token to allow or disallow.
     /// @param allowed True to add to allowlist, false to remove.
     function setAssetAllowed(address asset, bool allowed) external onlyOwner {
+        if (allowed && asset.code.length == 0) revert TransferFailed();
         assetAllowed[asset] = allowed;
         emit AssetAllowed(asset, allowed);
     }
@@ -1155,12 +1156,14 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     function _safeTransfer(address token, address to, uint256 amount) private {
+        if (token.code.length == 0) revert TransferFailed();
         (bool ok, bytes memory data) =
             token.call(abi.encodeWithSelector(IERC20.transfer.selector, to, amount));
         if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert TransferFailed();
     }
 
     function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
+        if (token.code.length == 0) revert TransferFailed();
         (bool ok, bytes memory data) =
             token.call(abi.encodeWithSelector(IERC20.transferFrom.selector, from, to, amount));
         if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert TransferFailed();
