@@ -58,12 +58,6 @@ export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
 
 
 
-// Stellar strkey: G (account) or C (contract), followed by 55 base32 chars (A-Z, 2-7).
-const STRKEY_RE = /^[GC][A-Z2-7]{55}$/;
-
-// destAsset: "native" (XLM) or "<CODE>:<ISSUER>" where issuer is a G... account strkey.
-const DEST_ASSET_RE = /^(?:native|[A-Z0-9]{1,12}:G[A-Z2-7]{55})$/;
-
 function isPositiveIntString(s: string): boolean {
   return /^[1-9][0-9]*$/.test(s);
 }
@@ -87,9 +81,9 @@ export function validateIntent(
   if (!isAddress(params.user)) {
     throw new PerihelionValidationError(`must be a valid 20-byte EVM address (got '${params.user}')`, "user");
   }
-  if (!STRKEY_RE.test(params.destination)) {
+  if (!isStellarAddress(params.destination)) {
     throw new PerihelionValidationError(
-      `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7 (got '${params.destination}')`,
+      `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7, with a valid checksum (got '${params.destination}')`,
       "destination",
     );
   }
@@ -127,7 +121,7 @@ export function validateIntent(
     if (err instanceof PerihelionValidationError) throw err;
     throw new PerihelionValidationError(`is not a valid integer string`, "sourceAmount");
   }
-  if (!DEST_ASSET_RE.test(params.destAsset)) {
+  if (!isStellarAsset(params.destAsset)) {
     throw new PerihelionValidationError(
       `must be 'native' or '<CODE>:<G...ISSUER>' (got '${params.destAsset}')`, "destAsset",
     );
@@ -161,11 +155,11 @@ export function validateIntent(
     );
   }
   if (params.deadline > now + MAX_DEADLINE_HORIZON) {
-    throw new IntentValidationError(
-      "deadline",
+    throw new PerihelionValidationError(
       `exceeds the maximum deadline horizon of ${MAX_DEADLINE_HORIZON}s from now ` +
         `(got ${params.deadline}, now is ${now}); the Soroban settlement contract ` +
         `rejects FillInstructions with a deadline further out than this`,
+      "deadline",
     );
   }
   if (params.nonce !== undefined) {
@@ -298,7 +292,7 @@ export interface BuildOptions {
  * @param params  Intent parameters (user, destination, amounts, etc.)
  * @param options Build options: `vMin` (minimum notional), `sourceDecimals` (asset precision),
  *                and `suppressWarning` (skip the V_min check)
- * @throws {@link IntentValidationError} if any field is malformed
+ * @throws {@link PerihelionValidationError} if any field is malformed
  * @returns A fully-formed Intent with nonce and preferredSolver filled in
  */
 export function buildIntent(params: IntentParams, options?: BuildOptions): Intent {

@@ -11,6 +11,7 @@ import {
 const VALID_ADDRESS = "0x1234567890123456789012345678901234567890";
 const VALID_HASH = "0x" + "ab".repeat(32);
 const VALID_SIG = "0x" + "cd".repeat(65);
+const VALID_ISSUER = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
 
 function validRecord(overrides: Record<string, unknown> = {}) {
   return {
@@ -89,6 +90,26 @@ test("parseIntentRecord rejects a non-numeric createdAt", () => {
 
 test("parseIntentRecordArray rejects a non-array payload", () => {
   assert.throws(() => parseIntentRecordArray(validRecord()), MempoolResponseError);
+});
+
+test("parseIntentRecord accepts a lowercase asset code (issue #524 consistency)", () => {
+  // parseIntent uses isStellarAsset, which accepts mixed-case codes; validateIntent
+  // now uses the same validator, so both paths must agree on a lowercase code.
+  const record = parseIntentRecord(
+    validRecord({ intent: { ...validRecord().intent, destAsset: `usdc:${VALID_ISSUER}` } })
+  );
+  assert.equal(record.intent.destAsset, `usdc:${VALID_ISSUER}`);
+});
+
+test("parseIntentRecord rejects an issuer strkey with a corrupted checksum", () => {
+  const corruptIssuer = "GB5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+  assert.throws(
+    () =>
+      parseIntentRecord(
+        validRecord({ intent: { ...validRecord().intent, destAsset: `USDC:${corruptIssuer}` } })
+      ),
+    MempoolResponseError
+  );
 });
 
 test("parseIntentRecordArray validates every element", () => {
