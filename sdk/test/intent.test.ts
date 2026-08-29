@@ -188,6 +188,33 @@ test("buildIntent respects custom vMin option", () => {
   }
 });
 
+// V_min boundary: sourceAmount exactly equal to vMin must not trigger a warning.
+test("buildIntent does not warn when sourceAmount equals vMin exactly", () => {
+  const logged: string[] = [];
+  const warnStub = (msg: string) => logged.push(msg);
+  const originalWarn = console.warn;
+  console.warn = warnStub as unknown as typeof console.warn;
+
+  try {
+    buildIntent(
+      {
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        // sourceAmount === DEFAULT_V_MIN: at the boundary, no warning should fire.
+        sourceAmount: DEFAULT_V_MIN,
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "9900000",
+        deadline: 4102444800,
+      }
+    );
+    assert.equal(logged.length, 0, "expected no warning when sourceAmount === vMin (boundary is exclusive)");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Issue #57 — Amount boundary conformance vectors
 //
