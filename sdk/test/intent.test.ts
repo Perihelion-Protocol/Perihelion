@@ -36,6 +36,10 @@ const VALID_DESTINATION = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4K
 // A valid Stellar asset: "<CODE>:<G...ISSUER>" using the strkey above as issuer.
 const VALID_DEST_ASSET = `USDC:${VALID_DESTINATION}`;
 
+// A deadline comfortably inside MAX_DEADLINE_HORIZON (7 days) so horizon-checked
+// validateIntent/buildIntent calls pass regardless of wall-clock time.
+const FUTURE_DEADLINE = Math.floor(Date.now() / 1000) + 3600;
+
 function sampleParams() {
   return {
     user: account.address,
@@ -45,7 +49,7 @@ function sampleParams() {
     sourceAmount: "1000000",
     destAsset: VALID_DEST_ASSET,
     minDestAmount: "9900000",
-    deadline: 4102444800, // year 2100
+    deadline: FUTURE_DEADLINE, // within MAX_DEADLINE_HORIZON
     nonce: "42",
   };
 }
@@ -163,7 +167,7 @@ test("buildIntent warns when sourceAmount is below V_min", () => {
       sourceAmount: "1000", // very small amount
       destAsset: VALID_DEST_ASSET,
       minDestAmount: "900",
-      deadline: 4102444800,
+      deadline: FUTURE_DEADLINE,
     });
     assert.ok(logged.length > 0, "expected console.warn to be called");
     assert.ok(logged[0].includes("below the economical minimum"));
@@ -187,7 +191,7 @@ test("buildIntent does not warn when sourceAmount is above V_min", () => {
       sourceAmount: "100000000", // well above default V_min
       destAsset: VALID_DEST_ASSET,
       minDestAmount: "99000000",
-      deadline: 4102444800,
+      deadline: FUTURE_DEADLINE,
     });
     assert.equal(logged.length, 0, "expected no warning for amount above V_min");
   } finally {
@@ -209,7 +213,7 @@ test("buildIntent does not warn when sourceAmount equals V_min", () => {
       sourceAmount: DEFAULT_V_MIN,
       destAsset: VALID_DEST_ASSET,
       minDestAmount: "9000000",
-      deadline: 4102444800,
+      deadline: FUTURE_DEADLINE,
     });
     assert.equal(logged.length, 0, "expected no warning at the V_min boundary");
   } finally {
@@ -420,7 +424,7 @@ test("buildIntent respects suppressWarning option", () => {
         sourceAmount: "1000",
         destAsset: VALID_DEST_ASSET,
         minDestAmount: "900",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       },
       { suppressWarning: true }
     );
@@ -446,7 +450,7 @@ test("buildIntent respects custom vMin option", () => {
         sourceAmount: "50000000", // 50 USD
         destAsset: VALID_DEST_ASSET,
         minDestAmount: "49000000",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       },
       { vMin: "100000000" } // 100 USD minimum
     );
@@ -474,7 +478,7 @@ test("buildIntent does not warn when sourceAmount equals vMin exactly", () => {
         sourceAmount: DEFAULT_V_MIN,
         destAsset: VALID_DEST_ASSET,
         minDestAmount: "9900000",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       }
     );
     assert.equal(logged.length, 0, "expected no warning when sourceAmount === vMin (boundary is exclusive)");
@@ -539,7 +543,7 @@ test("buildIntent rejects sourceAmount of zero", () => {
         sourceAmount: "0",
         destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
         minDestAmount: "1",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       }),
     // Zero fails the positive-integer format check before the range check,
     // so it surfaces as a PerihelionValidationError rather than a RangeError.
@@ -558,7 +562,7 @@ test("buildIntent rejects minDestAmount exceeding i128::MAX", () => {
         sourceAmount: "1000000",
         destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
         minDestAmount: (I128_MAX + 1n).toString(),
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       }),
     PerihelionValidationError
   );
@@ -576,7 +580,7 @@ test("buildIntent rejects sourceAmount exceeding u128::MAX", () => {
           sourceAmount: (U128_MAX + 1n).toString(),
           destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
           minDestAmount: "1",
-          deadline: 4102444800,
+          deadline: FUTURE_DEADLINE,
         },
         { suppressWarning: true }
       ),
@@ -595,7 +599,7 @@ test("buildIntent accepts sourceAmount = u128::MAX (exact boundary)", () => {
         sourceAmount: U128_MAX.toString(),
         destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
         minDestAmount: "1",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       },
       { suppressWarning: true }
     )
@@ -613,7 +617,7 @@ test("buildIntent accepts minDestAmount = i128::MAX (exact boundary)", () => {
         sourceAmount: I128_MAX.toString(),
         destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
         minDestAmount: I128_MAX.toString(),
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       },
       { suppressWarning: true }
     )
@@ -642,7 +646,7 @@ test("validateIntent enforces MAX_DESTINATION_LEN byte limit", () => {
       sourceAmount: "1000000",
       destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
       minDestAmount: "900000",
-      deadline: 4102444800,
+      deadline: FUTURE_DEADLINE,
     })
   );
 });
@@ -660,7 +664,7 @@ test("validateIntent rejects destination exceeding MAX_DESTINATION_LEN", () => {
         sourceAmount: "1000000",
         destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
         minDestAmount: "900000",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       }),
     PerihelionValidationError
   );
@@ -677,7 +681,7 @@ test("validateIntent enforces MAX_DEST_ASSET_LEN byte limit", () => {
       sourceAmount: "1000000",
       destAsset: VALID_DEST_ASSET, // 69 ASCII bytes (12 + 1 + 56)
       minDestAmount: "900000",
-      deadline: 4102444800,
+      deadline: FUTURE_DEADLINE,
     })
   );
 });
@@ -695,7 +699,122 @@ test("validateIntent rejects destAsset exceeding MAX_DEST_ASSET_LEN", () => {
         sourceAmount: "1000000",
         destAsset: oversizedAsset,
         minDestAmount: "900000",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
+      }),
+    PerihelionValidationError
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Issue #524 — destAsset/destination validation consistency
+//
+// DEST_ASSET_RE (uppercase-only) was replaced with the checksum-aware
+// isStellarAsset/isStellarAddress, which is also what parseIntent uses. These
+// regression tests pin the acceptance criteria: one validator per field, used
+// by both validateIntent and parseIntent, consistent on lowercase codes, and
+// strict on corrupted issuer checksums.
+// ---------------------------------------------------------------------------
+
+test("#524 validateIntent accepts a lowercase alphanum4 asset code", () => {
+  assert.doesNotThrow(() =>
+    validateIntent({
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000000",
+      destAsset: `usdc:${VALID_DESTINATION}`,
+      minDestAmount: "900000",
+      deadline: FUTURE_DEADLINE,
+    })
+  );
+});
+
+test("#524 validateIntent accepts a lowercase alphanum12 asset code", () => {
+  assert.doesNotThrow(() =>
+    validateIntent({
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000000",
+      destAsset: `myrandomtok1:${VALID_DESTINATION}`,
+      minDestAmount: "900000",
+      deadline: FUTURE_DEADLINE,
+    })
+  );
+});
+
+test("#524 buildIntent accepts a lowercase asset code", () => {
+  assert.doesNotThrow(() =>
+    buildIntent(
+      {
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "100000000",
+        destAsset: `usdc:${VALID_DESTINATION}`,
+        minDestAmount: "99000000",
+        deadline: FUTURE_DEADLINE,
+      },
+      { suppressWarning: true }
+    )
+  );
+});
+
+test("#524 validateIntent rejects an issuer strkey with a corrupted checksum", () => {
+  // GB5... is the same base32 shape as the valid issuer but has a corrupted
+  // CRC-16 checksum; the old DEST_ASSET_RE accepted it because it only checked
+  // the character class, while isStellarAsset must catch it.
+  const corruptIssuer = "GB5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: `USDC:${corruptIssuer}`,
+        minDestAmount: "900000",
+        deadline: FUTURE_DEADLINE,
+      }),
+    PerihelionValidationError
+  );
+});
+
+test("#524 validateIntent rejects a corrupted-checksum destination strkey", () => {
+  const corruptDest = "GB5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: corruptDest,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: VALID_DEST_ASSET,
+        minDestAmount: "900000",
+        deadline: FUTURE_DEADLINE,
+      }),
+    PerihelionValidationError
+  );
+});
+
+test("#524 validateIntent rejects a destAsset with a lowercase issuer code char-class miss", () => {
+  // Code length 13 is invalid regardless of case; both validators must agree.
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: `usdc:${VALID_DESTINATION}:extra`,
+        minDestAmount: "900000",
+        deadline: FUTURE_DEADLINE,
       }),
     PerihelionValidationError
   );

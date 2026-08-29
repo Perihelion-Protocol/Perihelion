@@ -81,13 +81,9 @@ export function validateIntent(
   if (!isAddress(params.user)) {
     throw new PerihelionValidationError(`must be a valid 20-byte EVM address (got '${params.user}')`, "user");
   }
-  // isStellarAddress checks strkey shape (G.../C..., 56 base32 chars) *and* the
-  // CRC-16/XMODEM checksum in one pass, so a well-formed-but-corrupted strkey
-  // (e.g. a single transposed character) is caught here rather than slipping
-  // through a shape-only regex.
   if (!isStellarAddress(params.destination)) {
     throw new PerihelionValidationError(
-      `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7 with a valid checksum (got '${params.destination}')`,
+      `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7, with a valid checksum (got '${params.destination}')`,
       "destination",
     );
   }
@@ -125,8 +121,6 @@ export function validateIntent(
     if (err instanceof PerihelionValidationError) throw err;
     throw new PerihelionValidationError(`is not a valid integer string`, "sourceAmount");
   }
-  // isStellarAsset checks the "native" / "<CODE>:<ISSUER>" shape *and* the
-  // issuer's CRC-16 checksum in one pass, same rationale as isStellarAddress above.
   if (!isStellarAsset(params.destAsset)) {
     throw new PerihelionValidationError(
       `must be 'native' or '<CODE>:<G...ISSUER>' with a valid issuer checksum (got '${params.destAsset}')`, "destAsset",
