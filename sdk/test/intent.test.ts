@@ -10,7 +10,6 @@ import {
   DEFAULT_V_MIN,
   hashIntent,
   I128_MAX,
-  IntentValidationError,
   MAX_DESTINATION_LEN,
   MAX_DEST_ASSET_LEN,
   perihelionDomain,
@@ -22,6 +21,7 @@ import {
 import { PerihelionClient } from "../src/client.js";
 import { toSmallestUnits, fromSmallestUnits } from "../src/units.js";
 import { isStellarAddress, isStellarAsset } from "../src/stellar.js";
+import { PerihelionValidationError } from "../src/errors.js";
 
 const PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const account = privateKeyToAccount(PK);
@@ -198,7 +198,7 @@ test("buildIntent respects custom vMin option", () => {
 // --- validateAmount unit tests ---------------------------------------------
 
 test("validateAmount: zero is rejected", () => {
-  assert.throws(() => validateAmount("0", "sourceAmount"), RangeError);
+  assert.throws(() => validateAmount("0", "sourceAmount"), PerihelionValidationError);
 });
 
 test("validateAmount: 1 is accepted", () => {
@@ -212,7 +212,7 @@ test("validateAmount: i128::MAX is accepted for minDestAmount", () => {
 test("validateAmount: i128::MAX + 1 is rejected for minDestAmount", () => {
   assert.throws(
     () => validateAmount((I128_MAX + 1n).toString(), "minDestAmount", I128_MAX),
-    RangeError
+    PerihelionValidationError
   );
 });
 
@@ -223,12 +223,12 @@ test("validateAmount: u128::MAX is accepted for sourceAmount", () => {
 test("validateAmount: u128::MAX + 1 is rejected for sourceAmount", () => {
   assert.throws(
     () => validateAmount((U128_MAX + 1n).toString(), "sourceAmount", U128_MAX),
-    RangeError
+    PerihelionValidationError
   );
 });
 
 test("validateAmount: negative string is rejected", () => {
-  assert.throws(() => validateAmount("-1", "sourceAmount"), RangeError);
+  assert.throws(() => validateAmount("-1", "sourceAmount"), PerihelionValidationError);
 });
 
 // --- buildIntent enforces amount bounds ------------------------------------
@@ -247,8 +247,8 @@ test("buildIntent rejects sourceAmount of zero", () => {
         deadline: 4102444800,
       }),
     // Zero fails the positive-integer format check before the range check,
-    // so it surfaces as an IntentValidationError rather than a RangeError.
-    IntentValidationError
+    // so it surfaces as a PerihelionValidationError rather than a RangeError.
+    PerihelionValidationError
   );
 });
 
@@ -265,7 +265,7 @@ test("buildIntent rejects minDestAmount exceeding i128::MAX", () => {
         minDestAmount: (I128_MAX + 1n).toString(),
         deadline: 4102444800,
       }),
-    RangeError
+    PerihelionValidationError
   );
 });
 
@@ -285,7 +285,7 @@ test("buildIntent rejects sourceAmount exceeding u128::MAX", () => {
         },
         { suppressWarning: true }
       ),
-    RangeError
+    PerihelionValidationError
   );
 });
 
@@ -367,7 +367,7 @@ test("validateIntent rejects destination exceeding MAX_DESTINATION_LEN", () => {
         minDestAmount: "900000",
         deadline: 4102444800,
       }),
-    IntentValidationError
+    PerihelionValidationError
   );
 });
 
@@ -402,6 +402,6 @@ test("validateIntent rejects destAsset exceeding MAX_DEST_ASSET_LEN", () => {
         minDestAmount: "900000",
         deadline: 4102444800,
       }),
-    IntentValidationError
+    PerihelionValidationError
   );
 });
