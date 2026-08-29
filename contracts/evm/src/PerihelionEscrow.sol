@@ -361,6 +361,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error ExceedsSurplus();
     error AssetNotAllowed();
     error UnderDelivered();
+    /// @dev A uint256 intent field cannot fit in the narrower wire/storage type
+    ///      without wrapping (minDestAmount/sourceAmount vs uint128, deadline vs uint64).
+    error AmountTooLarge();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -635,6 +638,13 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         if (!assetAllowed[intent.sourceAsset]) revert AssetNotAllowed();
 
+        // Reject values that would silently wrap when narrowed to the storage/wire
+        // type below (Lock.minDestAmount/deadline, and the FillInstruction fields),
+        // rather than truncating a signed intent into a different meaning.
+        if (intent.minDestAmount > type(uint128).max) revert AmountTooLarge();
+        if (intent.sourceAmount > type(uint128).max) revert AmountTooLarge();
+        if (intent.deadline > type(uint64).max) revert AmountTooLarge();
+
         bytes32 intentHash = hashIntent(intent);
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
@@ -687,7 +697,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         );
 
         bytes memory message = _encodeFillInstruction(intentHash, intent);
-        MessagingParams memory params = _buildMessagingParams(message, msg.value);
+        // Quote with nativeFee=0, identical to quoteFee(), so the value a solver
+        // sized off-chain via quoteFee is the same value compared against below.
+        MessagingParams memory params = _buildMessagingParams(message, 0);
         // Revert early on obvious underpayment rather than letting the endpoint
         // bubble an opaque error. Only the quoted fee is actually sent to the
         // endpoint; any excess is refunded locally to the caller.
@@ -952,8 +964,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: codec -----------------------------------------------------
 
-    /// @dev Build MessagingParams for a FillInstruction message. Used by both lock
-    ///      (with actual nativeFee) and quoteFee (with nativeFee=0) to ensure consistent params.
+    /// @dev Build MessagingParams for a FillInstruction message. Both lock and quoteFee
+    ///      call this with nativeFee=0, so the two quote identically and the value a
+    ///      solver sizes via quoteFee is the value lock actually compares msg.value against.
     function _buildMessagingParams(bytes memory message, uint256 nativeFee)
         internal
         view
