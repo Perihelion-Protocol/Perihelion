@@ -61,6 +61,33 @@ test("loadConfig returns a valid config when all required vars are present", () 
   assert.equal(config.escrowAddress, VALID_ESCROW);
 });
 
+test("loadConfig defaults the native fee floors to 0n", () => {
+  const config = loadConfig(baseSolverEnv());
+  assert.equal(config.sourceNativeFeeFloor, 0n);
+  assert.equal(config.stellarNativeFeeFloor, 0n);
+});
+
+test("loadConfig parses the native fee floors as bigints in smallest units", () => {
+  const config = loadConfig({
+    ...baseSolverEnv(),
+    PERIHELION_SOURCE_NATIVE_FEE_FLOOR: "5000000000000000",
+    PERIHELION_STELLAR_NATIVE_FEE_FLOOR: "20000000",
+  });
+  assert.equal(config.sourceNativeFeeFloor, 5_000_000_000_000_000n);
+  assert.equal(config.stellarNativeFeeFloor, 20_000_000n);
+});
+
+test("loadConfig rejects a negative or non-integer native fee floor", () => {
+  assert.throws(
+    () => loadConfig({ ...baseSolverEnv(), PERIHELION_STELLAR_NATIVE_FEE_FLOOR: "-1" }),
+    /PERIHELION_STELLAR_NATIVE_FEE_FLOOR must be a non-negative integer/,
+  );
+  assert.throws(
+    () => loadConfig({ ...baseSolverEnv(), PERIHELION_SOURCE_NATIVE_FEE_FLOOR: "1.5" }),
+    /PERIHELION_SOURCE_NATIVE_FEE_FLOOR must be a non-negative integer/,
+  );
+});
+
 function baseExecutorEnv() {
   return {
     PERIHELION_EVM_RPC_URL: "http://localhost:8545",

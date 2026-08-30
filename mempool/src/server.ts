@@ -11,6 +11,13 @@ const SIGNATURE_RE = /^0x[0-9a-fA-F]+$/;
 /** Per-IP submission budget for POST /intents. */
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 60;
+/**
+ * Hard cap on the number of distinct source IPs the rate limiter tracks. The
+ * periodic sweep ({@link MempoolServer.sweepRateLimits}) is the primary reclaim
+ * path; this LRU cap is a backstop so a burst of distinct source addresses
+ * between sweeps cannot grow the map without bound (#563).
+ */
+const RATE_LIMIT_MAX_IPS = 10_000;
 
 /** A canonical intent hash: `0x` followed by exactly 64 lowercase hex chars. */
 const HASH_RE = /^0x[0-9a-f]{64}$/;
@@ -43,6 +50,21 @@ export interface MempoolServerOptions {
    * unsafe to expose publicly.
    */
   statusToken?: string;
+  /**
+   * Express `trust proxy` setting. Left at `false` (the safe default) the
+   * per-IP rate limiter keys on the socket's remote address; behind a load
+   * balancer that is always the proxy, collapsing the limiter to one global
+   * bucket. Set this to the number of proxy hops in front of the mempool (or
+   * a preset like `"loopback"` / a subnet list) so `req.ip` reflects the real
+   * client. See mempool/README.md for the deployment topology (#563).
+   */
+  trustProxy?: boolean | number | string;
+  /**
+   * Maximum number of distinct source IPs retained by the rate limiter.
+   * Defaults to {@link RATE_LIMIT_MAX_IPS}. Oldest-seen entries are evicted
+   * past this cap.
+   */
+  rateLimitMaxIps?: number;
 }
 
 const DEFAULT_LIST_LIMIT = 100;
@@ -60,6 +82,7 @@ export class MempoolServer {
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
   private rateLimitHits = new Map<string, number[]>();
+  private rateLimitMaxIps: number;
   private sweepTimer?: ReturnType<typeof setInterval>;
   private statusToken?: string;
 
@@ -78,6 +101,11 @@ export class MempoolServer {
     this.verifyingContract = opts.verifyingContract;
     this.domain = perihelionDomain(this.chainId, this.verifyingContract);
     this.statusToken = opts.statusToken;
+    this.rateLimitMaxIps = opts.rateLimitMaxIps ?? RATE_LIMIT_MAX_IPS;
+    // Set the proxy-trust posture explicitly rather than relying on Express's
+    // implicit default, so the rate limiter's notion of "the client" is a
+    // deliberate deployment choice (#563).
+    this.app.set("trust proxy", opts.trustProxy ?? false);
     if (this.host !== "localhost" && this.host !== "127.0.0.1") {
       console.warn(
         `PERIHELION_MEMPOOL_HOST is set to ${this.host} — this endpoint has no write authentication and should not be exposed publicly.`,
@@ -99,6 +127,23 @@ export class MempoolServer {
     this.app.patch("/intents/:hash/status", this.handleUpdateStatus.bind(this));
   }
 
+  /**
+   * Normalise and validate a `:hash` path parameter. Records are keyed by the
+   * lower-case hash `hashIntent` produces and {@link IntentStore} keys an exact
+   * Map, so a mixed-case hash — from EIP-55 checksum habits or display tooling
+   * that upper-cases hex — must be folded before lookup. Returns the canonical
+   * hash, or sends a `400` and returns `undefined`. Shared by every route that
+   * takes a `:hash` so the two cannot drift apart (#561).
+   */
+  private parseHashParam(req: Request, res: Response): Hex | undefined {
+    const raw = String(req.params.hash ?? "").toLowerCase();
+    if (!HASH_RE.test(raw)) {
+      res.status(400).json({ error: "hash must be a 0x-prefixed 32-byte hex string" });
+      return undefined;
+    }
+    return raw as Hex;
+  }
+
   private handleUpdateStatus(req: Request, res: Response): void {
     if (this.statusToken) {
       const auth = req.header("authorization");
@@ -108,7 +153,8 @@ export class MempoolServer {
       }
     }
 
-    const { hash } = req.params as { hash: Hex };
+    const hash = this.parseHashParam(req, res);
+    if (hash === undefined) return;
     const { status } = req.body as { status?: IntentStatus };
 
     if (!status || !INTENT_STATUSES.has(status)) {
@@ -116,18 +162,18 @@ export class MempoolServer {
       return;
     }
 
-    if (!this.store.get(hash as Hex)) {
+    if (!this.store.get(hash)) {
       res.status(404).json({ error: "Intent not found" });
       return;
     }
 
-    const updated = this.store.updateStatus(hash as Hex, status);
+    const updated = this.store.updateStatus(hash, status);
     if (!updated) {
       res.status(409).json({ error: "Cannot change status of a terminal intent" });
       return;
     }
 
-    res.json(this.store.get(hash as Hex));
+    res.json(this.store.get(hash));
   }
 
   /** Rejects an IP once it exceeds a fixed request budget within a sliding window. */
@@ -137,15 +183,75 @@ export class MempoolServer {
     const recent = (this.rateLimitHits.get(ip) ?? []).filter(
       (t) => now - t < RATE_LIMIT_WINDOW_MS,
     );
+    const limited = recent.length >= RATE_LIMIT_MAX_REQUESTS;
 
-    if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
+    // Record every attempt, allowed or not: a client that keeps calling while
+    // blocked must keep its window full — a genuine sliding window — rather
+    // than the window draining out from under it and letting a burst through
+    // as soon as the oldest hit ages out. Cap the retained timestamps at the
+    // request budget so a sustained flood cannot grow the per-IP array
+    // without bound (#563).
+    recent.push(now);
+    const trimmed =
+      recent.length > RATE_LIMIT_MAX_REQUESTS
+        ? recent.slice(recent.length - RATE_LIMIT_MAX_REQUESTS)
+        : recent;
+    this.touchRateLimit(ip, trimmed);
+
+    if (limited) {
       res.status(429).json({ error: "Too many requests" });
       return;
     }
 
-    recent.push(now);
-    this.rateLimitHits.set(ip, recent);
     next();
+  }
+
+  /**
+   * Insert or refresh an IP's hit list, keeping {@link rateLimitHits} in
+   * least-recently-used order (Map iteration order == insertion order) and
+   * bounded by {@link rateLimitMaxIps}. Eviction here is a backstop; the
+   * periodic {@link sweepRateLimits} is the main reclaim path.
+   */
+  private touchRateLimit(ip: string, hits: number[]): void {
+    this.rateLimitHits.delete(ip);
+    this.rateLimitHits.set(ip, hits);
+    while (this.rateLimitHits.size > this.rateLimitMaxIps) {
+      const oldest = this.rateLimitHits.keys().next().value;
+      if (oldest === undefined) break;
+      this.rateLimitHits.delete(oldest);
+    }
+  }
+
+  /**
+   * Drop rate-limit entries whose most recent hit is older than the window —
+   * they can no longer affect a decision. Runs on the same timer as the store
+   * sweep. Returns the number of entries evicted.
+   */
+  private sweepRateLimits(now = Date.now()): number {
+    let evicted = 0;
+    for (const [ip, hits] of this.rateLimitHits) {
+      const last = hits.at(-1) ?? 0;
+      if (now - last >= RATE_LIMIT_WINDOW_MS) {
+        this.rateLimitHits.delete(ip);
+        evicted += 1;
+      }
+    }
+    return evicted;
+  }
+
+  /**
+   * Run the periodic maintenance sweep immediately: evict past-deadline intents
+   * from the store and prune stale rate-limit entries. Invoked on a timer by
+   * {@link start}; exposed for tests that need to force a sweep.
+   */
+  sweep(now = Date.now()): void {
+    this.store.evictExpired(Math.floor(now / 1000));
+    this.sweepRateLimits(now);
+  }
+
+  /** Number of distinct source IPs currently tracked by the rate limiter. Exposed for tests. */
+  rateLimitEntryCount(): number {
+    return this.rateLimitHits.size;
   }
 
   private async handleSubmitIntent(req: Request, res: Response): Promise<void> {
@@ -212,13 +318,10 @@ export class MempoolServer {
   }
 
   private handleGetIntent(req: Request, res: Response): void {
-    const raw = String(req.params.hash ?? "").toLowerCase();
-    if (!HASH_RE.test(raw)) {
-      res.status(400).json({ error: "hash must be a 0x-prefixed 32-byte hex string" });
-      return;
-    }
+    const hash = this.parseHashParam(req, res);
+    if (hash === undefined) return;
 
-    const record = this.store.get(raw as Hex);
+    const record = this.store.get(hash);
     if (!record) {
       res.status(404).json({ error: "Intent not found" });
       return;
@@ -258,7 +361,28 @@ export class MempoolServer {
       records = records.filter((r) => r.intent.sourceChainId === chainIdNum);
     }
 
-    const startIndex = cursor ? records.findIndex((r) => r.hash === cursor) + 1 : 0;
+    // Resolve the cursor to a position. A cursor names the last hash of the
+    // previous page; the record it names can legitimately disappear between
+    // pages (the 30s expiry sweep, oldest-record eviction at maxSize, or a
+    // status change moving it out of a status-filtered set). Silently falling
+    // back to index 0 sends a cursor-following client back to page one — and,
+    // since page one yields a fresh cursor that may also vanish, potentially
+    // forever. Fail explicitly instead so the client can restart deliberately
+    // (#562).
+    let startIndex = 0;
+    if (cursor !== undefined) {
+      const cursorPos = records.findIndex((r) => r.hash === cursor);
+      if (cursorPos === -1) {
+        res.status(400).json({
+          error:
+            "cursor does not resolve to a known record — it may have been evicted, " +
+            "settled, or filtered out between pages; restart pagination without a cursor",
+          code: "unresolvable_cursor",
+        });
+        return;
+      }
+      startIndex = cursorPos + 1;
+    }
     const page = records.slice(startIndex, startIndex + limit);
     const nextCursor = startIndex + limit < records.length ? page[page.length - 1]?.hash : undefined;
 
@@ -284,7 +408,7 @@ export class MempoolServer {
           "PATCH /intents/:hash/status is unauthenticated (no statusToken configured) — do not expose this port publicly.",
         );
       }
-      this.sweepTimer = setInterval(() => this.store.evictExpired(), SWEEP_INTERVAL_MS);
+      this.sweepTimer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
       this.sweepTimer.unref?.();
       this.server = this.app.listen(this.port, this.host, () => {
         console.log(

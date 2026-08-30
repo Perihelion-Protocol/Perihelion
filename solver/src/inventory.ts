@@ -16,6 +16,21 @@ export interface InventoryProvider {
    * `asset` uses the Stellar format "CODE:ISSUER" (e.g. "USDC:GA5Z...").
    */
   availableBalance(asset: string): Promise<bigint>;
+  /**
+   * Native token balance on the source (EVM) chain, in wei. A fill's payable
+   * `PerihelionEscrow.lock` must cover the LayerZero message fee plus the gas
+   * to pull the user's tokens and dispatch the cross-chain message; that spend
+   * is not drawn from any `destAsset` balance. Optional — when absent,
+   * {@link evaluate} skips the source-native funding check.
+   */
+  nativeBalanceSource?(): Promise<bigint>;
+  /**
+   * Native XLM balance on Stellar, in stroops. `deliver_intent` and
+   * `dispatch_confirmation` both need a funded source account, and
+   * `dispatch_confirmation` takes an `lz_fee` the caller supplies. Optional —
+   * when absent, {@link evaluate} skips the Stellar-native funding check.
+   */
+  nativeBalanceDest?(): Promise<bigint>;
 }
 
 /** Tracks fill commitments that are in-flight so we don't over-commit. */
@@ -47,6 +62,14 @@ export class InFlightTracker {
 /** A no-op provider that always reports infinite balance (for testing / stub use). */
 export class UnlimitedInventoryProvider implements InventoryProvider {
   async availableBalance(_asset: string): Promise<bigint> {
+    return BigInt(Number.MAX_SAFE_INTEGER);
+  }
+
+  async nativeBalanceSource(): Promise<bigint> {
+    return BigInt(Number.MAX_SAFE_INTEGER);
+  }
+
+  async nativeBalanceDest(): Promise<bigint> {
     return BigInt(Number.MAX_SAFE_INTEGER);
   }
 }
