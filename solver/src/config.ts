@@ -27,6 +27,14 @@ export interface SolverConfig {
    * Defaults to 50,000 (~7.5 MB worst-case).
    */
   readonly seenCacheSize?: number;
+  /**
+   * Shared bearer token for the mempool's `PATCH /intents/:hash/status`
+   * endpoint. When set, the solver reports `"settled"` after a successful
+   * fill so the mempool record transitions out of `"pending"` immediately.
+   * If omitted, status reporting is skipped (the mempool will evict the
+   * record only after its deadline + grace period).
+   */
+  readonly mempoolStatusToken?: string;
 }
 
 /**
@@ -101,6 +109,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     errors.push("PERIHELION_SUPPORTED_ASSETS must list at least one asset");
   }
 
+  // --- Optional: status token for mempool PATCH /intents/:hash/status ---
+  // Not validated beyond being a non-empty string when set — any non-empty
+  // value is a valid bearer token.
+  const mempoolStatusToken = env.PERIHELION_MEMPOOL_STATUS_TOKEN || undefined;
+
   if (errors.length > 0) {
     throw new Error(
       `Solver configuration error — fix the following before starting:\n  • ${errors.join("\n  • ")}`,
@@ -117,5 +130,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     supportedDestAssets,
     verificationCacheSize,
     seenCacheSize,
+    mempoolStatusToken,
   };
 }

@@ -13,6 +13,7 @@ import {
   type IntentRecord,
   type SignedIntent,
   type Hex,
+  type MempoolIntentStatus,
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
 import { evaluate, type PricingDeps } from "./quote.js";
@@ -378,6 +379,11 @@ export class Solver {
       // Terminal: filled successfully.
       this.seen.add(hash, deadlineMs);
       this.retryState.delete(hash);
+      // Best-effort: report "settled" to the mempool so the record leaves
+      // "pending" immediately rather than waiting for deadline eviction.
+      // A failed report must never fail or retry the fill — the on-chain
+      // settlement already succeeded.
+      await this.reportSettled(hash);
     } catch (err) {
       if (err instanceof FatalError) throw err;
       this.log.error("fill failed", { hash, err: String(err) });
@@ -385,6 +391,30 @@ export class Solver {
       this.scheduleRetry(hash, deadlineMs);
     } finally {
       this.inFlight.release(intent.destAsset, reserved);
+    }
+  }
+
+  /**
+   * Best-effort: report `"settled"` to the mempool after a successful fill.
+   * Errors are logged and swallowed — a failed status report must never
+   * affect the on-chain outcome or retry logic.
+   *
+   * Only called when {@link SolverConfig.mempoolStatusToken} is configured.
+   * Without a token the PATCH endpoint requires no auth in local/dev setups,
+   * but we skip reporting entirely when the operator has not provided one to
+   * avoid noisy 401s in production environments that do require auth.
+   */
+  private async reportSettled(hash: Hex): Promise<void> {
+    const token = this.config.mempoolStatusToken;
+    if (!token) return;
+    try {
+      await this.client.reportStatus(hash, "settled" satisfies MempoolIntentStatus, token);
+      this.log.info("reported settled to mempool", { hash });
+    } catch (err) {
+      this.log.warn("failed to report settled to mempool (non-fatal)", {
+        hash,
+        err: String(err),
+      });
     }
   }
 
