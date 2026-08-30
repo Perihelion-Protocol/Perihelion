@@ -355,10 +355,130 @@ test("GET /intents rejects bare array response format (regression test)", async 
   const res = await fetch(`${BASE}/intents?status=pending`);
   assert.equal(res.status, 200);
   const body = await res.json();
-  
+
   assert.ok(typeof body === "object" && body !== null, "response should be an object");
   assert.ok("records" in body, "response must have records field");
   assert.ok(Array.isArray(body.records), "records must be an array");
   assert.ok("nextCursor" in body, "response must have nextCursor field");
   assert.ok(!Array.isArray(body), "response must NOT be a bare array");
+});
+
+// ─── Issue 566: strict validation of every list query parameter ────────────
+
+test("GET /intents?limit=<non-numeric> returns 400 naming the parameter", async () => {
+  const res = await fetch(`${BASE}/intents?limit=abc`);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /limit/);
+});
+
+test("GET /intents?limit=0 and negative/fractional values return 400", async () => {
+  for (const bad of ["0", "-5", "1.5", "12e3"]) {
+    const res = await fetch(`${BASE}/intents?limit=${encodeURIComponent(bad)}`);
+    assert.equal(res.status, 400, `limit=${bad} should be rejected`);
+  }
+});
+
+test("GET /intents?limit=<repeated> returns 400 rather than substituting the default", async () => {
+  const res = await fetch(`${BASE}/intents?limit=10&limit=20`);
+  assert.equal(res.status, 400);
+});
+
+test("GET /intents?chainId=<non-numeric> returns 400, not an empty 200 page", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=abc`);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /chainId/);
+});
+
+test("GET /intents?chainId=<repeated> returns 400 instead of filtering on NaN", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=1&chainId=2`);
+  assert.equal(res.status, 400);
+});
+
+test("GET /intents?chainId=<valid-but-unknown> still returns an empty 200 page", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=999999`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: unknown[] };
+  assert.equal(body.records.length, 0);
+});
+
+test("GET /intents?cursor=<repeated> returns 400", async () => {
+  const res = await fetch(`${BASE}/intents?cursor=0xaa&cursor=0xbb`);
+  assert.equal(res.status, 400);
+});
+
+// ─── Issue 569: framework errors are JSON, never HTML, never a stack trace ──
+
+test("POST /intents with a body over the 8kb limit returns 413 JSON naming the limit", async () => {
+  const res = await fetch(`${BASE}/intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ intent: { blob: "x".repeat(9000) }, signature: "0x00" }),
+  });
+  assert.equal(res.status, 413);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /8kb/i);
+});
+
+test("POST /intents with malformed JSON returns 400 JSON, not an HTML error page", async () => {
+  const res = await fetch(`${BASE}/intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{ not valid json",
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.equal(typeof body.error, "string");
+  assert.doesNotMatch(body.error, /at .*\(.*:\d+:\d+\)/, "message must not contain a stack frame");
+});
+
+test("an unknown route returns 404 JSON in the standard error shape", async () => {
+  const res = await fetch(`${BASE}/no-such-route`);
+  assert.equal(res.status, 404);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.equal(typeof body.error, "string");
+});
+
+// ─── Issue 564: every route is rate limited, with separate read/write budgets ─
+
+test("read and write routes enforce independent, configurable rate-limit budgets", async () => {
+  const port = 3990;
+  const limited = new MempoolServer({
+    port,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    readRateLimit: 3,
+    writeRateLimit: 1,
+    rateLimitWindowMs: 60_000,
+  });
+  await limited.start();
+  try {
+    const base = `http://localhost:${port}`;
+
+    // Reads: the 4th GET within the window is rejected.
+    for (let i = 0; i < 3; i++) {
+      assert.equal((await fetch(`${base}/info`)).status, 200, `read ${i + 1} should pass`);
+    }
+    assert.equal((await fetch(`${base}/info`)).status, 429, "read 4 should be limited");
+
+    // Writes draw on a separate budget that the read burst did not touch.
+    const first = await fetch(`${base}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.notEqual(first.status, 429, "first write should not be pre-limited by reads");
+    const second = await fetch(`${base}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(second.status, 429, "second write should be limited");
+  } finally {
+    await limited.stop();
+  }
 });
