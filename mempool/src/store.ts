@@ -18,6 +18,27 @@ const DEFAULT_EXPIRY_GRACE_MS = 60_000;
 const TERMINAL_STATUSES: ReadonlySet<IntentStatus> = new Set(["settled", "refunded", "expired"]);
 
 /**
+ * Deep-freeze a record before it is stored, so a caller holding a reference
+ * returned by {@link IntentStore.get} or {@link IntentStore.all} cannot mutate
+ * the stored intent. The record's `hash` is a commitment to exactly the intent
+ * fields and the `signature` verifies against them, so an in-place mutation
+ * would silently desync all three and surface only later, as a hash mismatch
+ * or signature-verification failure in every client that fetches the record.
+ *
+ * `status` is frozen too; {@link IntentStore.updateStatus} is the single path
+ * that changes a record, and it replaces the record rather than mutating it.
+ */
+function freezeRecord(record: MempoolIntentRecord): MempoolIntentRecord {
+  // Intent fields are primitives today; freeze any nested object/array too so
+  // the guarantee survives a future non-primitive field.
+  for (const value of Object.values(record.intent)) {
+    if (value !== null && typeof value === "object") Object.freeze(value);
+  }
+  Object.freeze(record.intent);
+  return Object.freeze(record);
+}
+
+/**
  * In-memory intent store. Bounded by `maxSize` (oldest-insertion eviction)
  * and swept of records past their deadline + grace period via
  * `evictExpired()`. Purely in-memory: state is lost on restart.
@@ -53,25 +74,32 @@ export class IntentStore {
       const oldest = this.records.keys().next().value;
       if (oldest !== undefined) this.delete(oldest);
     }
-    this.records.set(hash, record);
-    this.indexAdd(hash, record.status);
+    const frozen = freezeRecord(record);
+    this.records.set(hash, frozen);
+    this.indexAdd(hash, frozen.status);
   }
 
   get(hash: Hex): MempoolIntentRecord | undefined {
-    const record = this.records.get(hash);
-    return record ? { ...record } : undefined;
+    // The stored record is deep-frozen, so returning it directly is safe: a
+    // caller cannot mutate stored intent fields through it.
+    return this.records.get(hash);
   }
 
   /**
    * Update a record's status. Refuses to move a record out of a terminal
    * status (`settled`/`refunded`/`expired`) — those are final.
+   *
+   * The stored record is frozen, so the status change is applied by replacing
+   * the record with a new frozen copy rather than mutating in place. This stays
+   * the only method that changes a record.
    */
   updateStatus(hash: Hex, status: IntentStatus): boolean {
     const record = this.records.get(hash);
     if (!record) return false;
     if (TERMINAL_STATUSES.has(record.status)) return false;
     this.indexRemove(hash, record.status);
-    record.status = status;
+    const updated = freezeRecord({ ...record, status });
+    this.records.set(hash, updated);
     this.indexAdd(hash, status);
     return true;
   }
@@ -103,7 +131,7 @@ export class IntentStore {
     const out: MempoolIntentRecord[] = [];
     for (const hash of hashes) {
       const record = this.records.get(hash);
-      if (record) out.push({ ...record });
+      if (record) out.push(record);
     }
     return out;
   }

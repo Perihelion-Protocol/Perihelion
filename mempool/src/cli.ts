@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: MIT
 
 import { MempoolServer } from "./index.js";
-import type { Address } from "@perihelion/sdk";
+import { loadConfig } from "./config.js";
 
-const port = parseInt(process.env.PORT ?? "3000", 10);
-const host = process.env.PERIHELION_MEMPOOL_HOST ?? "localhost";
-
-if (!process.env.PERIHELION_SOURCE_CHAIN_ID) {
-  throw new Error("PERIHELION_SOURCE_CHAIN_ID is required to start the mempool.");
-}
-if (!process.env.PERIHELION_ESCROW_ADDRESS) {
-  throw new Error("PERIHELION_ESCROW_ADDRESS is required to start the mempool.");
-}
-
-const chainId = Number(process.env.PERIHELION_SOURCE_CHAIN_ID);
-const verifyingContract = process.env.PERIHELION_ESCROW_ADDRESS as Address;
-const statusToken = process.env.PERIHELION_MEMPOOL_STATUS_TOKEN;
-const server = new MempoolServer({ port, host, chainId, verifyingContract, statusToken });
+const config = loadConfig();
+const server = new MempoolServer(config);
 
 await server.start();
+
+let shuttingDown = false;
+const shutdown = async (signal: string): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[mempool] received ${signal}, shutting down`);
+  try {
+    // Stops accepting new connections and resolves once in-flight requests drain.
+    await server.stop();
+  } catch (err) {
+    console.error("[mempool] error during shutdown:", err);
+    process.exitCode = 1;
+  }
+};
+
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
