@@ -76,6 +76,41 @@ test("rejects expired intents (terminal)", async () => {
   assert.equal(decision.terminal, true);
 });
 
+test("rejects intent with insufficient deadline headroom (terminal)", async () => {
+  // The Soroban settlement contract rejects deliver_intent when
+  //   now + MAX_DISPATCH_WINDOW (1_800 s) > intent.deadline
+  // so the solver must refuse fills whose remaining time is below
+  // MIN_FILL_HEADROOM_SECS (1_920 s = 1_800 s dispatch window + 120 s margin)
+  // before committing to the EVM lock and LayerZero fee.
+  //
+  // An intent 10 minutes (600 s) from its deadline is well inside that window.
+  const tenMinutesFromNow = Math.floor(Date.now() / 1000) + 600;
+  const nearDeadline = { ...intent(), deadline: tenMinutesFromNow };
+  const decision = await evaluate(nearDeadline, config, usdcDeps);
+  assert.equal(decision.fill, false);
+  assert.ok(
+    decision.reason.includes("insufficient deadline headroom"),
+    `expected headroom reason, got: "${decision.reason}"`,
+  );
+  assert.equal(decision.terminal, true);
+});
+
+test("accepts intent whose remaining time exactly exceeds the headroom", async () => {
+  // An intent with exactly MIN_FILL_HEADROOM_SECS + 1 s remaining must be
+  // accepted by the headroom check (boundary: strictly greater than the window).
+  const { MIN_FILL_HEADROOM_SECS } = await import("@perihelion/sdk");
+  const justEnough = Math.floor(Date.now() / 1000) + MIN_FILL_HEADROOM_SECS + 1;
+  const nearBoundary = { ...intent(), deadline: justEnough };
+  const decision = await evaluate(nearBoundary, config, usdcDeps);
+  // The check is `intent.deadline <= now + MIN_FILL_HEADROOM_SECS`, so at
+  // now + MIN_FILL_HEADROOM_SECS + 1 the headroom check must NOT reject.
+  assert.ok(
+    decision.reason !== "intent expired" &&
+      !decision.reason.includes("insufficient deadline headroom"),
+    `headroom check should pass with 1 s to spare, got: "${decision.reason}"`,
+  );
+});
+
 test("rejects reserved-for-another-solver intent (terminal)", async () => {
   const decision = await evaluate(
     intent({ preferredSolver: "0x1111111111111111111111111111111111111111" }),
