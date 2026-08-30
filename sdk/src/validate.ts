@@ -9,6 +9,7 @@
 
 import { isAddress } from "viem";
 import { isStellarAddress, isStellarAsset } from "./stellar.js";
+import { isPositiveIntString } from "./intent.js";
 import { PerihelionError } from "./errors.js";
 import type {
   Address,
@@ -28,7 +29,39 @@ export class MempoolResponseError extends PerihelionError {
   }
 }
 
-const HEX_RE = /^0x[0-9a-fA-F]+$/;
+/**
+ * Thrown by {@link parseIntentRecordArray} when the input array exceeds the
+ * configured `maxLimit`. Kept as a distinct, narrowly-catchable subclass of
+ * {@link MempoolResponseError} so callers can tell "too many records" apart
+ * from an ordinary shape-validation failure (issue #532).
+ */
+export class MempoolResponseTooLargeError extends MempoolResponseError {
+  readonly length: number;
+  readonly maxLimit: number;
+  constructor(length: number, maxLimit: number, options?: ErrorOptions) {
+    super(
+      `expected an array of intent records with at most ${maxLimit} entries (got ${length})`,
+      options,
+    );
+    this.name = "MempoolResponseTooLargeError";
+    this.length = length;
+    this.maxLimit = maxLimit;
+  }
+}
+
+/**
+ * A 32-byte `0x`-prefixed hash: exactly 66 characters (`0x` + 64 hex digits).
+ * Rejects the short/long/odd-length hex strings that the previous general
+ * `/^0x[0-9a-fA-F]+$/` pattern let through (issue #530).
+ */
+const HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * A canonical 65-byte `(r, s, v)` `0x`-prefixed signature: exactly 132
+ * characters (`0x` + 130 hex digits). See {@link HASH_RE} (issue #530).
+ */
+const SIGNATURE_RE = /^0x[0-9a-fA-F]{130}$/;
+
 const MEMPOOL_STATUSES: ReadonlySet<MempoolIntentStatus> = new Set([
   "pending",
   "settled",
@@ -36,8 +69,24 @@ const MEMPOOL_STATUSES: ReadonlySet<MempoolIntentStatus> = new Set([
   "expired",
 ]);
 
-function isHex(value: unknown): value is Hex {
-  return typeof value === "string" && HEX_RE.test(value);
+/** Max length of a serialized value embedded in an error message. */
+const MAX_ERROR_VALUE_LEN = 200;
+
+/**
+ * Safely render `value` for inclusion in an error message, truncating the
+ * serialized form so a single oversized/malicious mempool response can't
+ * blow up an error message (issue #532).
+ */
+function describe(value: unknown): string {
+  let s: string;
+  try {
+    s = JSON.stringify(value) ?? String(value);
+  } catch {
+    s = String(value);
+  }
+  return s.length > MAX_ERROR_VALUE_LEN
+    ? `${s.slice(0, MAX_ERROR_VALUE_LEN)}… (truncated, ${s.length} chars total)`
+    : s;
 }
 
 function isAddr(value: unknown): value is Address {
@@ -46,21 +95,21 @@ function isAddr(value: unknown): value is Address {
 
 function asObject(value: unknown, what: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new MempoolResponseError(`${what} must be an object (got ${JSON.stringify(value)})`);
+    throw new MempoolResponseError(`${what} must be an object (got ${describe(value)})`);
   }
   return value as Record<string, unknown>;
 }
 
 function asString(value: unknown, field: string): string {
   if (typeof value !== "string") {
-    throw new MempoolResponseError(`'${field}' must be a string (got ${JSON.stringify(value)})`);
+    throw new MempoolResponseError(`'${field}' must be a string (got ${describe(value)})`);
   }
   return value;
 }
 
 function asFiniteNumber(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new MempoolResponseError(`'${field}' must be a finite number (got ${JSON.stringify(value)})`);
+    throw new MempoolResponseError(`'${field}' must be a finite number (got ${describe(value)})`);
   }
   return value;
 }
@@ -69,7 +118,7 @@ function asTimestampInSeconds(value: unknown, field: string): number {
   const n = asFiniteNumber(value, field);
   if (!Number.isInteger(n) || n < 0 || n >= 100_000_000_000) {
     throw new MempoolResponseError(
-      `'${field}' must be a Unix timestamp in seconds (got ${JSON.stringify(value)})`,
+      `'${field}' must be a Unix timestamp in seconds (got ${describe(value)})`,
     );
   }
   return n;
@@ -78,7 +127,7 @@ function asTimestampInSeconds(value: unknown, field: string): number {
 function asPositiveInteger(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
     throw new MempoolResponseError(
-      `'${field}' must be a positive integer (got ${JSON.stringify(value)})`,
+      `'${field}' must be a positive integer (got ${describe(value)})`,
     );
   }
   return value;
@@ -86,14 +135,35 @@ function asPositiveInteger(value: unknown, field: string): number {
 
 function asAddress(value: unknown, field: string): Address {
   if (!isAddr(value)) {
-    throw new MempoolResponseError(`'${field}' must be a valid address (got ${JSON.stringify(value)})`);
+    throw new MempoolResponseError(`'${field}' must be a valid address (got ${describe(value)})`);
   }
   return value;
 }
 
-function asHex(value: unknown, field: string): Hex {
-  if (!isHex(value)) {
-    throw new MempoolResponseError(`'${field}' must be a hex string (got ${JSON.stringify(value)})`);
+function isHash(value: unknown): value is Hex {
+  return typeof value === "string" && HASH_RE.test(value);
+}
+
+function isSignature(value: unknown): value is Hex {
+  return typeof value === "string" && SIGNATURE_RE.test(value);
+}
+
+/** Validate a 32-byte hash: exactly `0x` + 64 hex chars (issue #530). */
+function asHash(value: unknown, field: string): Hex {
+  if (!isHash(value)) {
+    throw new MempoolResponseError(
+      `'${field}' must be a 0x-prefixed 32-byte hex string (66 chars, got ${describe(value)})`,
+    );
+  }
+  return value;
+}
+
+/** Validate a canonical 65-byte signature: exactly `0x` + 130 hex chars (issue #530). */
+function asSignature(value: unknown, field: string): Hex {
+  if (!isSignature(value)) {
+    throw new MempoolResponseError(
+      `'${field}' must be a 0x-prefixed 65-byte (r,s,v) signature (132 chars, got ${describe(value)})`,
+    );
   }
   return value;
 }
@@ -102,7 +172,7 @@ function asStellarAddress(value: unknown, field: string): string {
   const s = asString(value, field);
   if (!isStellarAddress(s)) {
     throw new MempoolResponseError(
-      `'${field}' must be a valid Stellar strkey (got ${JSON.stringify(s)})`
+      `'${field}' must be a valid Stellar strkey (got ${describe(s)})`
     );
   }
   return s;
@@ -112,7 +182,7 @@ function asStellarAsset(value: unknown, field: string): string {
   const s = asString(value, field);
   if (!isStellarAsset(s)) {
     throw new MempoolResponseError(
-      `'${field}' must be a valid Stellar asset identifier (got ${JSON.stringify(s)})`
+      `'${field}' must be a valid Stellar asset identifier (got ${describe(s)})`
     );
   }
   return s;
@@ -122,23 +192,45 @@ function asIntegerString(value: unknown, field: string): string {
   const s = asString(value, field);
   if (!/^(?:0|[1-9][0-9]*)$/.test(s)) {
     throw new MempoolResponseError(
-      `'${field}' must be a valid non-negative integer string (got ${JSON.stringify(s)})`
+      `'${field}' must be a valid non-negative integer string (got ${describe(s)})`
     );
   }
   return s;
 }
 
-/** Validate and narrow an unknown value into an {@link Intent}. */
+/**
+ * Strictly-positive integer string (no `"0"`, no leading zeros, no sign).
+ * Reuses {@link isPositiveIntString} from `intent.ts` so `parseIntent` and
+ * `validateIntent` agree on the exact same amount grammar (issue #531).
+ */
+function asPositiveIntegerString(value: unknown, field: string): string {
+  const s = asString(value, field);
+  if (!isPositiveIntString(s)) {
+    throw new MempoolResponseError(
+      `'${field}' must be a strictly positive integer string with no leading zeros (got ${describe(s)})`
+    );
+  }
+  return s;
+}
+
+/**
+ * Validate and narrow an unknown value into an {@link Intent}.
+ *
+ * `sourceChainId` and the two amount fields use the exact same constraints as
+ * {@link validateIntent} — positive integer chain ID, strictly positive
+ * integer amount strings — so a record round-tripped through the mempool and
+ * a locally-built intent are held to identical rules (issue #531).
+ */
 export function parseIntent(value: unknown): Intent {
   const v = asObject(value, "'intent'");
   return {
     user: asAddress(v.user, "intent.user"),
     destination: asStellarAddress(v.destination, "intent.destination"),
-    sourceChainId: asFiniteNumber(v.sourceChainId, "intent.sourceChainId"),
+    sourceChainId: asPositiveInteger(v.sourceChainId, "intent.sourceChainId"),
     sourceAsset: asAddress(v.sourceAsset, "intent.sourceAsset"),
-    sourceAmount: asIntegerString(v.sourceAmount, "intent.sourceAmount"),
+    sourceAmount: asPositiveIntegerString(v.sourceAmount, "intent.sourceAmount"),
     destAsset: asStellarAsset(v.destAsset, "intent.destAsset"),
-    minDestAmount: asIntegerString(v.minDestAmount, "intent.minDestAmount"),
+    minDestAmount: asPositiveIntegerString(v.minDestAmount, "intent.minDestAmount"),
     deadline: asPositiveInteger(v.deadline, "intent.deadline"),
     nonce: asIntegerString(v.nonce, "intent.nonce"),
     preferredSolver: asAddress(v.preferredSolver, "intent.preferredSolver"),
@@ -150,8 +242,8 @@ export function parseSignedIntent(value: unknown): SignedIntent {
   const v = asObject(value, "signed intent");
   return {
     intent: parseIntent(v.intent),
-    signature: asHex(v.signature, "signature"),
-    hash: asHex(v.hash, "hash"),
+    signature: asSignature(v.signature, "signature"),
+    hash: asHash(v.hash, "hash"),
   };
 }
 
@@ -162,7 +254,7 @@ export function parseIntentRecord(value: unknown): IntentRecord {
 
   if (typeof v.status !== "string" || !MEMPOOL_STATUSES.has(v.status as MempoolIntentStatus)) {
     throw new MempoolResponseError(
-      `'status' must be one of ${[...MEMPOOL_STATUSES].join(", ")} (got ${JSON.stringify(v.status)})`,
+      `'status' must be one of ${[...MEMPOOL_STATUSES].join(", ")} (got ${describe(v.status)})`,
     );
   }
   if (v.solver !== undefined) asAddress(v.solver, "solver");
@@ -177,10 +269,28 @@ export function parseIntentRecord(value: unknown): IntentRecord {
   };
 }
 
-/** Validate and narrow an unknown value into an array of {@link IntentRecord}. */
-export function parseIntentRecordArray(value: unknown): IntentRecord[] {
+/** Default cap on the number of records {@link parseIntentRecordArray} will process in one call. */
+const DEFAULT_MAX_INTENT_RECORDS = 5000;
+
+/**
+ * Validate and narrow an unknown value into an array of {@link IntentRecord}.
+ *
+ * @param maxLimit Upper bound on `value.length`. A misbehaving or malicious
+ *                 mempool server returning an arbitrarily large array would
+ *                 otherwise force this synchronous `.map` to walk the whole
+ *                 thing and stall the event loop; exceeding the bound throws
+ *                 {@link MempoolResponseTooLargeError} instead. Defaults to
+ *                 {@link DEFAULT_MAX_INTENT_RECORDS} (issue #532).
+ */
+export function parseIntentRecordArray(
+  value: unknown,
+  maxLimit: number = DEFAULT_MAX_INTENT_RECORDS,
+): IntentRecord[] {
   if (!Array.isArray(value)) {
-    throw new MempoolResponseError(`expected an array of intent records (got ${JSON.stringify(value)})`);
+    throw new MempoolResponseError(`expected an array of intent records (got ${describe(value)})`);
+  }
+  if (value.length > maxLimit) {
+    throw new MempoolResponseTooLargeError(value.length, maxLimit);
   }
   return value.map(parseIntentRecord);
 }

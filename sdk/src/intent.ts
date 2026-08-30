@@ -58,7 +58,12 @@ export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
 
 
 
-function isPositiveIntString(s: string): boolean {
+/**
+ * Strictly-positive decimal integer string: no `"0"`, no leading zeros, no
+ * sign. Exported so `validate.ts`'s `parseIntent` can enforce the exact same
+ * amount grammar as {@link validateIntent} (issue #531).
+ */
+export function isPositiveIntString(s: string): boolean {
   return /^[1-9][0-9]*$/.test(s);
 }
 

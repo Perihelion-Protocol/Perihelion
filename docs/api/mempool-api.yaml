@@ -119,7 +119,7 @@ paths:
                 deadline: 1751280000
                 nonce: "95395590780195993686340100862393633005949636859136019347794446361576576451305"
                 preferredSolver: "0x0000000000000000000000000000000000000000"
-              signature: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab1c"
+              signature: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a69781c"
               hash: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
       responses:
         '200':
@@ -262,7 +262,7 @@ paths:
         including current lifecycle status and any solver/settlement metadata
         that has been attached since submission.
 
-        The path parameter is not format-validated against the `Hex` pattern
+        The path parameter is not format-validated against the `Hash` pattern
         (see issue #348); a malformed hash is simply treated as unknown and
         falls through to the `404` response below, the same as any other
         hash with no matching record.
@@ -276,7 +276,7 @@ paths:
             `hashIntent` function. Lookup is case-insensitive — the server
             normalizes the path parameter to lowercase before matching.
           schema:
-            $ref: '#/components/schemas/Hex'
+            $ref: '#/components/schemas/Hash'
           example: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
       responses:
         '200':
@@ -323,7 +323,7 @@ paths:
           in: path
           required: true
           schema:
-            $ref: '#/components/schemas/Hex'
+            $ref: '#/components/schemas/Hash'
       requestBody:
         required: true
         content:
@@ -409,11 +409,35 @@ components:
     Hex:
       type: string
       description: |
-        An arbitrary-length `0x`-prefixed hex string. Used for the intent hash,
-        signature, and nonce fields.
+        An arbitrary-length `0x`-prefixed hex string.
       pattern: '^0x[0-9a-fA-F]+$'
       examples:
         - "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+
+    Hash:
+      type: string
+      description: |
+        A 32-byte keccak256 hash, `0x`-prefixed: exactly 66 characters (`0x` +
+        64 hex digits). Used for the canonical `intent_hash` — the mempool and
+        on-chain identifier computed by the SDK `hashIntent` function. Unlike
+        the general-purpose `Hex` type, this pattern is length-exact so a
+        truncated or malformed hash is rejected at the schema level rather
+        than accepted as "some hex string" (issue #530).
+      pattern: '^0x[0-9a-fA-F]{64}$'
+      examples:
+        - "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+
+    Signature:
+      type: string
+      description: |
+        A canonical 65-byte `(r, s, v)` EIP-712 signature, `0x`-prefixed:
+        exactly 132 characters (`0x` + 130 hex digits). 64-byte EIP-2098
+        "compact" signatures are not accepted here — see `PerihelionEscrow._verify`
+        and the SDK's `verifyIntent`, which apply the same length-exact rule
+        (issue #530).
+      pattern: '^0x[0-9a-fA-F]{130}$'
+      examples:
+        - "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a69781c"
 
     IntentStatus:
       type: string
@@ -539,12 +563,12 @@ components:
         intent:
           $ref: '#/components/schemas/Intent'
         signature:
-          $ref: '#/components/schemas/Hex'
+          $ref: '#/components/schemas/Signature'
           description: |
             EIP-712 signature over the intent by `intent.user`. Must be a
             valid 65-byte (`r`, `s`, `v`) compact hex string.
         hash:
-          $ref: '#/components/schemas/Hex'
+          $ref: '#/components/schemas/Hash'
           description: |
             keccak256 EIP-712 commitment of the intent — the primary mempool
             and on-chain identifier. Computed by the SDK `hashIntent` function.
@@ -595,7 +619,7 @@ components:
         - hash
       properties:
         hash:
-          $ref: '#/components/schemas/Hex'
+          $ref: '#/components/schemas/Hash'
           description: |
             The canonical `intent_hash` computed by the server.  Clients
             should verify this matches their locally-computed hash before
