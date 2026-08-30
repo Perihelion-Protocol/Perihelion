@@ -43,7 +43,7 @@ test("listPending uses the client base URL (strips trailing slash)", async () =>
   };
   const client = makeClient(fetchImpl as typeof fetch, "https://mempool.example.com/");
   await client.listPending();
-  assert.equal(capturedUrl, "https://mempool.example.com/intents?status=pending");
+  assert.equal(capturedUrl, "https://mempool.example.com/intents?status=pending&limit=100");
 });
 
 test("listPending returns validated IntentRecord array", async () => {
@@ -66,8 +66,21 @@ test("listPending accepts a non-default status", async () => {
   };
   const client = makeClient(fetchImpl as typeof fetch);
   const result = await client.listPending("settled");
-  assert.equal(capturedUrl, "https://mempool.example.com/intents?status=settled");
+  assert.equal(capturedUrl, "https://mempool.example.com/intents?status=settled&limit=100");
   assert.equal(result[0].status, "settled");
+});
+
+test("listPending passes an explicit limit override in the query string", async () => {
+  let capturedUrl = "";
+  const fetchImpl = async (url: string | URL | Request) => {
+    capturedUrl = url.toString();
+    return new Response(JSON.stringify({ records: [makeRecord()], nextCursor: undefined }), {
+      status: 200,
+    });
+  };
+  const client = makeClient(fetchImpl as typeof fetch);
+  await client.listPending("pending", 100, 25);
+  assert.equal(capturedUrl, "https://mempool.example.com/intents?status=pending&limit=25");
 });
 
 test("listPending throws PerihelionHttpError on non-2xx response", async () => {
