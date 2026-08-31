@@ -84,7 +84,39 @@ export class PerihelionClient {
   private readonly maxRetries: number;
 
   constructor(opts: ClientOptions) {
-    this.base = opts.mempoolUrl.replace(/\/$/, "");
+    // Parse and validate the URL up-front so any mistake is reported immediately
+    // at construction with the option name, rather than surfacing as an opaque
+    // TypeError inside the first fetch call.
+    let parsed: URL;
+    try {
+      parsed = new URL(opts.mempoolUrl);
+    } catch {
+      throw new PerihelionValidationError(
+        `[Perihelion] mempoolUrl must be a valid URL, got: "${opts.mempoolUrl}"`,
+      );
+    }
+    // Derive the normalised base from the parsed URL so that repeated slashes,
+    // default ports, and other quirks are resolved before any path is appended.
+    // Strip the trailing slash from the pathname so every request path is
+    // appended with a single '/'.
+    this.base = `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
+
+    // Warn when the scheme is http: and the host is not a loopback address.
+    // reportStatus forwards a bearer token, which would be transmitted in clear
+    // text to a non-local http:// endpoint.
+    if (
+      parsed.protocol === "http:" &&
+      parsed.hostname !== "localhost" &&
+      parsed.hostname !== "127.0.0.1" &&
+      parsed.hostname !== "::1"
+    ) {
+      console.warn(
+        "[Perihelion] mempoolUrl uses http:// with a non-loopback host — " +
+          "bearer tokens sent to reportStatus will be transmitted in clear text. " +
+          "Use https:// in production.",
+      );
+    }
+
     this.fetchImpl = opts.fetch ?? globalThis.fetch;
     this.opts = opts;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 10_000;

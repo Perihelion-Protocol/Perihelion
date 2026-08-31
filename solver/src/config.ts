@@ -172,7 +172,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
   }
 
   return {
-    mempoolUrl: env.PERIHELION_MEMPOOL_URL ?? "http://localhost:3000",
+    mempoolUrl,
     solverAddress: solverAddress as Address,
     sourceChainId,
     escrowAddress: escrowAddress as Address,

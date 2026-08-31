@@ -55,6 +55,44 @@ test("loadConfig defaults mempoolUrl to the mempool's own default port", () => {
   assert.equal(config.mempoolUrl, "http://localhost:3000");
 });
 
+test("loadConfig accepts a valid https:// mempoolUrl", () => {
+  const config = loadConfig({ ...baseSolverEnv(), PERIHELION_MEMPOOL_URL: "https://mempool.perihelion.xyz" });
+  assert.equal(config.mempoolUrl, "https://mempool.perihelion.xyz");
+});
+
+test("loadConfig accepts a valid http://localhost mempoolUrl", () => {
+  const config = loadConfig({ ...baseSolverEnv(), PERIHELION_MEMPOOL_URL: "http://localhost:3000" });
+  assert.equal(config.mempoolUrl, "http://localhost:3000");
+});
+
+test("loadConfig rejects a bare hostname (no scheme) as PERIHELION_MEMPOOL_URL", () => {
+  assert.throws(
+    () => loadConfig({ ...baseSolverEnv(), PERIHELION_MEMPOOL_URL: "mempool.example.com" }),
+    /PERIHELION_MEMPOOL_URL must be a valid URL/,
+  );
+});
+
+test("loadConfig rejects a completely invalid PERIHELION_MEMPOOL_URL", () => {
+  assert.throws(
+    () => loadConfig({ ...baseSolverEnv(), PERIHELION_MEMPOOL_URL: "not a url" }),
+    /PERIHELION_MEMPOOL_URL must be a valid URL/,
+  );
+});
+
+test("loadConfig includes PERIHELION_MEMPOOL_URL error in the consolidated startup message", () => {
+  // A missing required var + an invalid mempoolUrl must both appear in one throw.
+  assert.throws(
+    () => loadConfig({ PERIHELION_MEMPOOL_URL: "not-a-url" }),
+    (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return (
+        msg.includes("PERIHELION_SOLVER_ADDRESS is required") &&
+        msg.includes("PERIHELION_MEMPOOL_URL must be a valid URL")
+      );
+    },
+  );
+});
+
 test("loadConfig returns a valid config when all required vars are present", () => {
   const config = loadConfig(baseSolverEnv());
   assert.equal(config.solverAddress, VALID_SOLVER);
