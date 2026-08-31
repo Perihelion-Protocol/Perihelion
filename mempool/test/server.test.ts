@@ -266,7 +266,7 @@ test("GET /intents pagination: page smaller than result set returns nextCursor",
   // Submit multiple intents to ensure pagination
   const intents = [];
   for (let i = 0; i < 5; i++) {
-    const intent = { ...sampleIntent(), nonce: `page-test-${i}` };
+    const intent = { ...sampleIntent(), nonce: String(100 + i) };
     const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
     await submit(intent, signature);
     intents.push(intent);
@@ -283,7 +283,7 @@ test("GET /intents pagination: page smaller than result set returns nextCursor",
 test("GET /intents pagination: following cursor returns next page", async () => {
   // Submit intents with distinct nonces
   for (let i = 0; i < 4; i++) {
-    const intent = { ...sampleIntent(), nonce: `cursor-test-${i}` };
+    const intent = { ...sampleIntent(), nonce: String(200 + i) };
     const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
     await submit(intent, signature);
   }
@@ -312,7 +312,7 @@ test("GET /intents pagination: following cursor returns next page", async () => 
 test("GET /intents pagination: final page returns nextCursor undefined", async () => {
   // Submit exactly 2 intents
   for (let i = 0; i < 2; i++) {
-    const intent = { ...sampleIntent(), nonce: `final-page-${i}` };
+    const intent = { ...sampleIntent(), nonce: String(300 + i) };
     const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
     await submit(intent, signature);
   }

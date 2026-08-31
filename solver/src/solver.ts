@@ -15,7 +15,7 @@ import {
   type Hex,
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
-import { evaluate, type PricingDeps } from "./quote.js";
+import { evaluate, type PricingDeps, type NativeCostDeps } from "./quote.js";
 import { BackoffState } from "./backoff.js";
 import type { Metrics } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
@@ -225,8 +225,12 @@ export class Solver {
     private readonly metrics?: Metrics,
     private readonly inventory?: InventoryProvider,
     private readonly verifier: IntentVerifier = verifyIntent,
-    /** Injectable pricing overrides (priceOracle/feeEstimator/decimalsLookup), merged with `inventory` when evaluating. */
-    private readonly pricingDeps?: PricingDeps,
+    /**
+     * Injectable pricing overrides (priceOracle/feeEstimator/decimalsLookup)
+     * and per-fill native-cost estimators (sourceNativeCost/destNativeCost),
+     * merged with `inventory` when evaluating.
+     */
+    private readonly pricingDeps?: PricingDeps & NativeCostDeps,
   ) {
     this.client = new PerihelionClient({ mempoolUrl: config.mempoolUrl });
     this.backoff = new BackoffState(config);
@@ -346,11 +350,22 @@ export class Solver {
       {
         ...this.pricingDeps,
         availableBalance: this.inventory?.availableBalance.bind(this.inventory),
+        nativeBalanceSource: this.inventory?.nativeBalanceSource?.bind(this.inventory),
+        nativeBalanceDest: this.inventory?.nativeBalanceDest?.bind(this.inventory),
       },
       this.inFlight,
     );
     if (!decision.fill) {
-      this.log.info("skipping intent", { hash, reason: decision.reason });
+      if (decision.nativeShortfall) {
+        // Operator-actionable and affects every intent, not just this one —
+        // log at error level so it pages rather than scrolling past as info.
+        this.log.error("skipping intent: native balance shortfall — solver cannot fund a fill leg", {
+          hash,
+          reason: decision.reason,
+        });
+      } else {
+        this.log.info("skipping intent", { hash, reason: decision.reason });
+      }
       this.metrics?.recordSkip(decision.reason);
       // Terminal: this intent will never become fillable (wrong chain,
       // expired, unsupported asset, reserved for another solver, ...).

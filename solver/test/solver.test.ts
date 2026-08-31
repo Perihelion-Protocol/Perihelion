@@ -31,6 +31,8 @@ const baseConfig: SolverConfig = {
   sourceChainId: CHAIN_ID,
   escrowAddress: ESCROW_ADDRESS,
   minMarginBps: 10,
+  sourceNativeFeeFloor: 0n,
+  stellarNativeFeeFloor: 0n,
   pollIntervalMs: 1000,
   supportedDestAssets: ["native"],
   verificationCacheSize: 100,

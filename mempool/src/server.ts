@@ -180,6 +180,23 @@ export class MempoolServer {
     );
   }
 
+  /**
+   * Normalise and validate a `:hash` path parameter. Records are keyed by the
+   * lower-case hash `hashIntent` produces and {@link IntentStore} keys an exact
+   * Map, so a mixed-case hash — from EIP-55 checksum habits or display tooling
+   * that upper-cases hex — must be folded before lookup. Returns the canonical
+   * hash, or sends a `400` and returns `undefined`. Shared by every route that
+   * takes a `:hash` so the two cannot drift apart (#561).
+   */
+  private parseHashParam(req: Request, res: Response): Hex | undefined {
+    const raw = String(req.params.hash ?? "").toLowerCase();
+    if (!HASH_RE.test(raw)) {
+      res.status(400).json({ error: "hash must be a 0x-prefixed 32-byte hex string" });
+      return undefined;
+    }
+    return raw as Hex;
+  }
+
   private handleUpdateStatus(req: Request, res: Response): void {
     if (this.statusToken) {
       const auth = req.header("authorization");
@@ -189,7 +206,8 @@ export class MempoolServer {
       }
     }
 
-    const { hash } = req.params as { hash: Hex };
+    const hash = this.parseHashParam(req, res);
+    if (hash === undefined) return;
     const { status } = req.body as { status?: IntentStatus };
 
     if (!status || !INTENT_STATUSES.has(status)) {
@@ -197,18 +215,18 @@ export class MempoolServer {
       return;
     }
 
-    if (!this.store.get(hash as Hex)) {
+    if (!this.store.get(hash)) {
       res.status(404).json({ error: "Intent not found" });
       return;
     }
 
-    const updated = this.store.updateStatus(hash as Hex, status);
+    const updated = this.store.updateStatus(hash, status);
     if (!updated) {
       res.status(409).json({ error: "Cannot change status of a terminal intent" });
       return;
     }
 
-    res.json(this.store.get(hash as Hex));
+    res.json(this.store.get(hash));
   }
 
   /**
@@ -236,6 +254,54 @@ export class MempoolServer {
       this.rateLimitHits.set(key, recent);
       next();
     };
+  }
+
+  /**
+   * Insert or refresh an IP's hit list, keeping {@link rateLimitHits} in
+   * least-recently-used order (Map iteration order == insertion order) and
+   * bounded by {@link rateLimitMaxIps}. Eviction here is a backstop; the
+   * periodic {@link sweepRateLimits} is the main reclaim path.
+   */
+  private touchRateLimit(ip: string, hits: number[]): void {
+    this.rateLimitHits.delete(ip);
+    this.rateLimitHits.set(ip, hits);
+    while (this.rateLimitHits.size > this.rateLimitMaxIps) {
+      const oldest = this.rateLimitHits.keys().next().value;
+      if (oldest === undefined) break;
+      this.rateLimitHits.delete(oldest);
+    }
+  }
+
+  /**
+   * Drop rate-limit entries whose most recent hit is older than the window —
+   * they can no longer affect a decision. Runs on the same timer as the store
+   * sweep. Returns the number of entries evicted.
+   */
+  private sweepRateLimits(now = Date.now()): number {
+    let evicted = 0;
+    for (const [ip, hits] of this.rateLimitHits) {
+      const last = hits.at(-1) ?? 0;
+      if (now - last >= RATE_LIMIT_WINDOW_MS) {
+        this.rateLimitHits.delete(ip);
+        evicted += 1;
+      }
+    }
+    return evicted;
+  }
+
+  /**
+   * Run the periodic maintenance sweep immediately: evict past-deadline intents
+   * from the store and prune stale rate-limit entries. Invoked on a timer by
+   * {@link start}; exposed for tests that need to force a sweep.
+   */
+  sweep(now = Date.now()): void {
+    this.store.evictExpired(Math.floor(now / 1000));
+    this.sweepRateLimits(now);
+  }
+
+  /** Number of distinct source IPs currently tracked by the rate limiter. Exposed for tests. */
+  rateLimitEntryCount(): number {
+    return this.rateLimitHits.size;
   }
 
   private async handleSubmitIntent(req: Request, res: Response): Promise<void> {
@@ -302,13 +368,10 @@ export class MempoolServer {
   }
 
   private handleGetIntent(req: Request, res: Response): void {
-    const raw = String(req.params.hash ?? "").toLowerCase();
-    if (!HASH_RE.test(raw)) {
-      res.status(400).json({ error: "hash must be a 0x-prefixed 32-byte hex string" });
-      return;
-    }
+    const hash = this.parseHashParam(req, res);
+    if (hash === undefined) return;
 
-    const record = this.store.get(raw as Hex);
+    const record = this.store.get(hash);
     if (!record) {
       res.status(404).json({ error: "Intent not found" });
       return;
@@ -386,7 +449,7 @@ export class MempoolServer {
           "PATCH /intents/:hash/status is unauthenticated (no statusToken configured) — do not expose this port publicly.",
         );
       }
-      this.sweepTimer = setInterval(() => this.store.evictExpired(), SWEEP_INTERVAL_MS);
+      this.sweepTimer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
       this.sweepTimer.unref?.();
       this.server = this.app.listen(this.port, this.host, () => {
         console.log(
