@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadConfig } from "../src/config.js";
-import { loadExecutorConfig } from "../src/executor-config.js";
+import { hasExecutorConfig, loadExecutorConfig } from "../src/executor-config.js";
 
 const VALID_SOLVER = "0x1111111111111111111111111111111111111111";
 const VALID_ESCROW = "0x2222222222222222222222222222222222222222";
@@ -137,6 +137,16 @@ function baseExecutorEnv() {
     PERIHELION_SOURCE_CHAIN_ID: "8453",
   };
 }
+
+test("hasExecutorConfig returns false when no executor secrets or endpoints are configured", () => {
+  assert.equal(hasExecutorConfig({}), false);
+  assert.equal(hasExecutorConfig({ PERIHELION_SOLVER_ADDRESS: VALID_SOLVER }), false);
+});
+
+test("hasExecutorConfig returns true when executor settings are present", () => {
+  assert.equal(hasExecutorConfig({ PERIHELION_EVM_PRIVATE_KEY: `0x${"1".repeat(64)}` }), true);
+  assert.equal(hasExecutorConfig(baseExecutorEnv()), true);
+});
 
 test("loadExecutorConfig throws a single consolidated error when required vars are missing", () => {
   assert.throws(
