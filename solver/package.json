@@ -1,7 +1,7 @@
 {
   "name": "@perihelion/solver",
   "version": "0.1.0",
-  "description": "Reference Perihelion solver node \u2014 monitors the intent mempool and fills orders",
+  "description": "Reference Perihelion solver node — monitors the intent mempool and fills orders",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@perihelion/sdk": "*",
+    "@stellar/stellar-sdk": "^12.3.0",
     "viem": "^2.55.8"
   },
   "devDependencies": {
