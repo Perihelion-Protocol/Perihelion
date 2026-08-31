@@ -39,6 +39,7 @@ export interface ExecutorConfig {
 /** Idempotency check result. */
 interface FillStatus {
   filled: boolean;
+  unknown?: boolean;
   settlementTx?: string;
 }
 
@@ -78,7 +79,13 @@ export class Executor {
 
     // Check if already filled (idempotency)
     const status = await this.checkFillStatus(hash);
-    if (status.filled && status.settlementTx) {
+    if (status.unknown) {
+      throw new Error(`idempotency probe failed for intent ${hash}; refusing to proceed`);
+    }
+    if (status.filled) {
+      if (!status.settlementTx) {
+        throw new Error(`idempotency probe reported intent ${hash} as filled without a settlement tx hash`);
+      }
       return { settlementTx: status.settlementTx };
     }
 
@@ -99,14 +106,24 @@ export class Executor {
     try {
       const settled = await this.isSettled(intentHash);
       if (settled) {
-        // If settled, return a marker indicating it's already filled
-        // In production, would retrieve the actual settlement tx hash from Soroban
-        return { filled: true, settlementTx: intentHash };
+        // A "filled" result must carry the real settlement tx hash. Never reuse
+        // the intent hash as a placeholder for a settlement tx, because callers
+        // treat it as an actual transaction identifier in logs and API output.
+        this.logger.warn("idempotency probe reported a filled intent without settlement tx", {
+          intentHash,
+          settlementTx: undefined,
+        });
+        return { filled: false, unknown: true };
       }
+      return { filled: false };
     } catch (err) {
-      // Query failure is not fatal; proceed with fill attempt
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn("idempotency probe failed; refusing to proceed", {
+        intentHash,
+        error: message,
+      });
+      return { filled: false, unknown: true };
     }
-    return { filled: false };
   }
 
   /**
