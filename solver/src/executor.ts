@@ -12,10 +12,10 @@ import {
   createPublicClient,
   createWalletClient,
   http,
-  privateKeyToAccount,
   getAddress,
   type Hex,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import {
   SorobanRpc,
   TransactionBuilder,
@@ -187,7 +187,7 @@ export class Executor {
       networkPassphrase: this.stellarNetwork,
     })
       .addOperation(
-        contract.call("status", xdr.ScVal.scvBytes(hashBytes)),
+        contract.call("status", xdr.ScVal.scvBytes(Buffer.from(hashBytes))),
       )
       .setTimeout(30)
       .build();
@@ -308,8 +308,8 @@ export class Executor {
 
     const args = [
       solverStellar,
-      xdr.ScVal.scvBytes(solverEvmBytes),     // solver_evm: BytesN<32>
-      xdr.ScVal.scvBytes(hashBytes),           // intent_hash: BytesN<32>
+      xdr.ScVal.scvBytes(Buffer.from(solverEvmBytes)),  // solver_evm: BytesN<32>
+      xdr.ScVal.scvBytes(Buffer.from(hashBytes)),        // intent_hash: BytesN<32>
       nativeToScVal(fillAmount, { type: "i128" }),  // fill_amount: i128
       nativeToScVal(0n, { type: "i128" }),          // lz_fee: i128 (0 for mock)
     ];
