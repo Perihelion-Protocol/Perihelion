@@ -4,8 +4,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   MempoolResponseError,
+  MempoolResponseTooLargeError,
+  parseIntent,
   parseIntentRecord,
   parseIntentRecordArray,
+  parseSignedIntent,
 } from "../src/validate.js";
 
 const VALID_ADDRESS = "0x1234567890123456789012345678901234567890";
@@ -119,4 +122,135 @@ test("parseIntentRecordArray validates every element", () => {
     () => parseIntentRecordArray([validRecord(), { not: "valid" }]),
     MempoolResponseError,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Issue #530 — hash/signature length-aware validation
+// ---------------------------------------------------------------------------
+
+test("parseSignedIntent rejects a hash of the wrong byte length", () => {
+  for (const hash of ["0x0", "0x" + "ab".repeat(31), "0x" + "ab".repeat(33)]) {
+    assert.throws(
+      () => parseSignedIntent({ intent: validRecord().intent, signature: VALID_SIG, hash }),
+      MempoolResponseError,
+    );
+  }
+});
+
+test("parseSignedIntent rejects an odd-length hex hash", () => {
+  assert.throws(
+    () =>
+      parseSignedIntent({
+        intent: validRecord().intent,
+        signature: VALID_SIG,
+        hash: VALID_HASH.slice(0, -1), // drop one hex digit -> odd length
+      }),
+    MempoolResponseError,
+  );
+});
+
+test("parseSignedIntent accepts an exactly 32-byte (66-char) hash", () => {
+  const signed = parseSignedIntent({
+    intent: validRecord().intent,
+    signature: VALID_SIG,
+    hash: VALID_HASH,
+  });
+  assert.equal(signed.hash, VALID_HASH);
+});
+
+test("parseSignedIntent rejects a signature of the wrong byte length", () => {
+  for (const signature of ["0x0", "0x" + "cd".repeat(64), "0x" + "cd".repeat(66)]) {
+    assert.throws(
+      () => parseSignedIntent({ intent: validRecord().intent, signature, hash: VALID_HASH }),
+      MempoolResponseError,
+    );
+  }
+});
+
+test("parseSignedIntent rejects an odd-length hex signature", () => {
+  assert.throws(
+    () =>
+      parseSignedIntent({
+        intent: validRecord().intent,
+        signature: VALID_SIG.slice(0, -1), // drop one hex digit -> odd length
+        hash: VALID_HASH,
+      }),
+    MempoolResponseError,
+  );
+});
+
+test("parseSignedIntent accepts an exactly 65-byte (132-char) signature", () => {
+  const signed = parseSignedIntent({
+    intent: validRecord().intent,
+    signature: VALID_SIG,
+    hash: VALID_HASH,
+  });
+  assert.equal(signed.signature, VALID_SIG);
+});
+
+// ---------------------------------------------------------------------------
+// Issue #531 — parseIntent harmonized with validateIntent on sourceChainId
+// and amount fields.
+// ---------------------------------------------------------------------------
+
+test("parseIntent rejects a non-positive or non-integer sourceChainId", () => {
+  for (const sourceChainId of [0, -1, 8453.5, NaN]) {
+    const intent = { ...validRecord().intent, sourceChainId };
+    assert.throws(() => parseIntent(intent), MempoolResponseError);
+  }
+});
+
+test("parseIntent rejects a zero or non-positive sourceAmount/minDestAmount", () => {
+  for (const bad of ["0", "-1", "01", ""]) {
+    assert.throws(
+      () => parseIntent({ ...validRecord().intent, sourceAmount: bad }),
+      MempoolResponseError,
+    );
+    assert.throws(
+      () => parseIntent({ ...validRecord().intent, minDestAmount: bad }),
+      MempoolResponseError,
+    );
+  }
+});
+
+test("parseIntent accepts a valid positive sourceChainId and amounts", () => {
+  const intent = parseIntent(validRecord().intent);
+  assert.equal(intent.sourceChainId, 8453);
+  assert.equal(intent.sourceAmount, "1000000");
+  assert.equal(intent.minDestAmount, "900000");
+});
+
+// ---------------------------------------------------------------------------
+// Issue #532 — bounded array parsing and truncated error strings
+// ---------------------------------------------------------------------------
+
+test("parseIntentRecordArray throws MempoolResponseTooLargeError beyond the default limit", () => {
+  const oversized = Array.from({ length: 5001 }, () => validRecord());
+  assert.throws(() => parseIntentRecordArray(oversized), MempoolResponseTooLargeError);
+});
+
+test("parseIntentRecordArray accepts an array at exactly the default limit", () => {
+  const atLimit = Array.from({ length: 5000 }, () => validRecord());
+  const records = parseIntentRecordArray(atLimit);
+  assert.equal(records.length, 5000);
+});
+
+test("parseIntentRecordArray respects an explicit maxLimit override", () => {
+  const records = [validRecord(), validRecord()];
+  assert.throws(() => parseIntentRecordArray(records, 1), MempoolResponseTooLargeError);
+  assert.equal(parseIntentRecordArray(records, 2).length, 2);
+});
+
+test("parseIntentRecordArray error messages are truncated for oversized offending values", () => {
+  const huge = "x".repeat(10_000);
+  try {
+    parseIntentRecordArray(huge as unknown as unknown[]);
+    assert.fail("expected parseIntentRecordArray to throw for a non-array payload");
+  } catch (err) {
+    assert.ok(err instanceof MempoolResponseError);
+    assert.ok(
+      (err as Error).message.length < huge.length,
+      "error message must not embed the full 10,000-char offending value",
+    );
+  }
 });

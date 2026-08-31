@@ -13,14 +13,16 @@ import {
   type IntentRecord,
   type SignedIntent,
   type Hex,
+  type MempoolIntentStatus,
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
-import { evaluate, type PricingDeps } from "./quote.js";
+import { evaluate, type PricingDeps, type NativeCostDeps } from "./quote.js";
 import { BackoffState } from "./backoff.js";
 import type { Metrics } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
 import { InFlightTracker } from "./inventory.js";
 import { SeenLRU } from "./seen-lru.js";
+import { DefiniteFailureError } from "./executor.js";
 
 /** Pluggable execution backend — abstracts the two settlement legs. */
 export interface Executor {
@@ -178,43 +180,91 @@ interface RetryState {
   nextRetryAt: number;
 }
 
-class FillConcurrencyLimiter {
-  private readonly maxConcurrency: number;
-  private active = 0;
-  private readonly queue: Array<() => void> = [];
+/**
+ * Bounded LRU+TTL cache for per-intent retry state.
+ *
+ * ## Why this exists
+ *
+ * The plain `Map<string, RetryState>` it replaces was unbounded: entries were
+ * only deleted on a successful fill or after {@link MAX_FILL_RETRIES} retries.
+ * An intent that fails a fill and then disappears from the mempool (filled by
+ * a competing solver, expired and swept, or mempool restart) left its entry
+ * behind permanently — a slow but real leak for a long-running solver competing
+ * in a high-volume market.
+ *
+ * ## Eviction policy
+ *
+ * 1. **TTL eviction** — entries are stored with the same clamped deadline used
+ *    by {@link SeenLRU}.  `evictExpired()` is called every tick alongside
+ *    `seen.evictExpired()`.
+ * 2. **LRU eviction** — when the cache reaches `maxSize`, the
+ *    least-recently-touched entry is evicted.  This bounds worst-case memory
+ *    at `maxSize × ~150 bytes` (66-char key + `{ attempts, nextRetryAt, deadlineMs }`).
+ *
+ * ## Resubmission behaviour
+ *
+ * If the same hash reappears in the mempool after its retry entry was evicted
+ * (TTL or LRU), `get()` returns `undefined` and the intent is treated as fresh
+ * — its attempt counter starts at zero.  This is the desired behaviour: the
+ * original retry state was for a *stale* mempool appearance and should not
+ * penalise the resubmission.
+ */
+class RetryStateLRU {
+  private readonly cache = new Map<
+    string,
+    { attempts: number; nextRetryAt: number; deadlineMs: number }
+  >();
+  private readonly maxSize: number;
 
-  constructor(maxConcurrency: number) {
-    this.maxConcurrency = Math.max(1, Math.floor(maxConcurrency));
+  constructor(maxSize = 10_000) {
+    this.maxSize = maxSize;
   }
 
-  run<T>(task: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const execute = async (): Promise<void> => {
-        try {
-          const result = await task();
-          resolve(result);
-        } catch (err) {
-          reject(err);
-        } finally {
-          this.active--;
-          const next = this.queue.shift();
-          if (next) {
-            this.active++;
-            next();
-          }
-        }
-      };
+  get(hash: string): RetryState | undefined {
+    const entry = this.cache.get(hash);
+    if (entry === undefined) return undefined;
+    if (Date.now() > entry.deadlineMs) {
+      this.cache.delete(hash);
+      return undefined;
+    }
+    // Refresh LRU order.
+    this.cache.delete(hash);
+    this.cache.set(hash, entry);
+    return { attempts: entry.attempts, nextRetryAt: entry.nextRetryAt };
+  }
 
-      if (this.active < this.maxConcurrency) {
-        this.active++;
-        void execute();
-      } else {
-        this.queue.push(() => {
-          this.active++;
-          void execute();
-        });
+  set(hash: string, state: RetryState, deadlineMs: number): void {
+    // Re-insertion refreshes LRU order; evict old entry first.
+    this.cache.delete(hash);
+    if (this.cache.size >= this.maxSize) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
+    this.cache.set(hash, { ...state, deadlineMs });
+  }
+
+  delete(hash: string): void {
+    this.cache.delete(hash);
+  }
+
+  /**
+   * Evict all entries whose clamped deadline has passed.
+   * @returns The number of entries evicted.
+   */
+  evictExpired(): number {
+    const now = Date.now();
+    let evicted = 0;
+    for (const [hash, entry] of this.cache) {
+      if (now > entry.deadlineMs) {
+        this.cache.delete(hash);
+        evicted += 1;
       }
-    });
+    }
+    return evicted;
+  }
+
+  size(): number {
+    return this.cache.size;
   }
 }
 
@@ -252,8 +302,18 @@ export class Solver {
   /** Tracks capital committed to fills that are in flight, so a stale on-chain
    * balance read cannot let a second intent over-commit the same inventory. */
   private readonly inFlight = new InFlightTracker();
-  private readonly retryState = new Map<string, RetryState>();
-  private readonly fillLimiter: FillConcurrencyLimiter;
+  /**
+   * Per-intent retry bookkeeping, bounded by LRU capacity and TTL eviction.
+   *
+   * The TTL for each entry is the same clamped deadline used by `seen`:
+   * `max(intent.deadline × 1000, now + MIN_SEEN_TTL_MS)`.  This ensures that
+   * entries for intents that have expired or vanished from the mempool are
+   * pruned within `MIN_SEEN_TTL_MS` at the latest, so the map does not grow
+   * without bound for a solver that attempts many fills and loses most of them.
+   *
+   * Capacity defaults to {@link SolverConfig.retryCacheSize} (10,000).
+   */
+  private readonly retryState: RetryStateLRU;
   private running = false;
   private readonly backoff: BackoffState;
   /** Resolves an in-progress interruptibleSleep early when stop() is called. */
@@ -266,14 +326,18 @@ export class Solver {
     private readonly metrics?: Metrics,
     private readonly inventory?: InventoryProvider,
     private readonly verifier: IntentVerifier = verifyIntent,
-    /** Injectable pricing overrides (priceOracle/feeEstimator/decimalsLookup), merged with `inventory` when evaluating. */
-    private readonly pricingDeps?: PricingDeps,
+    /**
+     * Injectable pricing overrides (priceOracle/feeEstimator/decimalsLookup)
+     * and per-fill native-cost estimators (sourceNativeCost/destNativeCost),
+     * merged with `inventory` when evaluating.
+     */
+    private readonly pricingDeps?: PricingDeps & NativeCostDeps,
   ) {
     this.client = new PerihelionClient({ mempoolUrl: config.mempoolUrl });
     this.backoff = new BackoffState(config);
     this.seen = new SeenLRU(config.seenCacheSize ?? 50_000);
     this.verificationCache = new VerificationCache(config.verificationCacheSize ?? 10_000);
-    this.fillLimiter = new FillConcurrencyLimiter(config.fillConcurrency ?? 4);
+    this.retryState = new RetryStateLRU(config.retryCacheSize ?? 10_000);
   }
 
   /**
@@ -330,9 +394,34 @@ export class Solver {
       });
     }
 
+    // Evict stale retry-state entries for intents that have vanished from the
+    // mempool.  Uses the same clamped-deadline TTL as the seen-set, so entries
+    // for long-gone intents are pruned within MIN_SEEN_TTL_MS at the latest.
+    const retryEvicted = this.retryState.evictExpired();
+    if (retryEvicted > 0) {
+      this.log.info("evicted expired retry-state entries", {
+        evicted: retryEvicted,
+        retryStateSize: this.retryState.size(),
+      });
+    }
+
+    // Release post-fill holds from the previous tick.  By the time a new tick
+    // begins, the inventory provider has had a full polling interval to refresh
+    // its cached balance, so the capital that was committed by a successful fill
+    // will now be reflected in `availableBalance()`.  Flushing here prevents
+    // the held amounts from being double-counted as still-committed during the
+    // new round of `evaluate()` calls.
+    this.inFlight.flushHeld();
+
     const pending = await this.client.listPending();
     const now = Date.now();
-    const tasks: Array<Promise<void>> = [];
+
+    // Count hash-mismatches across this page so we can escalate when every
+    // record on the page mismatches — which is a strong signal that the
+    // solver's own domain configuration (sourceChainId / escrowAddress) is
+    // wrong rather than individual records being malformed.
+    let pageMismatches = 0;
+    let pageConsidered = 0;
 
     for (const record of pending) {
       const { hash } = record;
@@ -341,13 +430,34 @@ export class Solver {
       const retry = this.retryState.get(hash);
       if (retry && now < retry.nextRetryAt) continue;
 
-      tasks.push(this.consider(record));
+      pageConsidered += 1;
+      const wasMismatch = await this.consider(record);
+      if (wasMismatch) pageMismatches += 1;
+    }
+
+    // If every non-skipped record on this page produced a hash mismatch, the
+    // solver's domain is almost certainly misconfigured. Emit one actionable
+    // error per tick (not per record) so operators can diagnose it quickly.
+    if (pageConsidered > 0 && pageMismatches === pageConsidered) {
+      this.log.error(
+        "all records on this page failed hash verification: possible domain misconfiguration",
+        {
+          sourceChainId: this.config.sourceChainId,
+          escrowAddress: this.config.escrowAddress,
+          pageMismatches,
+        },
+      );
     }
 
     await Promise.allSettled(tasks);
   }
 
-  private async consider(record: IntentRecord): Promise<void> {
+  /**
+   * Evaluate a single pending record. Returns `true` if the record was
+   * rejected due to a hash mismatch (used by `tick()` to detect a full-page
+   * mismatch that may indicate a domain misconfiguration), `false` otherwise.
+   */
+  private async consider(record: IntentRecord): Promise<boolean> {
     const { intent, signature, hash } = record;
 
     // Seen-set TTL, clamped so terminal skips of already-expired intents
@@ -362,7 +472,14 @@ export class Solver {
         hash,
         recomputedHash,
       });
-      return;
+      // Hash mismatch is terminal for this record as published: the hash is a
+      // deterministic function of the intent fields and the domain, and neither
+      // changes while the record is in the mempool. Retire it to `seen` so
+      // subsequent ticks skip the EIP-712 recomputation and suppress the
+      // repeated warning.
+      this.seen.add(hash, deadlineMs);
+      this.retryState.delete(hash);
+      return true;
     }
 
     // Check cache first to avoid redundant verification. Keyed on domain +
@@ -374,7 +491,6 @@ export class Solver {
       valid = await this.verifier(intent, signature, domain);
       this.verificationCache.set(cacheKey, valid);
     }
-
     if (!valid) {
       this.log.warn("rejecting intent with invalid signature", { hash });
       // Not terminal for the hash: only this (domain, hash, signature) triple
@@ -383,7 +499,7 @@ export class Solver {
       // fillable. Repeated re-verification of the same bad signature is
       // still bounded by the verification cache's negative-result TTL.
       this.retryState.delete(hash);
-      return;
+      return false;
     }
 
     const decision = await evaluate(
@@ -392,11 +508,22 @@ export class Solver {
       {
         ...this.pricingDeps,
         availableBalance: this.inventory?.availableBalance.bind(this.inventory),
+        nativeBalanceSource: this.inventory?.nativeBalanceSource?.bind(this.inventory),
+        nativeBalanceDest: this.inventory?.nativeBalanceDest?.bind(this.inventory),
       },
       this.inFlight,
     );
     if (!decision.fill) {
-      this.log.info("skipping intent", { hash, reason: decision.reason });
+      if (decision.nativeShortfall) {
+        // Operator-actionable and affects every intent, not just this one —
+        // log at error level so it pages rather than scrolling past as info.
+        this.log.error("skipping intent: native balance shortfall — solver cannot fund a fill leg", {
+          hash,
+          reason: decision.reason,
+        });
+      } else {
+        this.log.info("skipping intent", { hash, reason: decision.reason });
+      }
       this.metrics?.recordSkip(decision.reason);
       // Terminal: this intent will never become fillable (wrong chain,
       // expired, unsupported asset, reserved for another solver, ...).
@@ -406,15 +533,18 @@ export class Solver {
         this.seen.add(hash, deadlineMs);
         this.retryState.delete(hash);
       }
-      return;
+      return false;
     }
 
     this.log.info("filling intent", { hash, profitBps: decision.profitBps });
     this.metrics?.recordFillAttempt(intent.destAsset);
     const reserved = BigInt(intent.minDestAmount);
     this.inFlight.reserve(intent.destAsset, reserved);
+    let fillSucceeded = false;
+    let caughtErr: unknown = undefined;
     try {
-      const { settlementTx } = await this.fillLimiter.run(() => this.executor.fill(record));
+      const { settlementTx } = await this.executor.fill(record);
+      fillSucceeded = true;
       this.log.info("filled", { hash, settlementTx });
       this.metrics?.recordFillWon(
         intent.destAsset,
@@ -424,13 +554,61 @@ export class Solver {
       // Terminal: filled successfully.
       this.seen.add(hash, deadlineMs);
       this.retryState.delete(hash);
+      // Best-effort: report "settled" to the mempool so the record leaves
+      // "pending" immediately rather than waiting for deadline eviction.
+      // A failed report must never fail or retry the fill — the on-chain
+      // settlement already succeeded.
+      await this.reportSettled(hash);
     } catch (err) {
+      caughtErr = err;
       if (err instanceof FatalError) throw err;
       this.log.error("fill failed", { hash, err: String(err) });
       this.metrics?.recordFillLost(intent.destAsset, String(err));
       this.scheduleRetry(hash, deadlineMs);
     } finally {
-      this.inFlight.release(intent.destAsset, reserved);
+      if (fillSucceeded) {
+        // Successful fill: the capital has left the account on-chain but the
+        // inventory provider may not yet reflect the spend (cached balance).
+        // Move the reservation to the `held` bucket so it remains committed
+        // until the next tick's flushHeld() call, giving the provider a full
+        // polling interval to refresh.
+        this.inFlight.holdForRefresh(intent.destAsset, reserved);
+      } else if (caughtErr instanceof DefiniteFailureError) {
+        // Definite failure (on-chain revert / rejection): the transaction
+        // never landed so the capital was never spent.  Release immediately
+        // so the next intent can use the same balance.
+        this.inFlight.release(intent.destAsset, reserved);
+      } else {
+        // Indefinite failure (timeout, network error, etc.): the transaction
+        // may still land.  Hold until the next tick for the same reason as a
+        // successful fill, to avoid treating in-transit capital as available.
+        this.inFlight.holdForRefresh(intent.destAsset, reserved);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Best-effort: report `"settled"` to the mempool after a successful fill.
+   * Errors are logged and swallowed — a failed status report must never
+   * affect the on-chain outcome or retry logic.
+   *
+   * Only called when {@link SolverConfig.mempoolStatusToken} is configured.
+   * Without a token the PATCH endpoint requires no auth in local/dev setups,
+   * but we skip reporting entirely when the operator has not provided one to
+   * avoid noisy 401s in production environments that do require auth.
+   */
+  private async reportSettled(hash: Hex): Promise<void> {
+    const token = this.config.mempoolStatusToken;
+    if (!token) return;
+    try {
+      await this.client.reportStatus(hash, "settled" satisfies MempoolIntentStatus, token);
+      this.log.info("reported settled to mempool", { hash });
+    } catch (err) {
+      this.log.warn("failed to report settled to mempool (non-fatal)", {
+        hash,
+        err: String(err),
+      });
     }
   }
 
@@ -442,10 +620,11 @@ export class Solver {
       this.seen.add(hash, deadlineMs);
       this.retryState.delete(hash);
     } else {
-      this.retryState.set(hash, {
-        attempts,
-        nextRetryAt: Date.now() + retryBackoff(attempts - 1),
-      });
+      this.retryState.set(
+        hash,
+        { attempts, nextRetryAt: Date.now() + retryBackoff(attempts - 1) },
+        deadlineMs,
+      );
     }
   }
 
