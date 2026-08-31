@@ -71,12 +71,30 @@ export class IntentStore {
     // Re-inserting refreshes insertion order for oldest-first eviction.
     this.delete(hash);
     if (this.records.size >= this.maxSize) {
-      const oldest = this.records.keys().next().value;
-      if (oldest !== undefined) this.delete(oldest);
+      this.evictOne();
     }
     const frozen = freezeRecord(record);
     this.records.set(hash, frozen);
     this.indexAdd(hash, frozen.status);
+  }
+
+  /**
+   * Free a single slot when the store is at capacity. Prefers the oldest
+   * record in a terminal status (`settled`/`refunded`/`expired`) — those are
+   * retained only for late reads, so dropping one is harmless — and falls
+   * back to the oldest record overall so a store saturated with `pending`
+   * intents still makes room. `Map` iterates in insertion order, so the first
+   * match in each pass is the oldest.
+   */
+  private evictOne(): void {
+    for (const [hash, record] of this.records) {
+      if (TERMINAL_STATUSES.has(record.status)) {
+        this.delete(hash);
+        return;
+      }
+    }
+    const oldest = this.records.keys().next().value;
+    if (oldest !== undefined) this.delete(oldest);
   }
 
   get(hash: Hex): MempoolIntentRecord | undefined {
@@ -134,6 +152,52 @@ export class IntentStore {
       if (record) out.push(record);
     }
     return out;
+  }
+
+  /**
+   * Filter by `status`/`chainId` and paginate in a single pass over the
+   * relevant index, copying only the records that land on the returned page.
+   * Unlike {@link all} followed by an in-handler slice, a list request no
+   * longer allocates in proportion to the whole store.
+   *
+   * `cursor` is the `hash` of the last record from the previous page;
+   * iteration resumes at the record immediately after it. An unknown cursor
+   * yields an empty page (the caller has walked past the end).
+   */
+  list(opts: {
+    status?: IntentStatus;
+    chainId?: number;
+    cursor?: Hex;
+    limit: number;
+  }): { records: MempoolIntentRecord[]; nextCursor?: Hex } {
+    const { status, chainId, cursor, limit } = opts;
+    const hashes = status
+      ? this.byStatus.get(status) ?? new Set<Hex>()
+      : this.records.keys();
+
+    const page: MempoolIntentRecord[] = [];
+    let reached = cursor === undefined;
+    let more = false;
+
+    for (const hash of hashes) {
+      const record = this.records.get(hash);
+      if (!record) continue;
+      if (chainId !== undefined && record.intent.sourceChainId !== chainId) continue;
+      if (!reached) {
+        if (hash === cursor) reached = true;
+        continue;
+      }
+      if (page.length >= limit) {
+        more = true;
+        break;
+      }
+      page.push({ ...record });
+    }
+
+    return {
+      records: page,
+      nextCursor: more ? page[page.length - 1]?.hash : undefined,
+    };
   }
 
   size(): number {
