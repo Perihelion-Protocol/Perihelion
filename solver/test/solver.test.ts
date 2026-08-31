@@ -743,6 +743,65 @@ test("complete flow: hash validation and cached verification", async () => {
 
 // ─── Issue 314: in-flight inventory reservation ──────────────────────────────
 
+test("tick evaluates unrelated intents while a slow fill is still in flight", async () => {
+  const intentA = buildTestIntent();
+  const intentB = buildIntent({ ...intentA, nonce: "555555" });
+  const recordA = buildTestRecord(intentA);
+  const recordB = buildTestRecord(intentB);
+
+  let releaseFillA!: () => void;
+  const fillGate = new Promise<void>((resolve) => {
+    releaseFillA = resolve;
+  });
+
+  const observed: string[] = [];
+  const mockVerify = mock.fn(async (intent: any) => {
+    observed.push(`verify:${intent.nonce}`);
+    return true;
+  });
+  const mockExecutor: Executor = {
+    fill: mock.fn(async (signed) => {
+      observed.push(`fill:${signed.intent.nonce}`);
+      if (signed.intent.nonce === intentA.nonce) {
+        await fillGate;
+      }
+      return { settlementTx: "0xfilled" };
+    }),
+  };
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records: [recordA, recordB], nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(
+    { ...baseConfig, fillConcurrency: 1 },
+    mockExecutor,
+    mockLogger,
+    undefined,
+    undefined,
+    mockVerify,
+    testPricingDeps,
+  );
+
+  const tickPromise = solver.tick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(
+    observed.includes(`verify:${intentB.nonce}`),
+    "the second intent should be evaluated before the first fill completes",
+  );
+
+  releaseFillA();
+  await tickPromise;
+  assert.equal(
+    (mockExecutor.fill as ReturnType<typeof mock.fn>).mock.callCount(),
+    2,
+    "both intents should be attempted once when the fill queue is released",
+  );
+});
+
 test("consider: reserves inventory before filling, preventing a second intent from over-committing the same balance", async () => {
   const intentA = buildTestIntent();
   const intentB = buildIntent({ ...intentA, nonce: "555555" });

@@ -178,6 +178,46 @@ interface RetryState {
   nextRetryAt: number;
 }
 
+class FillConcurrencyLimiter {
+  private readonly maxConcurrency: number;
+  private active = 0;
+  private readonly queue: Array<() => void> = [];
+
+  constructor(maxConcurrency: number) {
+    this.maxConcurrency = Math.max(1, Math.floor(maxConcurrency));
+  }
+
+  run<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const execute = async (): Promise<void> => {
+        try {
+          const result = await task();
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        } finally {
+          this.active--;
+          const next = this.queue.shift();
+          if (next) {
+            this.active++;
+            next();
+          }
+        }
+      };
+
+      if (this.active < this.maxConcurrency) {
+        this.active++;
+        void execute();
+      } else {
+        this.queue.push(() => {
+          this.active++;
+          void execute();
+        });
+      }
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Solver
 // ---------------------------------------------------------------------------
@@ -213,6 +253,7 @@ export class Solver {
    * balance read cannot let a second intent over-commit the same inventory. */
   private readonly inFlight = new InFlightTracker();
   private readonly retryState = new Map<string, RetryState>();
+  private readonly fillLimiter: FillConcurrencyLimiter;
   private running = false;
   private readonly backoff: BackoffState;
   /** Resolves an in-progress interruptibleSleep early when stop() is called. */
@@ -232,6 +273,7 @@ export class Solver {
     this.backoff = new BackoffState(config);
     this.seen = new SeenLRU(config.seenCacheSize ?? 50_000);
     this.verificationCache = new VerificationCache(config.verificationCacheSize ?? 10_000);
+    this.fillLimiter = new FillConcurrencyLimiter(config.fillConcurrency ?? 4);
   }
 
   /**
@@ -290,6 +332,8 @@ export class Solver {
 
     const pending = await this.client.listPending();
     const now = Date.now();
+    const tasks: Array<Promise<void>> = [];
+
     for (const record of pending) {
       const { hash } = record;
       if (this.seen.has(hash)) continue;
@@ -297,8 +341,10 @@ export class Solver {
       const retry = this.retryState.get(hash);
       if (retry && now < retry.nextRetryAt) continue;
 
-      await this.consider(record);
+      tasks.push(this.consider(record));
     }
+
+    await Promise.allSettled(tasks);
   }
 
   private async consider(record: IntentRecord): Promise<void> {
@@ -368,7 +414,7 @@ export class Solver {
     const reserved = BigInt(intent.minDestAmount);
     this.inFlight.reserve(intent.destAsset, reserved);
     try {
-      const { settlementTx } = await this.executor.fill(record);
+      const { settlementTx } = await this.fillLimiter.run(() => this.executor.fill(record));
       this.log.info("filled", { hash, settlementTx });
       this.metrics?.recordFillWon(
         intent.destAsset,
