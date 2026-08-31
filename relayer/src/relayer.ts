@@ -46,6 +46,7 @@ import { messageKeyString } from "./types.js";
 import { BackoffState } from "./backoff.js";
 import type { DeadLetterStore } from "./dead-letter.js";
 import { InMemoryDeadLetterStore } from "./dead-letter.js";
+import { PerihelionClient, type MempoolIntentStatus } from "@perihelion/sdk";
 
 /** Observes bridge messages emitted on the source chain. */
 export interface SourceWatcher {
@@ -113,6 +114,13 @@ const DEFAULT_RETRY: RetryPolicy = { maxAttempts: 5, baseBackoffMs: 500 };
 /** Counters exposed for metrics / monitoring. */
 export interface RelayMetrics {
   delivered: number;
+  /**
+   * Messages found already delivered on the destination (idempotency
+   * short-circuit) — e.g. LayerZero's own executor delivered them, or this
+   * relayer re-scanned them after a restart. Kept separate from `delivered`
+   * so that counter stays a true count of this relayer's own deliveries.
+   */
+  alreadyDelivered: number;
   failed: number;
   deadLettered: number;
   /** Maximum retry depth seen across all messages this session. */
@@ -173,6 +181,7 @@ export class Relayer {
   /** Counters exposed via the health/metrics endpoints. */
   readonly metrics: RelayMetrics = {
     delivered: 0,
+    alreadyDelivered: 0,
     failed: 0,
     deadLettered: 0,
     maxRetryDepth: 0,
@@ -195,6 +204,13 @@ export class Relayer {
   /** Resolves an in-progress interruptibleSleep early when stop() is called. */
   private abortSleep: (() => void) | null = null;
 
+  /**
+   * Thin SDK client used for best-effort mempool status reporting.
+   * Only instantiated when both `mempoolUrl` and `mempoolStatusToken` are
+   * present in the config.
+   */
+  private readonly mempoolClient: PerihelionClient | null;
+
   constructor(
     private readonly config: RelayerConfig,
     private readonly watcher: SourceWatcher,
@@ -208,6 +224,10 @@ export class Relayer {
     this.cursor = startBlock;
     this.backoff = new BackoffState(config);
     this.readiness.cursor = startBlock;
+    this.mempoolClient =
+      config.mempoolUrl && config.mempoolStatusToken
+        ? new PerihelionClient({ mempoolUrl: config.mempoolUrl })
+        : null;
   }
 
   /**
@@ -319,18 +339,28 @@ export class Relayer {
       results.push(result);
     }
 
-    // Only advance cursor past fully-resolved blocks.
-    // Find the minimum srcBlock among messages that are neither delivered nor dead-lettered.
-    const unresolved = results.filter(
-      (r) => !r.delivered && !r.error?.startsWith("dead-lettered"),
-    );
+    // Only advance the cursor past fully-resolved blocks. A message is
+    // unresolved only while it still needs another delivery attempt — an
+    // already-delivered or dead-lettered message is resolved and must not
+    // pin the cursor.
+    const unresolved = results.filter((r) => !r.resolved);
     this.metrics.unresolvedMessages = unresolved.length;
+
+    // Correlate results back to their messages by the full composite key.
+    // Keying on intentHash alone conflates the several distinct messages a
+    // single intent produces, which can advance the cursor past a still-failing
+    // delivery (permanent skip) or hold it back needlessly.
+    const resultByKey = new Map<string, RelayResult>();
+    for (const r of results) resultByKey.set(messageKeyString(r.key), r);
 
     let lowestUnresolved = Infinity;
     for (const pending of messages) {
       if (pending.srcBlock > confirmedHead) continue;
-      const result = results.find((r) => r.intentHash === pending.message.intentHash);
-      if (result && unresolved.includes(result)) {
+      const { srcEid, dstEid, intentHash, messageType, nonce } = pending.message;
+      const result = resultByKey.get(
+        messageKeyString({ srcEid, dstEid, intentHash, messageType, nonce }),
+      );
+      if (result && !result.resolved) {
         lowestUnresolved = Math.min(lowestUnresolved, pending.srcBlock);
       }
     }
@@ -358,8 +388,10 @@ export class Relayer {
     const keyStr = messageKeyString(key);
 
     // Already dead-lettered — don't retry until operator drains the queue.
+    // Resolved: the cursor must not stall here waiting for a retry that
+    // won't happen until an operator intervenes.
     if (this.deadLetter.has(key)) {
-      return { intentHash, delivered: false, error: "dead-lettered" };
+      return { intentHash, key, delivered: false, resolved: true, error: "dead-lettered" };
     }
 
     try {
@@ -371,13 +403,15 @@ export class Relayer {
           dstEid,
           nonce,
         });
-        return { intentHash, delivered: false };
+        this.attempts.delete(keyStr);
+        this.metrics.alreadyDelivered += 1;
+        return { intentHash, key, delivered: false, resolved: true, alreadyDelivered: true };
       }
       const dstTxHash = await this.delivery.deliver(pending);
       this.log.info("delivered", { intentHash, messageType, dstTxHash });
       this.attempts.delete(keyStr);
       this.metrics.delivered += 1;
-      return { intentHash, delivered: true, dstTxHash };
+      return { intentHash, key, delivered: true, resolved: true, dstTxHash };
     } catch (err) {
       if (err instanceof FatalError) throw err;
 
@@ -403,7 +437,9 @@ export class Relayer {
         });
         return {
           intentHash,
+          key,
           delivered: false,
+          resolved: true,
           error: `dead-lettered after ${attempt} attempts: ${String(err)}`,
         };
       }
@@ -420,7 +456,37 @@ export class Relayer {
         err: String(err),
       });
       await sleep(backoff);
-      return { intentHash, delivered: false, error: String(err) };
+      return { intentHash, key, delivered: false, resolved: false, error: String(err) };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mempool status reporting
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Best-effort: report `"refunded"` to the mempool after a `CancelIntent`
+   * delivery.  Errors are logged and swallowed — a failed status report must
+   * never affect the already-successful on-chain delivery or retry logic.
+   *
+   * Only called when both {@link RelayerConfig.mempoolUrl} and
+   * {@link RelayerConfig.mempoolStatusToken} are configured.
+   */
+  private async reportRefunded(intentHash: string): Promise<void> {
+    const { mempoolUrl, mempoolStatusToken } = this.config;
+    if (!this.mempoolClient || !mempoolStatusToken || !mempoolUrl) return;
+    try {
+      await this.mempoolClient.reportStatus(
+        intentHash as import("@perihelion/sdk").Hex,
+        "refunded" satisfies MempoolIntentStatus,
+        mempoolStatusToken,
+      );
+      this.log.info("reported refunded to mempool", { intentHash });
+    } catch (err) {
+      this.log.warn("failed to report refunded to mempool (non-fatal)", {
+        intentHash,
+        err: String(err),
+      });
     }
   }
 

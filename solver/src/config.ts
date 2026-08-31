@@ -15,6 +15,21 @@ export interface SolverConfig {
   readonly escrowAddress: Address;
   /** Minimum profit, in basis points of source amount, required to fill. */
   readonly minMarginBps: number;
+  /**
+   * Estimated source-chain native cost of one fill, in wei (gas for
+   * `PerihelionEscrow.lock` plus its LayerZero message fee). Used as the floor
+   * the solver's source-chain native balance is checked against at decision
+   * time when no live per-fill estimator is wired. Default `0` (check disabled
+   * until configured or an estimator is supplied).
+   */
+  readonly sourceNativeFeeFloor: bigint;
+  /**
+   * Estimated Stellar native cost of one fill, in stroops (`deliver_intent`
+   * plus `dispatch_confirmation`, including its `lz_fee`). Used as the floor
+   * the solver's XLM balance is checked against at decision time. Default `0`
+   * (check disabled until configured).
+   */
+  readonly stellarNativeFeeFloor: bigint;
   /** How often to poll the mempool, in milliseconds. */
   readonly pollIntervalMs: number;
   /** Stellar assets this solver is willing to provide liquidity for. */
@@ -27,6 +42,39 @@ export interface SolverConfig {
    * Defaults to 50,000 (~7.5 MB worst-case).
    */
   readonly seenCacheSize?: number;
+  /**
+   * Shared bearer token for the mempool's `PATCH /intents/:hash/status`
+   * endpoint. When set, the solver reports `"settled"` after a successful
+   * fill so the mempool record transitions out of `"pending"` immediately.
+   * If omitted, status reporting is skipped (the mempool will evict the
+   * record only after its deadline + grace period).
+   */
+  readonly mempoolStatusToken?: string;
+}
+
+/**
+ * Parse a non-negative integer amount in an asset's smallest units (wei,
+ * stroops) from an env var. Empty/unset yields `0n`. A negative or
+ * non-integer value is pushed onto `errors` and yields `0n`.
+ */
+function parseNonNegativeBigInt(
+  raw: string | undefined,
+  name: string,
+  errors: string[],
+): bigint {
+  if (raw === undefined || raw.trim() === "") return 0n;
+  let value: bigint;
+  try {
+    value = BigInt(raw.trim());
+  } catch {
+    errors.push(`${name} must be a non-negative integer in smallest units, got: "${raw}"`);
+    return 0n;
+  }
+  if (value < 0n) {
+    errors.push(`${name} must be a non-negative integer in smallest units, got: "${raw}"`);
+    return 0n;
+  }
+  return value;
 }
 
 /**
@@ -93,6 +141,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     );
   }
 
+  const sourceNativeFeeFloor = parseNonNegativeBigInt(
+    env.PERIHELION_SOURCE_NATIVE_FEE_FLOOR,
+    "PERIHELION_SOURCE_NATIVE_FEE_FLOOR",
+    errors,
+  );
+  const stellarNativeFeeFloor = parseNonNegativeBigInt(
+    env.PERIHELION_STELLAR_NATIVE_FEE_FLOOR,
+    "PERIHELION_STELLAR_NATIVE_FEE_FLOOR",
+    errors,
+  );
+
   const supportedDestAssets = (env.PERIHELION_SUPPORTED_ASSETS ?? "native")
     .split(",")
     .map((s) => s.trim())
@@ -100,6 +159,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
   if (supportedDestAssets.length === 0) {
     errors.push("PERIHELION_SUPPORTED_ASSETS must list at least one asset");
   }
+
+  // --- Optional: status token for mempool PATCH /intents/:hash/status ---
+  // Not validated beyond being a non-empty string when set — any non-empty
+  // value is a valid bearer token.
+  const mempoolStatusToken = env.PERIHELION_MEMPOOL_STATUS_TOKEN || undefined;
 
   if (errors.length > 0) {
     throw new Error(
@@ -113,9 +177,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     sourceChainId,
     escrowAddress: escrowAddress as Address,
     minMarginBps,
+    sourceNativeFeeFloor,
+    stellarNativeFeeFloor,
     pollIntervalMs,
     supportedDestAssets,
     verificationCacheSize,
     seenCacheSize,
+    mempoolStatusToken,
   };
 }
