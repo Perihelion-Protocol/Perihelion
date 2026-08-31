@@ -9,7 +9,7 @@
  */
 
 import { loadConfig } from "./config.js";
-import { loadExecutorConfig } from "./executor-config.js";
+import { hasExecutorConfig, loadExecutorConfig } from "./executor-config.js";
 import { Solver } from "./solver.js";
 import { Executor } from "./executor.js";
 import { SolverMetrics } from "./metrics.js";
@@ -19,7 +19,7 @@ import { timingSafeEqual } from "node:crypto";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const executorConfig = loadExecutorConfig();
+  const executorConfig = hasExecutorConfig() ? loadExecutorConfig() : undefined;
   const metrics = new SolverMetrics();
 
   // Structured JSON logger — replaces console for production-grade output.

@@ -5,6 +5,25 @@
 import type { ExecutorConfig } from "./executor.js";
 import { getAddress, isAddress, type Hex } from "viem";
 
+const EXECUTOR_ENV_KEYS = [
+  "PERIHELION_EVM_RPC_URL",
+  "PERIHELION_SOROBAN_RPC_URL",
+  "PERIHELION_EVM_PRIVATE_KEY",
+  "PERIHELION_SOROBAN_SECRET_KEY",
+  "PERIHELION_ESCROW_ADDRESS",
+  "PERIHELION_SETTLEMENT_CONTRACT_ID",
+  "PERIHELION_SOURCE_CHAIN_ID",
+] as const;
+
+/**
+ * Return true when any executor-specific configuration has been provided.
+ * This lets the solver start in a non-executing mode until the real executor
+ * is enabled and configured for a given deployment.
+ */
+export function hasExecutorConfig(env: NodeJS.ProcessEnv = process.env): boolean {
+  return EXECUTOR_ENV_KEYS.some((key) => (env[key] ?? "").trim() !== "");
+}
+
 /**
  * Build executor config from `process.env`.
  * Required env vars:

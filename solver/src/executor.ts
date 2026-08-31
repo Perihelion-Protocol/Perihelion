@@ -9,7 +9,7 @@
  */
 
 import type { SignedIntent } from "@perihelion/sdk";
-import { getAddress, type Hex } from "viem";
+import type { Hex } from "viem";
 
 /** Logger interface for structured logging. */
 export interface Logger {
@@ -50,24 +50,10 @@ interface FillStatus {
  * to avoid double-fills.
  */
 export class Executor {
-  private readonly evmRpcUrl: string;
-  private readonly sorobanRpcUrl: string;
-  private readonly evmPrivateKey: Hex;
-  private readonly sorobanSecretKey: string;
-  private readonly escrowAddress: `0x${string}`;
-  private readonly settlementContractId: string;
-  private readonly sourceChainId: number;
-  private readonly logger: Logger;
-
-  constructor(config: ExecutorConfig, logger: Logger = console) {
-    this.evmRpcUrl = config.evmRpcUrl;
-    this.sorobanRpcUrl = config.sorobanRpcUrl;
-    this.evmPrivateKey = config.evmPrivateKey;
-    this.sorobanSecretKey = config.sorobanSecretKey;
-    this.escrowAddress = config.escrowAddress;
-    this.settlementContractId = config.settlementContractId;
-    this.sourceChainId = config.sourceChainId;
-    this.logger = logger;
+  constructor(_config?: ExecutorConfig, _logger: Logger = console) {
+    // The executor is currently a stub. If and when it becomes active, derive
+    // signer objects once and discard the raw key material rather than storing
+    // plaintext secrets for the process lifetime.
   }
 
   /**
@@ -109,19 +95,10 @@ export class Executor {
         // A "filled" result must carry the real settlement tx hash. Never reuse
         // the intent hash as a placeholder for a settlement tx, because callers
         // treat it as an actual transaction identifier in logs and API output.
-        this.logger.warn("idempotency probe reported a filled intent without settlement tx", {
-          intentHash,
-          settlementTx: undefined,
-        });
         return { filled: false, unknown: true };
       }
       return { filled: false };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger.warn("idempotency probe failed; refusing to proceed", {
-        intentHash,
-        error: message,
-      });
+    } catch {
       return { filled: false, unknown: true };
     }
   }
