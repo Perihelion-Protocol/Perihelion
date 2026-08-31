@@ -14,6 +14,7 @@ import {
   type Hex,
 } from "@perihelion/sdk";
 import { Solver, FatalError, type Executor, type Logger } from "../src/solver.js";
+import { Executor as FillExecutor } from "../src/executor.js";
 import type { SolverConfig } from "../src/config.js";
 import type { InventoryProvider } from "../src/inventory.js";
 import { RATE_SCALE, type PricingDeps } from "../src/quote.js";
@@ -74,6 +75,58 @@ function buildTestRecord(intent = buildTestIntent()): IntentRecord {
     createdAt: Math.floor(Date.now() / 1000),
   };
 }
+
+test("refuses to blindly proceed when the idempotency probe fails", async () => {
+  const intent = buildTestIntent();
+  const hash = hashIntent(intent, domain);
+  const signed = {
+    intent,
+    signature: "0xdeadbeef" as Hex,
+    hash,
+  };
+
+  const warnings: Array<{ msg: string; meta?: Record<string, unknown> }> = [];
+  const logger: Logger = {
+    info: () => {},
+    warn: (msg, meta) => {
+      warnings.push({ msg, meta });
+    },
+    error: () => {},
+  };
+
+  const executor = new FillExecutor(
+    {
+      evmRpcUrl: "http://localhost:8545",
+      sorobanRpcUrl: "http://localhost:8000",
+      evmPrivateKey: "0x0000000000000000000000000000000000000000000000000000000000000001" as Hex,
+      sorobanSecretKey: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      escrowAddress: ESCROW_ADDRESS,
+      settlementContractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      sourceChainId: CHAIN_ID,
+    },
+    logger,
+  );
+
+  (executor as any).isSettled = async () => {
+    throw new Error("Soroban RPC unavailable");
+  };
+  (executor as any).lockOnEvm = async () => {
+    throw new Error("lockOnEvm should not be called");
+  };
+  (executor as any).fillOnSoroban = async () => {
+    throw new Error("fillOnSoroban should not be called");
+  };
+
+  await assert.rejects(
+    () => executor.fill(signed),
+    /idempotency.*probe.*failed|refusing to proceed/i,
+  );
+
+  assert.ok(
+    warnings.some((entry) => /idempotency|probe|refusing/i.test(entry.msg)),
+    "should log the failed idempotency probe",
+  );
+});
 
 test("verifies signature only once for the same intent hash", async () => {
   const intent = buildTestIntent();

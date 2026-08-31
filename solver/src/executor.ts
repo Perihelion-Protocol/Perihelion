@@ -83,6 +83,7 @@ export interface ExecutorConfig {
 /** Idempotency check result. */
 interface FillStatus {
   filled: boolean;
+  unknown?: boolean;
   settlementTx?: string;
 }
 
@@ -162,7 +163,6 @@ export class Executor {
     } catch {
       // Query failure is not fatal; proceed with fill attempt.
     }
-    return { filled: false };
   }
 
   /**
