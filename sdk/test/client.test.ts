@@ -140,3 +140,142 @@ test("listPending returns all records when server returns more than 100 (paginat
   assert.equal(result.length, 150, "must return all 150 records, not just the first 100");
   assert.equal(fetchCount, 2, "should have made exactly 2 page requests");
 });
+
+// ─── isRefundable ────────────────────────────────────────────────────────────
+
+// Shared grace period: 2 hours in ms (used throughout these tests).
+const GRACE_MS = 2 * 60 * 60 * 1_000;
+
+/**
+ * Build a record whose deadline is either in the past or future relative to
+ * the current time.
+ *
+ * @param status    - IntentStatus to set on the record.
+ * @param expired   - true  → deadline is far in the past (well past grace too)
+ *                    false → deadline is far in the future
+ * @param graceMs   - The grace period used to place the deadline exactly at the
+ *                    boundary (default GRACE_MS).
+ */
+function makeTimedRecord(
+  status: string,
+  expired: boolean,
+  graceMs: number = GRACE_MS,
+) {
+  const nowSec = Math.floor(Date.now() / 1_000);
+  // expired: deadline 1 day before now so that deadline+grace is also in the past
+  // not expired: deadline 1 day in the future
+  const deadline = expired
+    ? nowSec - 24 * 60 * 60         // 24 h in the past
+    : nowSec + 24 * 60 * 60;        // 24 h in the future
+  return {
+    intent: {
+      user: VALID_ADDRESS,
+      destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      sourceChainId: 8453,
+      sourceAsset: VALID_ADDRESS,
+      sourceAmount: "1000000",
+      destAsset: "native",
+      minDestAmount: "900000",
+      deadline,
+      nonce: "1",
+      preferredSolver: VALID_ADDRESS,
+    },
+    signature: VALID_SIG,
+    hash: VALID_HASH,
+    status,
+    createdAt: 1700000000,
+  };
+}
+
+// ── status gate: only 'pending' may ever be refundable ────────────────────────
+
+test("isRefundable: 'pending' + past deadline + past grace → true", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const record = makeTimedRecord("pending", true);
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), true);
+});
+
+test("isRefundable: 'pending' + future deadline → false", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const record = makeTimedRecord("pending", false);
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), false);
+});
+
+test("isRefundable: 'claimed' + past deadline + past grace → false (not pending)", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const record = makeTimedRecord("claimed", true);
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), false);
+});
+
+test("isRefundable: 'settling' + past deadline + past grace → false (message in flight)", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const record = makeTimedRecord("settling", true);
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), false);
+});
+
+test("isRefundable: 'settled' + past deadline → false", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const record = makeTimedRecord("settled", true);
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), false);
+});
+
+test("isRefundable: 'refunded' + past deadline → false (already refunded)", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const record = makeTimedRecord("refunded", true);
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), false);
+});
+
+test("isRefundable: 'expired' + past deadline + past grace → false (not pending)", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const record = makeTimedRecord("expired", true);
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), false);
+});
+
+// ── grace boundary: pending, deadline passed, but still inside grace ──────────
+
+test("isRefundable: 'pending' + deadline passed, inside grace → false", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const nowSec = Math.floor(Date.now() / 1_000);
+  // Deadline was 1 minute ago; grace is 2 hours → still inside the window.
+  const record = makeTimedRecord("pending", false);
+  (record.intent as { deadline: number }).deadline = nowSec - 60;
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), false);
+});
+
+test("isRefundable: 'pending' + deadline passed, exactly at grace boundary → true", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const nowSec = Math.floor(Date.now() / 1_000);
+  const graceSec = Math.floor(GRACE_MS / 1_000);
+  // deadline + grace === now (exactly on the boundary → refundable)
+  const record = makeTimedRecord("pending", false);
+  (record.intent as { deadline: number }).deadline = nowSec - graceSec;
+  assert.equal(client.isRefundable(record as Parameters<typeof client.isRefundable>[0], GRACE_MS), true);
+});
+
+// ── grace period value is caller-supplied, not a baked-in constant ────────────
+
+test("isRefundable: same record with a longer grace stays false", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const nowSec = Math.floor(Date.now() / 1_000);
+  // Deadline 30 minutes ago; a 1-hour grace still covers it → false.
+  const record = makeTimedRecord("pending", false);
+  (record.intent as { deadline: number }).deadline = nowSec - 30 * 60;
+  assert.equal(
+    client.isRefundable(record as Parameters<typeof client.isRefundable>[0], 60 * 60 * 1_000),
+    false,
+    "30 min past deadline with 1h grace should not be refundable",
+  );
+});
+
+test("isRefundable: same record with a shorter grace becomes true", () => {
+  const client = makeClient((() => {}) as unknown as typeof fetch);
+  const nowSec = Math.floor(Date.now() / 1_000);
+  // Deadline 30 minutes ago; a 15-minute grace has already elapsed → true.
+  const record = makeTimedRecord("pending", false);
+  (record.intent as { deadline: number }).deadline = nowSec - 30 * 60;
+  assert.equal(
+    client.isRefundable(record as Parameters<typeof client.isRefundable>[0], 15 * 60 * 1_000),
+    true,
+    "30 min past deadline with 15 min grace should be refundable",
+  );
+});

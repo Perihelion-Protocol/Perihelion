@@ -405,44 +405,48 @@ export class PerihelionClient {
   /**
    * Check if an intent is refundable via `cancelExpired` (issue #175).
    *
-   * An intent is refundable if:
+   * An intent is refundable if **all three** conditions hold:
    * 1. It exists and has not been settled or previously refunded.
-   * 2. Its deadline has passed (and the confirmation grace period has elapsed).
-   * 3. No FillConfirmed was received (status is still 'pending').
+   * 2. Its deadline has passed **and** the confirmation grace period has elapsed.
+   * 3. No `FillConfirmed` was received — the status is still `'pending'`.
+   *    An intent with status `'claimed'`, `'settling'`, or `'expired'` is **not**
+   *    refundable: `settling` means a cross-chain message is already in flight
+   *    (calling `cancelExpired` would race it and likely revert with
+   *    `AlreadyFinalized`), and `claimed` / `expired` indicate the on-chain
+   *    state has already diverged from the refund path.
    *
-   * This helper detects when a bridge has failed and the user's funds can be
-   * recovered locally without waiting for cross-chain confirmation.
+   * This helper detects when a bridge has definitively failed and the user's
+   * funds can be recovered locally without waiting for cross-chain confirmation.
    *
-   * **Typical usage**: After `waitForSettlement` times out or returns 'expired',
+   * **Typical usage**: After `waitForSettlement` times out or returns `'expired'`,
    * check `isRefundable` to see if the user can recover via the local fallback.
    *
    * ```ts
+   * const grace = await escrowClient.confirmationGrace(); // live contract value
    * const record = await client.waitForSettlement(hash);
-   * if (record.status === "expired") {
-   *   const refundable = client.isRefundable(record);
-   *   if (refundable) {
-   *     // Call escrow.cancelExpired(hash) to recover funds
-   *   }
+   * if (client.isRefundable(record, grace * 1_000)) {
+   *   // Call escrow.cancelExpired(hash) to recover funds
    * }
    * ```
    *
    * @param record The intent record to check.
-   * @param confirmationGraceMs Optional confirmation grace period in milliseconds
-   *                            (must match the escrow's `confirmationGrace`).
-   *                            Defaults to 2 hours (the contract default).
-   * @returns True if the intent can be refunded via `cancelExpired`.
+   * @param confirmationGraceMs Confirmation grace period in **milliseconds**.
+   *   This **must** be read from the live contract via
+   *   {@link PerihelionEscrowClient.confirmationGrace} and converted to ms —
+   *   the value is timelock-governed and can change after deployment.
+   *   There is deliberately no default; passing a stale constant will produce
+   *   an incorrect verdict.
+   * @returns `true` if the intent can be refunded via `cancelExpired`.
    *
-   * @see {PerihelionEscrowClient.confirmationGrace} to read the live grace period from the contract.
+   * @see {PerihelionEscrowClient.confirmationGrace} to read the live grace period.
    */
-  isRefundable(
-    record: IntentRecord,
-    confirmationGraceMs: number = 2 * 60 * 60 * 1_000,
-  ): boolean {
-    // Must not have been settled or refunded already.
-    if (record.status === "settled" || record.status === "refunded") {
+  isRefundable(record: IntentRecord, confirmationGraceMs: number): boolean {
+    // Condition 3: only 'pending' intents are candidates — no settlement is
+    // in progress or has already completed.
+    if (record.status !== "pending") {
       return false;
     }
-    // Deadline + grace must have passed (in seconds; convert ms to s for comparison).
+    // Conditions 1 & 2: deadline + grace must have passed (unix seconds).
     const now = Math.floor(Date.now() / 1_000);
     const deadlineWithGrace = record.intent.deadline + Math.floor(confirmationGraceMs / 1_000);
     return now >= deadlineWithGrace;
