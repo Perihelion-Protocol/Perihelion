@@ -41,7 +41,8 @@ services:
       - anvil
       - stellar
     environment:
-      NODE_ENV: development
+      # Production mode so Express never emits stack traces on error paths.
+      NODE_ENV: production
       PORT: 3000
       PERIHELION_SOURCE_CHAIN_ID: 31337
       PERIHELION_ESCROW_ADDRESS: "0x0000000000000000000000000000000000000000"

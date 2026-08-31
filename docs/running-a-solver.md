@@ -82,6 +82,8 @@ cp solver/.env.example solver/.env
 | `PERIHELION_MEMPOOL_URL` | `http://localhost:8080` | Mempool API endpoint (local or remote) |
 | `PERIHELION_SOLVER_ADDRESS` | `0x1234...` | Your EVM address (for preferredSolver reserves) |
 | `PERIHELION_MIN_MARGIN_BPS` | `15` | Minimum profit margin in basis points (15 bps = 0.15%) |
+| `PERIHELION_SOURCE_NATIVE_FEE_FLOOR` | `3000000000000000` | Minimum source-chain native balance, in **wei**, the solver must hold to accept a fill (gas for `lock` + its LayerZero fee). `0` (default) disables the check unless a live estimator is wired. See [Native balance](#native-balance). |
+| `PERIHELION_STELLAR_NATIVE_FEE_FLOOR` | `20000000` | Minimum XLM balance, in **stroops**, the solver must hold to accept a fill (`deliver_intent` + `dispatch_confirmation`, incl. `lz_fee`). `0` (default) disables the check. |
 | `PERIHELION_POLL_INTERVAL_MS` | `2000` | Mempool poll interval in milliseconds |
 | `PERIHELION_SUPPORTED_ASSETS` | `native,USDC:GA5Z...` | Comma-separated assets you provide liquidity for |
 | `PERIHELION_EVM_RPC_URL` | `https://base-mainnet.g.alchemy.com/v2/...` | EVM chain RPC endpoint |
@@ -144,6 +146,43 @@ This tracker is in-memory only and resets on restart, so it protects a single
 solver process's polling loop; it is not a substitute for your `InventoryProvider`
 reporting real, current balances.
 
+### Native balance
+
+A fill spends **three** balances, and the destination-asset check above only
+covers one of them:
+
+1. **Destination asset on Stellar** — checked via `availableBalance()`.
+2. **Source-chain native token** — `PerihelionEscrow.lock` is `payable` and
+   reverts with `FeeTooLow` unless `msg.value` covers the LayerZero quote, on
+   top of the gas for a call that pulls the user's tokens and dispatches the
+   cross-chain message.
+3. **XLM on Stellar** — `deliver_intent` and `dispatch_confirmation` each need a
+   funded source account, and `dispatch_confirmation` takes an `lz_fee` the
+   caller supplies.
+
+Running out of either native balance *after* a fill is committed is far worse
+than skipping it: the worst ordering is running out of XLM once the EVM `lock`
+has already succeeded — the user's funds are locked, the `FillInstruction` is
+dispatched, and the destination leg cannot complete until `cancelExpired`.
+
+To guard against this, extend your `InventoryProvider` with the optional
+`nativeBalanceSource()` (wei) and `nativeBalanceDest()` (stroops) readers.
+`evaluate()` compares each against an estimated per-fill cost and, on a
+shortfall, declines with a non-terminal skip whose `FillDecision.nativeShortfall`
+flag is set — the solver logs this at **error** level and records a distinct
+skip reason, because it is an operator-actionable funding condition that blocks
+*every* intent rather than a property of one. Supply the estimate either as:
+
+- a live estimator via `EvaluateDeps` — `escrowSourceNativeCost(escrowClient,
+  lockGasBufferWei)` in `quote.ts` wraps `PerihelionEscrowClient.quoteFee` for
+  the source leg — or
+- a static floor: `PERIHELION_SOURCE_NATIVE_FEE_FLOOR` /
+  `PERIHELION_STELLAR_NATIVE_FEE_FLOOR` (both default `0`, which leaves the
+  corresponding check disabled).
+
+If your `InventoryProvider` does not implement the native readers, the check is
+skipped and behaviour is unchanged.
+
 ## Starting the Solver
 
 ### Development mode (with auto-reload)
@@ -187,7 +226,11 @@ Starting solver loop...
 3. **Balance monitoring** — Watch fee drain and liquidity:
    - Monitor your Stellar asset holdings for depletion
    - Monitor EVM chain gas costs and escrow balance
+   - Monitor the **native** balances a fill spends — source-chain gas token and
+     XLM — separately from destination-asset inventory
    - Alert if balance drops below a threshold
+   - Alert on the `nativeShortfall` skip (logged at error level): the solver is
+     declining every intent because it cannot fund a fill leg
 
 4. **Latency** — Time from intent registration to fill:
    - Measure end-to-end settlement time (ideally < 30 seconds for single corridor)

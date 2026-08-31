@@ -134,6 +134,50 @@ export interface FillDecision {
   readonly terminal: boolean;
   /** Estimated profit in basis points of capital deployed, when computed. */
   readonly profitBps?: number;
+  /**
+   * Set when the skip is caused by the solver lacking the *native* balance to
+   * pay a fill leg's fees (source-chain gas + LayerZero, or Stellar XLM).
+   * Distinct from an ordinary skip: it is an operator-actionable funding
+   * condition that blocks every intent, not a property of this one, so callers
+   * should surface it as an alert rather than a routine info log.
+   */
+  readonly nativeShortfall?: boolean;
+}
+
+// ─── native-balance deps ─────────────────────────────────────────────────────
+
+/**
+ * Per-fill native-cost estimators. A fill spends three balances and only the
+ * destination asset is covered by {@link InventoryProvider.availableBalance};
+ * these cover the two native legs. Both are optional — when an estimator is
+ * omitted, {@link evaluate} falls back to the corresponding configured floor
+ * (`config.sourceNativeFeeFloor` / `config.stellarNativeFeeFloor`).
+ */
+export interface NativeCostDeps {
+  /**
+   * Estimated source-chain native cost of one fill, in wei: the LayerZero
+   * quote for the intent plus the gas for `PerihelionEscrow.lock`. See
+   * {@link escrowSourceNativeCost} for a factory over `PerihelionEscrowClient`.
+   */
+  sourceNativeCost?: (intent: Intent) => Promise<bigint> | bigint;
+  /**
+   * Estimated Stellar native cost of one fill, in stroops: `deliver_intent`
+   * plus `dispatch_confirmation` (the latter including its `lz_fee`).
+   */
+  destNativeCost?: (intent: Intent) => Promise<bigint> | bigint;
+}
+
+/**
+ * Build a {@link NativeCostDeps.sourceNativeCost} estimator from an escrow
+ * client: the LayerZero quote for the intent, plus a fixed gas buffer (wei)
+ * for the `lock` call itself. Wire this in production so the source-native
+ * check reflects the real, per-intent cost rather than a static floor.
+ */
+export function escrowSourceNativeCost(
+  escrow: { quoteFee(intent: Intent): Promise<bigint> },
+  lockGasBufferWei: bigint = 0n,
+): (intent: Intent) => Promise<bigint> {
+  return async (intent: Intent) => (await escrow.quoteFee(intent)) + lockGasBufferWei;
 }
 
 // ─── evaluate ────────────────────────────────────────────────────────────────
@@ -165,7 +209,7 @@ export function isSolverEligible(
  * pricing overrides (`priceOracle`/`feeEstimator`/`decimalsLookup`), an
  * inventory provider (`availableBalance`), or an object satisfying both.
  */
-export type EvaluateDeps = PricingDeps & Partial<InventoryProvider>;
+export type EvaluateDeps = PricingDeps & Partial<InventoryProvider> & NativeCostDeps;
 
 /** Decide whether to fill an intent given current config and pricing. */
 export async function evaluate(
@@ -250,6 +294,46 @@ export async function evaluate(
   const reserved = inFlight?.reservedFor(intent.destAsset) ?? 0n;
   if (available - reserved < required) {
     return { fill: false, reason: "insufficient inventory", terminal: false };
+  }
+
+  // ── native balance check ─────────────────────────────────────────────────
+  // A fill also spends native gas on both legs, and neither spend is drawn
+  // from destAsset: the payable EVM `lock` must cover the LayerZero quote plus
+  // the gas to pull tokens and dispatch the message, and the Stellar leg
+  // (deliver_intent + dispatch_confirmation, the latter taking an lz_fee)
+  // needs a funded XLM account. Running dry *after* committing is far worse
+  // than skipping — the worst ordering leaves the user's funds locked on the
+  // source chain with the destination leg unpayable until cancelExpired — so a
+  // shortfall on either side is a distinct, alertable skip, not a property of
+  // this one intent. Each side is only checked when its balance is observable;
+  // the cost falls back to the configured floor when no estimator is wired.
+  if (typeof deps.nativeBalanceSource === "function") {
+    const have = await deps.nativeBalanceSource();
+    const need = deps.sourceNativeCost
+      ? BigInt(await deps.sourceNativeCost(intent))
+      : config.sourceNativeFeeFloor;
+    if (have < need) {
+      return {
+        fill: false,
+        reason: "insufficient native balance on source chain (gas + LayerZero fee)",
+        terminal: false,
+        nativeShortfall: true,
+      };
+    }
+  }
+  if (typeof deps.nativeBalanceDest === "function") {
+    const have = await deps.nativeBalanceDest();
+    const need = deps.destNativeCost
+      ? BigInt(await deps.destNativeCost(intent))
+      : config.stellarNativeFeeFloor;
+    if (have < need) {
+      return {
+        fill: false,
+        reason: "insufficient native XLM on Stellar (delivery + confirmation fees)",
+        terminal: false,
+        nativeShortfall: true,
+      };
+    }
   }
 
   return { fill: true, reason: "profitable", terminal: false, profitBps };

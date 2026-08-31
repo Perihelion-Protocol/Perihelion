@@ -16,7 +16,7 @@ import {
   type MempoolIntentStatus,
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
-import { evaluate, type PricingDeps } from "./quote.js";
+import { evaluate, type PricingDeps, type NativeCostDeps } from "./quote.js";
 import { BackoffState } from "./backoff.js";
 import type { Metrics } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
@@ -226,8 +226,12 @@ export class Solver {
     private readonly metrics?: Metrics,
     private readonly inventory?: InventoryProvider,
     private readonly verifier: IntentVerifier = verifyIntent,
-    /** Injectable pricing overrides (priceOracle/feeEstimator/decimalsLookup), merged with `inventory` when evaluating. */
-    private readonly pricingDeps?: PricingDeps,
+    /**
+     * Injectable pricing overrides (priceOracle/feeEstimator/decimalsLookup)
+     * and per-fill native-cost estimators (sourceNativeCost/destNativeCost),
+     * merged with `inventory` when evaluating.
+     */
+    private readonly pricingDeps?: PricingDeps & NativeCostDeps,
   ) {
     this.client = new PerihelionClient({ mempoolUrl: config.mempoolUrl });
     this.backoff = new BackoffState(config);
@@ -291,6 +295,14 @@ export class Solver {
 
     const pending = await this.client.listPending();
     const now = Date.now();
+
+    // Count hash-mismatches across this page so we can escalate when every
+    // record on the page mismatches — which is a strong signal that the
+    // solver's own domain configuration (sourceChainId / escrowAddress) is
+    // wrong rather than individual records being malformed.
+    let pageMismatches = 0;
+    let pageConsidered = 0;
+
     for (const record of pending) {
       const { hash } = record;
       if (this.seen.has(hash)) continue;
@@ -298,11 +310,32 @@ export class Solver {
       const retry = this.retryState.get(hash);
       if (retry && now < retry.nextRetryAt) continue;
 
-      await this.consider(record);
+      pageConsidered += 1;
+      const wasMismatch = await this.consider(record);
+      if (wasMismatch) pageMismatches += 1;
+    }
+
+    // If every non-skipped record on this page produced a hash mismatch, the
+    // solver's domain is almost certainly misconfigured. Emit one actionable
+    // error per tick (not per record) so operators can diagnose it quickly.
+    if (pageConsidered > 0 && pageMismatches === pageConsidered) {
+      this.log.error(
+        "all records on this page failed hash verification: possible domain misconfiguration",
+        {
+          sourceChainId: this.config.sourceChainId,
+          escrowAddress: this.config.escrowAddress,
+          pageMismatches,
+        },
+      );
     }
   }
 
-  private async consider(record: IntentRecord): Promise<void> {
+  /**
+   * Evaluate a single pending record. Returns `true` if the record was
+   * rejected due to a hash mismatch (used by `tick()` to detect a full-page
+   * mismatch that may indicate a domain misconfiguration), `false` otherwise.
+   */
+  private async consider(record: IntentRecord): Promise<boolean> {
     const { intent, signature, hash } = record;
 
     // Seen-set TTL, clamped so terminal skips of already-expired intents
@@ -317,7 +350,14 @@ export class Solver {
         hash,
         recomputedHash,
       });
-      return;
+      // Hash mismatch is terminal for this record as published: the hash is a
+      // deterministic function of the intent fields and the domain, and neither
+      // changes while the record is in the mempool. Retire it to `seen` so
+      // subsequent ticks skip the EIP-712 recomputation and suppress the
+      // repeated warning.
+      this.seen.add(hash, deadlineMs);
+      this.retryState.delete(hash);
+      return true;
     }
 
     // Check cache first to avoid redundant verification. Keyed on domain +
@@ -329,7 +369,6 @@ export class Solver {
       valid = await this.verifier(intent, signature, domain);
       this.verificationCache.set(cacheKey, valid);
     }
-
     if (!valid) {
       this.log.warn("rejecting intent with invalid signature", { hash });
       // Not terminal for the hash: only this (domain, hash, signature) triple
@@ -338,7 +377,7 @@ export class Solver {
       // fillable. Repeated re-verification of the same bad signature is
       // still bounded by the verification cache's negative-result TTL.
       this.retryState.delete(hash);
-      return;
+      return false;
     }
 
     const decision = await evaluate(
@@ -347,11 +386,22 @@ export class Solver {
       {
         ...this.pricingDeps,
         availableBalance: this.inventory?.availableBalance.bind(this.inventory),
+        nativeBalanceSource: this.inventory?.nativeBalanceSource?.bind(this.inventory),
+        nativeBalanceDest: this.inventory?.nativeBalanceDest?.bind(this.inventory),
       },
       this.inFlight,
     );
     if (!decision.fill) {
-      this.log.info("skipping intent", { hash, reason: decision.reason });
+      if (decision.nativeShortfall) {
+        // Operator-actionable and affects every intent, not just this one —
+        // log at error level so it pages rather than scrolling past as info.
+        this.log.error("skipping intent: native balance shortfall — solver cannot fund a fill leg", {
+          hash,
+          reason: decision.reason,
+        });
+      } else {
+        this.log.info("skipping intent", { hash, reason: decision.reason });
+      }
       this.metrics?.recordSkip(decision.reason);
       // Terminal: this intent will never become fillable (wrong chain,
       // expired, unsupported asset, reserved for another solver, ...).
@@ -361,7 +411,7 @@ export class Solver {
         this.seen.add(hash, deadlineMs);
         this.retryState.delete(hash);
       }
-      return;
+      return false;
     }
 
     this.log.info("filling intent", { hash, profitBps: decision.profitBps });
@@ -392,6 +442,7 @@ export class Solver {
     } finally {
       this.inFlight.release(intent.destAsset, reserved);
     }
+    return false;
   }
 
   /**

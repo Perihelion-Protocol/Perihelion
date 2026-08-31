@@ -49,16 +49,24 @@ info:
 
     ## Pagination
 
-    `GET /intents` accepts optional `limit` and `offset` query parameters.
-    When neither is supplied, the endpoint preserves its original behavior of
-    returning every matching record in a single array response. When
-    supplied, the response is the same flat `IntentRecord[]` array, sliced to
-    the requested page — there is no envelope object and no total count.
+    `GET /intents` returns an envelope `{ records, nextCursor }`. Pass the
+    `nextCursor` from one response as the `cursor` query parameter of the next
+    request to page forward; `nextCursor` is absent once the last page has
+    been returned. A `cursor` that no longer resolves to a record — the record
+    it named was evicted by the expiry sweep or the size cap, or a status
+    change moved it out of a status-filtered result set — is rejected with
+    `400` and `code: "unresolvable_cursor"` so a client can restart
+    pagination deliberately instead of being silently sent back to page one.
 
     ## Error responses
 
     All error responses share the shape `{ "error": "<message>" }` and use
-    standard HTTP status codes.
+    standard HTTP status codes. This holds for errors raised by the HTTP
+    framework as well as by application code: a body that is not valid JSON
+    returns `400`, a body above the 8 KiB limit returns `413` with a message
+    naming the limit, and a request to an unknown route or method returns
+    `404`. No response is ever an HTML error page, and none includes a stack
+    trace.
 
     **Known gaps** (each tracked by its own issue, not yet part of this
     contract):
@@ -66,10 +74,11 @@ info:
       record for a hash that has already been submitted (last write wins) and
       returns `200`, rather than rejecting the second submission with `409`.
       Tracked by issue #320.
-    - Malformed `:hash` path parameter: `GET /intents/{hash}` performs no
-      format validation on the path parameter; any string is accepted and a
-      value that does not match a stored record simply falls through to the
-      documented `404`. Tracked by issue #348.
+    - (resolved, #348/#561) Both `GET /intents/{hash}` and
+      `PATCH /intents/{hash}/status` now normalise the `:hash` to lower case
+      and reject a value that is not a `0x`-prefixed 32-byte hex string with
+      `400`, so a malformed hash is distinguishable from an unknown one on
+      every route that takes a hash.
 
 servers:
   - url: http://localhost:3000
@@ -135,8 +144,8 @@ paths:
                 hash: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
         '400':
           description: |
-            Validation failure — missing required fields or invalid EIP-712
-            signature.
+            Validation failure — missing required fields, invalid EIP-712
+            signature, or a request body that is not well-formed JSON.
           content:
             application/json:
               schema:
@@ -154,6 +163,10 @@ paths:
                   summary: Deadline has already passed
                   value:
                     error: "Intent deadline has passed"
+                malformedJson:
+                  summary: Request body is not valid JSON
+                  value:
+                    error: "Malformed JSON request body"
         '409':
           description: |
             Conflict — an intent with this hash already exists in the mempool.
@@ -163,6 +176,17 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: "Intent already exists"
+        '413':
+          description: |
+            The JSON request body exceeds the server's 8 KiB limit. The
+            message names the limit so a client can distinguish a size
+            rejection from a parse failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Request body exceeds the 8kb limit"
         '500':
           description: Unexpected server error.
           content:
@@ -198,13 +222,20 @@ paths:
         - name: limit
           in: query
           required: false
-          description: Maximum records to return. Defaults to 100, capped at 1000.
+          description: |
+            Maximum records to return. Defaults to 100; values above 1000 are
+            capped. Must be a positive integer and passed at most once — a
+            non-integer, non-positive, or repeated value is rejected with 400
+            rather than silently replaced with the default.
           schema:
             type: integer
+            minimum: 1
         - name: cursor
           in: query
           required: false
-          description: The `hash` of the last record from the previous page.
+          description: |
+            The `hash` of the last record from the previous page. Must be
+            passed at most once.
           schema:
             type: string
         - name: chainId
@@ -213,9 +244,13 @@ paths:
           description: |
             Filter results to intents whose `intent.sourceChainId` equals
             this value. Useful for a mempool instance that may see intents
-            destined for more than one source chain's escrow.
+            destined for more than one source chain's escrow. Must be a
+            positive integer and passed at most once — a non-numeric or
+            repeated value is rejected with 400 rather than returning an
+            empty page indistinguishable from "no intents match".
           schema:
             type: integer
+            minimum: 1
           example: 8453
       responses:
         '200':
@@ -235,8 +270,10 @@ paths:
                     description: Pass as `cursor` to fetch the next page. Absent on the last page.
         '400':
           description: |
-            Validation failure — `status` is not one of the `IntentStatus`
-            enum values, or the parameter was repeated.
+            Validation failure on a query parameter: `status` is not one of
+            the `IntentStatus` enum values, `limit` is not a positive integer,
+            `chainId` is not a positive integer, or any of `status`, `limit`,
+            `chainId`, or `cursor` was passed more than once.
           content:
             application/json:
               schema:
@@ -250,6 +287,14 @@ paths:
                   summary: status parameter passed more than once
                   value:
                     error: "status must be one of pending, settled, refunded, expired"
+                invalidLimit:
+                  summary: limit is not a positive integer
+                  value:
+                    error: "limit must be a positive integer"
+                invalidChainId:
+                  summary: chainId is not a positive integer (or was repeated)
+                  value:
+                    error: "chainId must be a positive integer"
 
   /intents/{hash}:
 
@@ -262,10 +307,9 @@ paths:
         including current lifecycle status and any solver/settlement metadata
         that has been attached since submission.
 
-        The path parameter is not format-validated against the `Hex` pattern
-        (see issue #348); a malformed hash is simply treated as unknown and
-        falls through to the `404` response below, the same as any other
-        hash with no matching record.
+        The path parameter is normalised to lower case and validated against
+        the `Hex` pattern: a malformed hash is rejected with `400`, and only a
+        well-formed hash with no matching record returns `404`.
       parameters:
         - name: hash
           in: path
@@ -322,6 +366,11 @@ paths:
         - name: hash
           in: path
           required: true
+          description: |
+            The canonical EIP-712 `intent_hash`. Normalised to lower case
+            before lookup; a value that is not a `0x`-prefixed 32-byte hex
+            string is rejected with `400` (same validation as
+            `GET /intents/{hash}`).
           schema:
             $ref: '#/components/schemas/Hex'
       requestBody:
@@ -341,6 +390,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/IntentRecord'
+        '400':
+          description: |
+            `hash` is not a well-formed `0x`-prefixed 32-byte hex string, or
+            `status` is missing / not one of the `IntentStatus` values.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "hash must be a 0x-prefixed 32-byte hex string"
         '401':
           description: Missing or invalid bearer token.
           content:
