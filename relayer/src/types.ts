@@ -60,7 +60,29 @@ export interface PendingMessage {
 /** Outcome of attempting to relay a single message. */
 export interface RelayResult {
   readonly intentHash: Hex;
+  /**
+   * Full composite identity of the message this result belongs to. Cursor
+   * advancement correlates results back to their messages by this key — never
+   * by `intentHash` alone, since a single intent accumulates several distinct
+   * messages (FillInstruction → FillConfirmed / CancelIntent, retries, or two
+   * Locked events in one block after a reorg) that share one intent hash.
+   */
+  readonly key: MessageKey;
+  /** True only when this attempt delivered the message to the destination. */
   readonly delivered: boolean;
+  /**
+   * True when the message needs no further relay work: it was delivered on
+   * this attempt, was already delivered (idempotency short-circuit), or was
+   * dead-lettered. The cursor may advance past a resolved message's block;
+   * an unresolved (`resolved: false`) message pins the cursor at its block.
+   */
+  readonly resolved: boolean;
+  /**
+   * True when `resolved` was reached via the idempotency short-circuit
+   * (`isDelivered` returned true) rather than a fresh delivery. Lets metrics
+   * keep `delivered` meaning "delivered by this relayer this session".
+   */
+  readonly alreadyDelivered?: boolean;
   /** Destination-chain tx hash, when delivered. */
   readonly dstTxHash?: string;
   readonly error?: string;

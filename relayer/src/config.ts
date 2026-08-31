@@ -25,6 +25,18 @@ export interface RelayerConfig {
   readonly stellarNetwork: string;
   /** Stellar signing secret key (S… strkey format). */
   readonly signerSecret: string;
+  /**
+   * Base URL of the Perihelion mempool API.  When set together with
+   * {@link mempoolStatusToken}, the relayer reports `"refunded"` to the
+   * mempool after delivering a `CancelIntent` message.
+   */
+  readonly mempoolUrl?: string;
+  /**
+   * Shared bearer token for the mempool's `PATCH /intents/:hash/status`
+   * endpoint.  Required (along with {@link mempoolUrl}) to enable
+   * best-effort `"refunded"` reporting after `CancelIntent` delivery.
+   */
+  readonly mempoolStatusToken?: string;
 }
 
 /** 0x-prefixed 20-byte EVM address. */
@@ -154,6 +166,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     );
   }
 
+  // --- Optional: mempool URL and status token ---
+  const mempoolUrl = env.PERIHELION_MEMPOOL_URL || undefined;
+  const mempoolStatusToken = env.PERIHELION_MEMPOOL_STATUS_TOKEN || undefined;
+
   return {
     evmRpcUrl,
     stellarRpcUrl,
@@ -166,5 +182,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     stellarEid,
     stellarNetwork,
     signerSecret,
+    mempoolUrl,
+    mempoolStatusToken,
   };
 }

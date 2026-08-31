@@ -63,7 +63,16 @@ export type IntentStatus =
   | "refunded" // deadline passed / failed; source funds returned
   | "expired"; // deadline passed before any claim
 
-/** Subset of IntentStatus values that the mempool can represent. */
+/**
+ * Subset of {@link IntentStatus} values that the mempool can store and accept
+ * via `PATCH /intents/:hash/status`.
+ *
+ * The full `IntentStatus` type includes transient on-chain states
+ * (`"claimed"`, `"settling"`) that the mempool does not track — attempting
+ * to report those will produce an HTTP 400.  Solver and relayer code that
+ * calls {@link PerihelionClient.reportStatus} must use this narrower type
+ * (or one of its literal members) to stay within the accepted vocabulary.
+ */
 export type MempoolIntentStatus = Extract<IntentStatus, "pending" | "settled" | "refunded" | "expired">;
 
 /** An intent together with its signature and current status. */
