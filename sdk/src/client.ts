@@ -48,6 +48,15 @@ export interface ClientOptions {
   readonly fetch?: typeof fetch;
 }
 
+/**
+ * Default page size {@link PerihelionClient.listPending} requests explicitly,
+ * matching the mempool server's own default page cap (issue #532). Passing an
+ * explicit value (rather than relying on the server's default) keeps page
+ * sizes bounded even against a server whose own default changes or is
+ * misconfigured.
+ */
+const DEFAULT_LIST_LIMIT = 100;
+
 export interface ListPendingPageResult {
   /** Intent records returned in this page. */
   readonly records: IntentRecord[];
@@ -344,17 +353,22 @@ export class PerihelionClient {
    *
    * For callers that need explicit pagination control (e.g. a solver that wants
    * to rate-limit its own page fetches), use {@link listPendingPage} or {@link listPendingPages} directly.
+   *
+   * **Bounded requests**: every page request passes an explicit `limit` (default
+   * {@link DEFAULT_LIST_LIMIT}) in the query string rather than relying on the
+   * server's own default, so page size stays bounded end-to-end (issue #532).
    */
   async listPending(
     status: IntentStatus = "pending",
     maxPages = 100,
+    limit: number = DEFAULT_LIST_LIMIT,
   ): Promise<IntentRecord[]> {
     const all: IntentRecord[] = [];
     let cursor: string | undefined;
     let pages = 0;
 
     do {
-      const page = await this.listPendingPage(status, cursor);
+      const page = await this.listPendingPage(status, cursor, limit);
       all.push(...page.records);
       cursor = page.nextCursor;
       pages++;

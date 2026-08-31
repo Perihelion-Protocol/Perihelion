@@ -58,7 +58,12 @@ export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
 
 
 
-function isPositiveIntString(s: string): boolean {
+/**
+ * Strictly-positive decimal integer string: no `"0"`, no leading zeros, no
+ * sign. Exported so `validate.ts`'s `parseIntent` can enforce the exact same
+ * amount grammar as {@link validateIntent} (issue #531).
+ */
+export function isPositiveIntString(s: string): boolean {
   return /^[1-9][0-9]*$/.test(s);
 }
 
@@ -225,6 +230,32 @@ export const MAX_DEADLINE_HORIZON = 604_800;
  * requirement for an explicit unit suffix in the public API.
  */
 export const MAX_DEADLINE_HORIZON_SEC = MAX_DEADLINE_HORIZON;
+
+/**
+ * Minimum fill headroom required by the Soroban settlement contract, in
+ * seconds.
+ *
+ * The contract's `validate_and_stage_fill` guard is:
+ * ```
+ * if now + MAX_DISPATCH_WINDOW > rec.deadline { return Err(IntentExpired) }
+ * ```
+ * where `MAX_DISPATCH_WINDOW = 1_800` (30 minutes). Any intent whose deadline
+ * is within 30 minutes of the current ledger time is rejected on-chain even
+ * though it has not yet expired.
+ *
+ * The solver must therefore refuse fills whose remaining time is below this
+ * constant *before* committing to the lock, paying the LayerZero fee, and
+ * dispatching the cross-chain message — all of which are sunk costs that
+ * cannot be recovered if the destination leg is rejected.
+ *
+ * The value here is `MAX_DISPATCH_WINDOW + 120 s` (2 minutes of relay-latency
+ * and clock-skew margin). It is defined once in the SDK so the solver,
+ * the relayer, and any future tooling can import the same constant rather than
+ * each duplicating the magic number.
+ *
+ * Mirrors `contracts/soroban/settlement/src/lib.rs::MAX_DISPATCH_WINDOW`.
+ */
+export const MIN_FILL_HEADROOM_SECS = 1_920; // 1_800 s dispatch window + 120 s margin
 
 /**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
