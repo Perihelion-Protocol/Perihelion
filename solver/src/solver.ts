@@ -448,6 +448,8 @@ export class Solver {
         },
       );
     }
+
+    await Promise.allSettled(tasks);
   }
 
   /**

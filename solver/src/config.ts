@@ -37,6 +37,11 @@ export interface SolverConfig {
   /** Maximum number of verification results to cache (LRU eviction). Defaults to 10,000. */
   readonly verificationCacheSize?: number;
   /**
+   * Maximum number of fill attempts that may run concurrently.
+   * Defaults to 4 so the solver can stay responsive without overwhelming RPCs.
+   */
+  readonly fillConcurrency?: number;
+  /**
    * Maximum number of hashes to keep in the seen-set LRU cache.
    * Entries are also evicted by TTL (past-deadline) every tick.
    * Defaults to 50,000 (~7.5 MB worst-case).
@@ -134,6 +139,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     );
   }
 
+  const fillConcurrency = Number(env.PERIHELION_FILL_CONCURRENCY ?? 4);
+  if (!Number.isInteger(fillConcurrency) || fillConcurrency <= 0) {
+    errors.push(
+      `PERIHELION_FILL_CONCURRENCY must be a positive integer, got: "${env.PERIHELION_FILL_CONCURRENCY}"`,
+    );
+  }
+
   const seenCacheSize = Number(env.PERIHELION_SEEN_CACHE_SIZE ?? 50_000);
   if (!Number.isInteger(seenCacheSize) || seenCacheSize <= 0) {
     errors.push(
@@ -182,6 +194,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     pollIntervalMs,
     supportedDestAssets,
     verificationCacheSize,
+    fillConcurrency,
     seenCacheSize,
     mempoolStatusToken,
   };
