@@ -33,6 +33,106 @@ function makeClient(fetchImpl: typeof fetch, mempoolUrl = "https://mempool.examp
   return new PerihelionClient({ mempoolUrl, fetch: fetchImpl });
 }
 
+// ─── constructor: URL validation ──────────────────────────────────────────────
+
+test("constructor accepts a valid https:// URL", () => {
+  assert.doesNotThrow(() => makeClient((() => {}) as unknown as typeof fetch, "https://mempool.perihelion.xyz"));
+});
+
+test("constructor accepts a valid http://localhost URL (loopback, no warning)", () => {
+  assert.doesNotThrow(() => makeClient((() => {}) as unknown as typeof fetch, "http://localhost:3000"));
+});
+
+test("constructor accepts http://127.0.0.1 (loopback, no warning)", () => {
+  assert.doesNotThrow(() => makeClient((() => {}) as unknown as typeof fetch, "http://127.0.0.1:3000"));
+});
+
+test("constructor accepts http://[::1] (IPv6 loopback, no warning)", () => {
+  assert.doesNotThrow(() => makeClient((() => {}) as unknown as typeof fetch, "http://[::1]:3000"));
+});
+
+test("constructor throws PerihelionValidationError for a bare hostname (no scheme)", () => {
+  assert.throws(
+    () => makeClient((() => {}) as unknown as typeof fetch, "mempool.perihelion.xyz"),
+    /mempoolUrl must be a valid URL/,
+  );
+});
+
+test("constructor throws PerihelionValidationError for an empty string", () => {
+  assert.throws(
+    () => makeClient((() => {}) as unknown as typeof fetch, ""),
+    /mempoolUrl must be a valid URL/,
+  );
+});
+
+test("constructor throws PerihelionValidationError for a completely invalid string", () => {
+  assert.throws(
+    () => makeClient((() => {}) as unknown as typeof fetch, "not a url at all"),
+    /mempoolUrl must be a valid URL/,
+  );
+});
+
+test("constructor normalises a URL with multiple trailing slashes (no double-slash in requests)", async () => {
+  let capturedUrl = "";
+  const fetchImpl = async (url: string | URL | Request) => {
+    capturedUrl = url.toString();
+    return new Response(JSON.stringify({ records: [], nextCursor: undefined }), { status: 200 });
+  };
+  const client = new PerihelionClient({ mempoolUrl: "https://mempool.example.com//", fetch: fetchImpl as typeof fetch });
+  await client.listPending();
+  assert.ok(!capturedUrl.includes("//intents"), `URL must not have double-slash: ${capturedUrl}`);
+});
+
+test("constructor warns on non-loopback http:// URL", () => {
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+  try {
+    makeClient((() => {}) as unknown as typeof fetch, "http://remote.example.com/api");
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(warnings.length, 1, "expected exactly one warning");
+  assert.ok(warnings[0].includes("http://"), `warning should mention http://: ${warnings[0]}`);
+  assert.ok(warnings[0].includes("bearer"), `warning should mention bearer tokens: ${warnings[0]}`);
+});
+
+test("constructor does NOT warn for https:// on a remote host", () => {
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+  try {
+    makeClient((() => {}) as unknown as typeof fetch, "https://remote.example.com/api");
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(warnings.length, 0, "no warning expected for https://");
+});
+
+test("constructor does NOT warn for http://localhost", () => {
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+  try {
+    makeClient((() => {}) as unknown as typeof fetch, "http://localhost:3000");
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(warnings.length, 0, "no warning expected for loopback http://");
+});
+
+test("constructor does NOT warn for http://127.0.0.1", () => {
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+  try {
+    makeClient((() => {}) as unknown as typeof fetch, "http://127.0.0.1:3000");
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(warnings.length, 0, "no warning expected for 127.0.0.1 http://");
+});
+
 test("listPending uses the client base URL (strips trailing slash)", async () => {
   let capturedUrl = "";
   const fetchImpl = async (url: string | URL | Request) => {

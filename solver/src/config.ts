@@ -101,6 +101,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     errors.push("PERIHELION_SUPPORTED_ASSETS must list at least one asset");
   }
 
+  // --- Optional: mempool URL (defaults to localhost dev server) ---
+  const rawMempoolUrl = env.PERIHELION_MEMPOOL_URL ?? "http://localhost:3000";
+  let mempoolUrl = rawMempoolUrl;
+  try {
+    // Parse to validate — an invalid URL must fail at startup, not inside
+    // Solver.tick where it would be swallowed as a transient network error.
+    new URL(rawMempoolUrl);
+  } catch {
+    errors.push(
+      `PERIHELION_MEMPOOL_URL must be a valid URL, got: "${rawMempoolUrl}"`,
+    );
+    // Keep mempoolUrl as-is; the errors[] throw below will abort before it's used.
+  }
+
   if (errors.length > 0) {
     throw new Error(
       `Solver configuration error — fix the following before starting:\n  • ${errors.join("\n  • ")}`,
@@ -108,7 +122,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
   }
 
   return {
-    mempoolUrl: env.PERIHELION_MEMPOOL_URL ?? "http://localhost:3000",
+    mempoolUrl,
     solverAddress: solverAddress as Address,
     sourceChainId,
     escrowAddress: escrowAddress as Address,
