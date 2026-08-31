@@ -59,16 +59,29 @@ export function toSmallestUnits(human: string, decimals: number): string {
 /**
  * Convert a smallest-unit integer string back to a human-readable decimal.
  *
- * @param smallest Smallest-unit amount string, e.g. `"1500000"`.
+ * Accepts an optional leading `-` for negative deltas (e.g. refund/adjustment
+ * amounts); the sign is handled explicitly rather than left to `BigInt`'s `%`,
+ * which retains the sign of the dividend and would otherwise produce a
+ * malformed result like `fromSmallestUnits("-1500000", 6)` -> `"1.-5"` (issue #533).
+ *
+ * @param smallest Smallest-unit amount string, e.g. `"1500000"` or `"-1500000"`.
  * @param decimals Number of decimal places for the asset.
- * @returns Human-readable string, e.g. `"1.5"`.
- * @throws If `decimals` is not an integer in `[0, 36]`.
+ * @returns Human-readable string, e.g. `"1.5"` or `"-1.5"`.
+ * @throws If `smallest` is not a valid (optionally negative) integer string,
+ *   or `decimals` is not an integer in `[0, 36]`.
  */
 export function fromSmallestUnits(smallest: string, decimals: number): string {
   assertValidDecimals(decimals, "fromSmallestUnits");
-  const n = BigInt(smallest);
+  const trimmed = smallest.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`fromSmallestUnits: invalid amount "${smallest}"`);
+  }
+  const negative = trimmed.startsWith("-");
+  const abs = negative ? BigInt(trimmed.slice(1)) : BigInt(trimmed);
   const factor = 10n ** BigInt(decimals);
-  const whole = n / factor;
-  const frac = (n % factor).toString().padStart(decimals, "0").replace(/0+$/, "");
-  return frac ? `${whole}.${frac}` : `${whole}`;
+  const whole = abs / factor;
+  const frac = (abs % factor).toString().padStart(decimals, "0").replace(/0+$/, "");
+  // Only prepend the sign if the magnitude is actually nonzero — avoids "-0".
+  const sign = negative && (whole !== 0n || frac !== "") ? "-" : "";
+  return frac ? `${sign}${whole}.${frac}` : `${sign}${whole}`;
 }
