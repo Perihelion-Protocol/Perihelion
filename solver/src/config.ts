@@ -27,6 +27,15 @@ export interface SolverConfig {
    * Defaults to 50,000 (~7.5 MB worst-case).
    */
   readonly seenCacheSize?: number;
+  /**
+   * Maximum number of entries to keep in the retry-state LRU+TTL cache.
+   *
+   * Each entry is a 66-character hex key plus a small `{ attempts, nextRetryAt }`
+   * object (≈ 150 bytes).  Entries are also evicted by TTL every tick (same
+   * clamped-deadline policy as the seen-set), so the cache is bounded both by
+   * capacity and by how long intents remain alive.  Defaults to 10,000.
+   */
+  readonly retryCacheSize?: number;
 }
 
 /**
@@ -93,6 +102,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     );
   }
 
+  const retryCacheSize = Number(env.PERIHELION_RETRY_CACHE_SIZE ?? 10_000);
+  if (!Number.isInteger(retryCacheSize) || retryCacheSize <= 0) {
+    errors.push(
+      `PERIHELION_RETRY_CACHE_SIZE must be a positive integer, got: "${env.PERIHELION_RETRY_CACHE_SIZE}"`,
+    );
+  }
+
   const supportedDestAssets = (env.PERIHELION_SUPPORTED_ASSETS ?? "native")
     .split(",")
     .map((s) => s.trim())
@@ -117,5 +133,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     supportedDestAssets,
     verificationCacheSize,
     seenCacheSize,
+    retryCacheSize,
   };
 }

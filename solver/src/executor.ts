@@ -11,6 +11,31 @@
 import type { SignedIntent } from "@perihelion/sdk";
 import { getAddress, type Hex } from "viem";
 
+/**
+ * Thrown (or re-thrown) by an executor when a fill has *definitively* failed —
+ * i.e. the on-chain transaction was rejected or reverted — and the capital was
+ * never committed.  The solver catches this specifically in {@link Solver.consider}
+ * and immediately releases the in-flight reservation.
+ *
+ * Contrast with a generic `Error` or a timeout, where the transaction may have
+ * already landed (or may still land), so the reservation must be held until the
+ * next inventory refresh to avoid double-spending.
+ *
+ * ## Usage
+ *
+ * ```ts
+ * throw new DefiniteFailureError("escrow lock reverted: InsufficientBalance");
+ * // or wrap an underlying cause:
+ * throw new DefiniteFailureError("lock reverted", { cause: revertError });
+ * ```
+ */
+export class DefiniteFailureError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "DefiniteFailureError";
+  }
+}
+
 /** Logger interface for structured logging. */
 export interface Logger {
   info(msg: string, meta?: Record<string, unknown>): void;
