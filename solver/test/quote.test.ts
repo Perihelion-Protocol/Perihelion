@@ -35,7 +35,8 @@ function intent(overrides: Partial<Parameters<typeof buildIntent>[0]> = {}) {
     sourceAmount: "1000000",     // 1 USDC (6dp)
     destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
     minDestAmount: "9900000",   // 0.99 USDC (7dp) — leaves ~100_000 margin
-    deadline: 4102444800,
+    // Within the SDK's 7-day max deadline horizon (see sdk validateIntent).
+    deadline: Math.floor(Date.now() / 1000) + 3_600,
     ...overrides,
   });
 }
@@ -74,6 +75,41 @@ test("rejects expired intents (terminal)", async () => {
   assert.equal(decision.fill, false);
   assert.equal(decision.reason, "intent expired");
   assert.equal(decision.terminal, true);
+});
+
+test("rejects intent with insufficient deadline headroom (terminal)", async () => {
+  // The Soroban settlement contract rejects deliver_intent when
+  //   now + MAX_DISPATCH_WINDOW (1_800 s) > intent.deadline
+  // so the solver must refuse fills whose remaining time is below
+  // MIN_FILL_HEADROOM_SECS (1_920 s = 1_800 s dispatch window + 120 s margin)
+  // before committing to the EVM lock and LayerZero fee.
+  //
+  // An intent 10 minutes (600 s) from its deadline is well inside that window.
+  const tenMinutesFromNow = Math.floor(Date.now() / 1000) + 600;
+  const nearDeadline = { ...intent(), deadline: tenMinutesFromNow };
+  const decision = await evaluate(nearDeadline, config, usdcDeps);
+  assert.equal(decision.fill, false);
+  assert.ok(
+    decision.reason.includes("insufficient deadline headroom"),
+    `expected headroom reason, got: "${decision.reason}"`,
+  );
+  assert.equal(decision.terminal, true);
+});
+
+test("accepts intent whose remaining time exactly exceeds the headroom", async () => {
+  // An intent with exactly MIN_FILL_HEADROOM_SECS + 1 s remaining must be
+  // accepted by the headroom check (boundary: strictly greater than the window).
+  const { MIN_FILL_HEADROOM_SECS } = await import("@perihelion/sdk");
+  const justEnough = Math.floor(Date.now() / 1000) + MIN_FILL_HEADROOM_SECS + 1;
+  const nearBoundary = { ...intent(), deadline: justEnough };
+  const decision = await evaluate(nearBoundary, config, usdcDeps);
+  // The check is `intent.deadline <= now + MIN_FILL_HEADROOM_SECS`, so at
+  // now + MIN_FILL_HEADROOM_SECS + 1 the headroom check must NOT reject.
+  assert.ok(
+    decision.reason !== "intent expired" &&
+      !decision.reason.includes("insufficient deadline headroom"),
+    `headroom check should pass with 1 s to spare, got: "${decision.reason}"`,
+  );
 });
 
 test("rejects reserved-for-another-solver intent (terminal)", async () => {
@@ -269,4 +305,76 @@ test("evaluate: skips when in-flight fills over-commit balance", async () => {
   const decision = await evaluate(intent(), config, fixedInventory(10_000_000n), tracker);
   assert.equal(decision.fill, false);
   assert.equal(decision.reason, "insufficient inventory");
+});
+
+// ---- #560 native-balance tests ----
+
+test("evaluate: declines when source-chain native balance is below the per-fill cost", async () => {
+  const decision = await evaluate(intent(), config, {
+    ...fixedInventory(100_000_000n),
+    nativeBalanceSource: async () => 1_000n, // wei on hand
+    sourceNativeCost: async () => 5_000_000_000_000_000n, // LayerZero quote + gas
+  });
+  assert.equal(decision.fill, false);
+  assert.equal(decision.terminal, false);
+  assert.equal(decision.nativeShortfall, true);
+  assert.match(decision.reason, /native balance on source chain/);
+});
+
+test("evaluate: declines when Stellar XLM balance is below the per-fill cost", async () => {
+  const decision = await evaluate(intent(), config, {
+    ...fixedInventory(100_000_000n),
+    nativeBalanceDest: async () => 0n, // stroops on hand
+    destNativeCost: async () => 20_000_000n, // ~2 XLM for delivery + confirmation
+  });
+  assert.equal(decision.fill, false);
+  assert.equal(decision.terminal, false);
+  assert.equal(decision.nativeShortfall, true);
+  assert.match(decision.reason, /native XLM on Stellar/);
+});
+
+test("evaluate: an underfunded solver declines rather than attempting a partial fill", async () => {
+  // Inventory of the dest asset is ample; only the native gas balance is short.
+  const decision = await evaluate(intent(), config, {
+    ...fixedInventory(1_000_000_000n),
+    nativeBalanceSource: async () => 0n,
+    nativeBalanceDest: async () => 0n,
+    sourceNativeCost: async () => 1n,
+    destNativeCost: async () => 1n,
+  });
+  assert.equal(decision.fill, false, "must not commit to a fill it cannot pay fees for");
+  assert.equal(decision.nativeShortfall, true);
+});
+
+test("evaluate: falls back to the configured native fee floors when no estimator is wired", async () => {
+  const flooredConfig = loadConfig({
+    PERIHELION_SOLVER_ADDRESS: "0x3333333333333333333333333333333333333333",
+    PERIHELION_ESCROW_ADDRESS: "0x2222222222222222222222222222222222222222",
+    PERIHELION_SUPPORTED_ASSETS: "native,USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    PERIHELION_MIN_MARGIN_BPS: "10",
+    PERIHELION_STELLAR_NATIVE_FEE_FLOOR: "20000000",
+  });
+  const decision = await evaluate(intent(), flooredConfig, {
+    ...fixedInventory(100_000_000n),
+    nativeBalanceDest: async () => 5_000_000n, // below the 20_000_000 floor
+  });
+  assert.equal(decision.fill, false);
+  assert.equal(decision.nativeShortfall, true);
+});
+
+test("evaluate: fills when both native balances clear the per-fill cost", async () => {
+  const decision = await evaluate(intent(), config, {
+    ...fixedInventory(100_000_000n),
+    nativeBalanceSource: async () => 10n ** 18n,
+    nativeBalanceDest: async () => 10n ** 9n,
+    sourceNativeCost: async () => 5_000_000_000_000_000n,
+    destNativeCost: async () => 20_000_000n,
+  });
+  assert.equal(decision.fill, true);
+});
+
+test("evaluate: native check is skipped when the provider cannot report native balances", async () => {
+  // No nativeBalance* getters -> behaviour is unchanged from before #560.
+  const decision = await evaluate(intent(), config, fixedInventory(100_000_000n));
+  assert.equal(decision.fill, true);
 });

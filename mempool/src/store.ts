@@ -18,6 +18,27 @@ const DEFAULT_EXPIRY_GRACE_MS = 60_000;
 const TERMINAL_STATUSES: ReadonlySet<IntentStatus> = new Set(["settled", "refunded", "expired"]);
 
 /**
+ * Deep-freeze a record before it is stored, so a caller holding a reference
+ * returned by {@link IntentStore.get} or {@link IntentStore.all} cannot mutate
+ * the stored intent. The record's `hash` is a commitment to exactly the intent
+ * fields and the `signature` verifies against them, so an in-place mutation
+ * would silently desync all three and surface only later, as a hash mismatch
+ * or signature-verification failure in every client that fetches the record.
+ *
+ * `status` is frozen too; {@link IntentStore.updateStatus} is the single path
+ * that changes a record, and it replaces the record rather than mutating it.
+ */
+function freezeRecord(record: MempoolIntentRecord): MempoolIntentRecord {
+  // Intent fields are primitives today; freeze any nested object/array too so
+  // the guarantee survives a future non-primitive field.
+  for (const value of Object.values(record.intent)) {
+    if (value !== null && typeof value === "object") Object.freeze(value);
+  }
+  Object.freeze(record.intent);
+  return Object.freeze(record);
+}
+
+/**
  * In-memory intent store. Bounded by `maxSize` (oldest-insertion eviction)
  * and swept of records past their deadline + grace period via
  * `evictExpired()`. Purely in-memory: state is lost on restart.
@@ -50,28 +71,53 @@ export class IntentStore {
     // Re-inserting refreshes insertion order for oldest-first eviction.
     this.delete(hash);
     if (this.records.size >= this.maxSize) {
-      const oldest = this.records.keys().next().value;
-      if (oldest !== undefined) this.delete(oldest);
+      this.evictOne();
     }
-    this.records.set(hash, record);
-    this.indexAdd(hash, record.status);
+    const frozen = freezeRecord(record);
+    this.records.set(hash, frozen);
+    this.indexAdd(hash, frozen.status);
+  }
+
+  /**
+   * Free a single slot when the store is at capacity. Prefers the oldest
+   * record in a terminal status (`settled`/`refunded`/`expired`) — those are
+   * retained only for late reads, so dropping one is harmless — and falls
+   * back to the oldest record overall so a store saturated with `pending`
+   * intents still makes room. `Map` iterates in insertion order, so the first
+   * match in each pass is the oldest.
+   */
+  private evictOne(): void {
+    for (const [hash, record] of this.records) {
+      if (TERMINAL_STATUSES.has(record.status)) {
+        this.delete(hash);
+        return;
+      }
+    }
+    const oldest = this.records.keys().next().value;
+    if (oldest !== undefined) this.delete(oldest);
   }
 
   get(hash: Hex): MempoolIntentRecord | undefined {
-    const record = this.records.get(hash);
-    return record ? { ...record } : undefined;
+    // The stored record is deep-frozen, so returning it directly is safe: a
+    // caller cannot mutate stored intent fields through it.
+    return this.records.get(hash);
   }
 
   /**
    * Update a record's status. Refuses to move a record out of a terminal
    * status (`settled`/`refunded`/`expired`) — those are final.
+   *
+   * The stored record is frozen, so the status change is applied by replacing
+   * the record with a new frozen copy rather than mutating in place. This stays
+   * the only method that changes a record.
    */
   updateStatus(hash: Hex, status: IntentStatus): boolean {
     const record = this.records.get(hash);
     if (!record) return false;
     if (TERMINAL_STATUSES.has(record.status)) return false;
     this.indexRemove(hash, record.status);
-    record.status = status;
+    const updated = freezeRecord({ ...record, status });
+    this.records.set(hash, updated);
     this.indexAdd(hash, status);
     return true;
   }
@@ -103,9 +149,55 @@ export class IntentStore {
     const out: MempoolIntentRecord[] = [];
     for (const hash of hashes) {
       const record = this.records.get(hash);
-      if (record) out.push({ ...record });
+      if (record) out.push(record);
     }
     return out;
+  }
+
+  /**
+   * Filter by `status`/`chainId` and paginate in a single pass over the
+   * relevant index, copying only the records that land on the returned page.
+   * Unlike {@link all} followed by an in-handler slice, a list request no
+   * longer allocates in proportion to the whole store.
+   *
+   * `cursor` is the `hash` of the last record from the previous page;
+   * iteration resumes at the record immediately after it. An unknown cursor
+   * yields an empty page (the caller has walked past the end).
+   */
+  list(opts: {
+    status?: IntentStatus;
+    chainId?: number;
+    cursor?: Hex;
+    limit: number;
+  }): { records: MempoolIntentRecord[]; nextCursor?: Hex } {
+    const { status, chainId, cursor, limit } = opts;
+    const hashes = status
+      ? this.byStatus.get(status) ?? new Set<Hex>()
+      : this.records.keys();
+
+    const page: MempoolIntentRecord[] = [];
+    let reached = cursor === undefined;
+    let more = false;
+
+    for (const hash of hashes) {
+      const record = this.records.get(hash);
+      if (!record) continue;
+      if (chainId !== undefined && record.intent.sourceChainId !== chainId) continue;
+      if (!reached) {
+        if (hash === cursor) reached = true;
+        continue;
+      }
+      if (page.length >= limit) {
+        more = true;
+        break;
+      }
+      page.push({ ...record });
+    }
+
+    return {
+      records: page,
+      nextCursor: more ? page[page.length - 1]?.hash : undefined,
+    };
   }
 
   size(): number {
