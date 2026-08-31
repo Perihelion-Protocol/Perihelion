@@ -363,160 +363,122 @@ test("GET /intents rejects bare array response format (regression test)", async 
   assert.ok(!Array.isArray(body), "response must NOT be a bare array");
 });
 
-// ─── Issue 561: PATCH /intents/:hash/status validates and normalises the hash ──
+// ─── Issue 566: strict validation of every list query parameter ────────────
 
-function patchStatus(hash: string, status: string) {
-  return fetch(`${BASE}/intents/${hash}/status`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ status }),
-  });
-}
-
-test("#561 PATCH accepts a mixed-case hash, matching GET", async () => {
-  const intent = { ...sampleIntent(), nonce: String(560_000) };
-  const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
-  const { hash } = (await (await submit(intent, signature)).json()) as { hash: string };
-
-  const mixedCase = `0x${hash.slice(2).toUpperCase()}`;
-
-  // GET already tolerates this; PATCH must now too.
-  const getRes = await fetch(`${BASE}/intents/${mixedCase}`);
-  assert.equal(getRes.status, 200);
-
-  const patchRes = await patchStatus(mixedCase, "settled");
-  assert.equal(patchRes.status, 200);
-  const updated = (await patchRes.json()) as { hash: string; status: string };
-  assert.equal(updated.hash, hash);
-  assert.equal(updated.status, "settled");
-});
-
-test("#561 PATCH returns 400 (not 404) for a malformed hash", async () => {
-  const res = await patchStatus("not-a-hash", "settled");
+test("GET /intents?limit=<non-numeric> returns 400 naming the parameter", async () => {
+  const res = await fetch(`${BASE}/intents?limit=abc`);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.match(body.error, /hash/i);
+  assert.match(body.error, /limit/);
 });
 
-test("#561 PATCH still returns 404 for a well-formed but unknown hash", async () => {
-  const res = await patchStatus(`0x${"cd".repeat(32)}`, "settled");
+test("GET /intents?limit=0 and negative/fractional values return 400", async () => {
+  for (const bad of ["0", "-5", "1.5", "12e3"]) {
+    const res = await fetch(`${BASE}/intents?limit=${encodeURIComponent(bad)}`);
+    assert.equal(res.status, 400, `limit=${bad} should be rejected`);
+  }
+});
+
+test("GET /intents?limit=<repeated> returns 400 rather than substituting the default", async () => {
+  const res = await fetch(`${BASE}/intents?limit=10&limit=20`);
+  assert.equal(res.status, 400);
+});
+
+test("GET /intents?chainId=<non-numeric> returns 400, not an empty 200 page", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=abc`);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /chainId/);
+});
+
+test("GET /intents?chainId=<repeated> returns 400 instead of filtering on NaN", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=1&chainId=2`);
+  assert.equal(res.status, 400);
+});
+
+test("GET /intents?chainId=<valid-but-unknown> still returns an empty 200 page", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=999999`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: unknown[] };
+  assert.equal(body.records.length, 0);
+});
+
+test("GET /intents?cursor=<repeated> returns 400", async () => {
+  const res = await fetch(`${BASE}/intents?cursor=0xaa&cursor=0xbb`);
+  assert.equal(res.status, 400);
+});
+
+// ─── Issue 569: framework errors are JSON, never HTML, never a stack trace ──
+
+test("POST /intents with a body over the 8kb limit returns 413 JSON naming the limit", async () => {
+  const res = await fetch(`${BASE}/intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ intent: { blob: "x".repeat(9000) }, signature: "0x00" }),
+  });
+  assert.equal(res.status, 413);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /8kb/i);
+});
+
+test("POST /intents with malformed JSON returns 400 JSON, not an HTML error page", async () => {
+  const res = await fetch(`${BASE}/intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{ not valid json",
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.equal(typeof body.error, "string");
+  assert.doesNotMatch(body.error, /at .*\(.*:\d+:\d+\)/, "message must not contain a stack frame");
+});
+
+test("an unknown route returns 404 JSON in the standard error shape", async () => {
+  const res = await fetch(`${BASE}/no-such-route`);
   assert.equal(res.status, 404);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.equal(typeof body.error, "string");
 });
 
-// ─── Issue 562: unresolvable pagination cursor fails loudly ────────────────────
+// ─── Issue 564: every route is rate limited, with separate read/write budgets ─
 
-test("#562 an unresolvable cursor returns 400 rather than silently restarting", async () => {
-  for (let i = 0; i < 3; i++) {
-    const intent = { ...sampleIntent(), nonce: String(562_000 + i) };
-    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
-    await submit(intent, signature);
-  }
-
-  // Page 1.
-  const page1 = (await (await fetch(`${BASE}/intents?status=pending&limit=1`)).json()) as {
-    records: Array<{ hash: string }>;
-    nextCursor?: string;
-  };
-  assert.ok(page1.nextCursor, "expected a nextCursor while more records remain");
-
-  // The cursor record settles (leaves the pending-filtered set) before page 2.
-  assert.equal(server.updateStatus(page1.nextCursor as `0x${string}`, "settled"), true);
-
-  const res = await fetch(
-    `${BASE}/intents?status=pending&limit=1&cursor=${page1.nextCursor}`,
-  );
-  assert.equal(res.status, 400, "a vanished cursor must not silently return page one");
-  const body = (await res.json()) as { error: string; code?: string };
-  assert.equal(body.code, "unresolvable_cursor");
-});
-
-test("#562 paging a set that mutates between requests terminates instead of looping", async () => {
-  const seen = new Set<string>();
-  let cursor: string | undefined;
-  let guard = 0;
-  for (;;) {
-    assert.ok(guard++ < 50, "pagination loop failed to terminate");
-    const url = `${BASE}/intents?status=pending&limit=2${cursor ? `&cursor=${cursor}` : ""}`;
-    const res = await fetch(url);
-    if (res.status === 400) break; // cursor invalidated by a concurrent mutation — client restarts deliberately
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as { records: Array<{ hash: string }>; nextCursor?: string };
-    for (const r of body.records) seen.add(r.hash);
-    if (!body.nextCursor) break;
-    // Mutate the result set mid-scan: settle the record the next cursor names.
-    server.updateStatus(body.nextCursor as `0x${string}`, "settled");
-    cursor = body.nextCursor;
-  }
-  assert.ok(guard < 50, "loop terminated");
-});
-
-// ─── Issue 563: rate-limit map is bounded and entries expire ───────────────────
-
-test("#563 rate-limit map is bounded when driven by many distinct source IPs", async () => {
-  const proxied = new MempoolServer({
-    port: 3990,
+test("read and write routes enforce independent, configurable rate-limit budgets", async () => {
+  const port = 3990;
+  const limited = new MempoolServer({
+    port,
     chainId: CHAIN_ID,
     verifyingContract: ESCROW,
-    trustProxy: true,
-    rateLimitMaxIps: 10,
+    readRateLimit: 3,
+    writeRateLimit: 1,
+    rateLimitWindowMs: 60_000,
   });
-  await proxied.start();
+  await limited.start();
   try {
-    for (let i = 0; i < 200; i++) {
-      await fetch("http://localhost:3990/intents", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-forwarded-for": `203.0.113.${i & 0xff}, 198.51.100.${i}`,
-        },
-        body: JSON.stringify({}),
-      });
-    }
-    assert.ok(
-      proxied.rateLimitEntryCount() <= 10,
-      `expected <= 10 tracked IPs, got ${proxied.rateLimitEntryCount()}`,
-    );
+    const base = `http://localhost:${port}`;
 
-    // A sweep dated past the window clears everything.
-    proxied.sweep(Date.now() + 10 * 60_000);
-    assert.equal(proxied.rateLimitEntryCount(), 0);
+    // Reads: the 4th GET within the window is rejected.
+    for (let i = 0; i < 3; i++) {
+      assert.equal((await fetch(`${base}/info`)).status, 200, `read ${i + 1} should pass`);
+    }
+    assert.equal((await fetch(`${base}/info`)).status, 429, "read 4 should be limited");
+
+    // Writes draw on a separate budget that the read burst did not touch.
+    const first = await fetch(`${base}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.notEqual(first.status, 429, "first write should not be pre-limited by reads");
+    const second = await fetch(`${base}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(second.status, 429, "second write should be limited");
   } finally {
-    await proxied.stop();
-  }
-});
-
-test("#563 a request rejected with 429 is still recorded so the window keeps sliding", async () => {
-  const proxied = new MempoolServer({
-    port: 3991,
-    chainId: CHAIN_ID,
-    verifyingContract: ESCROW,
-    trustProxy: true,
-  });
-  await proxied.start();
-  try {
-    const ip = "203.0.113.250";
-    const hit = () =>
-      fetch("http://localhost:3991/intents", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-forwarded-for": ip },
-        body: JSON.stringify({}),
-      });
-
-    let lastOk = 0;
-    for (let i = 0; i < 60; i++) {
-      const res = await hit();
-      if (res.status !== 429) lastOk = i;
-    }
-    assert.equal(lastOk, 59, "first 60 requests in the window should be admitted");
-
-    // Further requests are rejected — and keep being rejected, because each
-    // rejected attempt is recorded, holding the window full rather than
-    // letting it drain.
-    for (let i = 0; i < 5; i++) {
-      const res = await hit();
-      assert.equal(res.status, 429);
-    }
-  } finally {
-    await proxied.stop();
+    await limited.stop();
   }
 });

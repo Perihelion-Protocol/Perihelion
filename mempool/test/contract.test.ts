@@ -228,6 +228,72 @@ test("GET /intents/:hash 404 response matches the documented ErrorResponse schem
   );
 });
 
+test("POST /intents 413 (oversized body) matches the documented ErrorResponse schema", async () => {
+  const res = await fetch(`${BASE}/intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ intent: { blob: "x".repeat(9000) }, signature: "0x00" }),
+  });
+  assert.equal(res.status, 413);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = await res.json();
+  assertMatchesSchema(
+    responseSchema("/intents", "post", "413"),
+    body,
+    "POST /intents 413 body",
+  );
+});
+
+test("POST /intents 400 (malformed JSON) matches the documented ErrorResponse schema", async () => {
+  const res = await fetch(`${BASE}/intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{ not json",
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = await res.json();
+  assertMatchesSchema(
+    responseSchema("/intents", "post", "400"),
+    body,
+    "POST /intents 400 (malformed JSON) body",
+  );
+});
+
+test("an unknown route returns 404 in the documented ErrorResponse shape", async () => {
+  const res = await fetch(`${BASE}/does-not-exist`);
+  assert.equal(res.status, 404);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = await res.json();
+  assertMatchesSchema(
+    { $ref: "#/components/schemas/ErrorResponse" },
+    body,
+    "404 catch-all body",
+  );
+});
+
+test("GET /intents?limit=<invalid> returns the documented 400", async () => {
+  const res = await fetch(`${BASE}/intents?limit=abc`);
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assertMatchesSchema(
+    responseSchema("/intents", "get", "400"),
+    body,
+    "GET /intents?limit=abc 400 body",
+  );
+});
+
+test("GET /intents?chainId=<invalid> returns the documented 400", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=abc`);
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assertMatchesSchema(
+    responseSchema("/intents", "get", "400"),
+    body,
+    "GET /intents?chainId=abc 400 body",
+  );
+});
+
 test("GET /info matches the documented MempoolInfo schema and reflects the configured domain", async () => {
   const res = await fetch(`${BASE}/info`);
   assert.equal(res.status, 200);
