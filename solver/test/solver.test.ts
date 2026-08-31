@@ -160,6 +160,123 @@ test("rejects intent with hash mismatch", async () => {
   );
 });
 
+test("hash-mismatch warning is emitted once, not once per tick", async () => {
+  // Regression test for #548: a mismatched record must be retired to the
+  // seen-set on first encounter so subsequent ticks skip it entirely — no
+  // repeated EIP-712 recomputation and no repeated log lines.
+  const intent = buildTestIntent();
+  const wrongHash = ("0x" + "22".repeat(32)) as Hex;
+
+  const record: IntentRecord = {
+    intent,
+    signature: "0xdeadbeef" as Hex,
+    hash: wrongHash,
+    status: "pending",
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+
+  const warnings: string[] = [];
+  const mockLogger: Logger = {
+    info: () => {},
+    warn: (msg) => { warnings.push(msg); },
+    error: () => {},
+  };
+
+  const mockExecutor: Executor = {
+    fill: async () => { throw new Error("fill should not be called"); },
+  };
+
+  // The mempool keeps returning the same record on every poll.
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records: [record], nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger);
+
+  // Run three ticks — the warning must appear exactly once.
+  await solver.tick();
+  await solver.tick();
+  await solver.tick();
+
+  const mismatchWarnings = warnings.filter((w) => w.includes("hash mismatch"));
+  assert.equal(
+    mismatchWarnings.length,
+    1,
+    "hash-mismatch warning should be emitted exactly once across multiple ticks",
+  );
+});
+
+test("full-page hash mismatch emits an error naming the configured domain", async () => {
+  // When every non-skipped record on a page mismatches, the solver's domain
+  // configuration is very likely wrong. A single actionable log.error per
+  // tick (rather than one log.warn per record) should name the configured
+  // sourceChainId and escrowAddress so the operator can diagnose quickly.
+  const intent1 = buildTestIntent();
+  const intent2 = buildTestIntent(); // buildTestIntent uses a fresh nonce each call
+
+  const wrongHashA = ("0x" + "aa".repeat(32)) as Hex;
+  const wrongHashB = ("0x" + "bb".repeat(32)) as Hex;
+
+  const records: IntentRecord[] = [
+    { intent: intent1, signature: "0xdeadbeef" as Hex, hash: wrongHashA, status: "pending", createdAt: Math.floor(Date.now() / 1000) },
+    { intent: intent2, signature: "0xdeadbeef" as Hex, hash: wrongHashB, status: "pending", createdAt: Math.floor(Date.now() / 1000) },
+  ];
+
+  const errors: Array<{ msg: string; meta?: Record<string, unknown> }> = [];
+  const warnings: string[] = [];
+  const mockLogger: Logger = {
+    info: () => {},
+    warn: (msg) => { warnings.push(msg); },
+    error: (msg, meta) => { errors.push({ msg, meta }); },
+  };
+
+  const mockExecutor: Executor = {
+    fill: async () => { throw new Error("fill should not be called"); },
+  };
+
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records, nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger);
+  await solver.tick();
+
+  // One warn per mismatched record on the first tick.
+  assert.equal(
+    warnings.filter((w) => w.includes("hash mismatch")).length,
+    2,
+    "should warn once per mismatched record on the first tick",
+  );
+
+  // One escalated error for the full-page mismatch, naming the domain.
+  assert.equal(errors.length, 1, "should emit exactly one escalation error");
+  assert.ok(
+    errors[0].msg.includes("misconfiguration"),
+    "escalation error message should mention misconfiguration",
+  );
+  assert.equal(
+    errors[0].meta?.sourceChainId,
+    baseConfig.sourceChainId,
+    "escalation error should name the configured sourceChainId",
+  );
+  assert.equal(
+    errors[0].meta?.escrowAddress,
+    baseConfig.escrowAddress,
+    "escalation error should name the configured escrowAddress",
+  );
+
+  // On the second tick, both records are in the seen-set — no new warnings or errors.
+  const warningsBefore = warnings.length;
+  const errorsBefore = errors.length;
+  await solver.tick();
+  assert.equal(warnings.length, warningsBefore, "no new warnings on second tick");
+  assert.equal(errors.length, errorsBefore, "no new errors on second tick");
+});
+
 test("caches invalid signatures to avoid re-verification within the negative TTL", async () => {
   const intent = buildTestIntent();
   const record = buildTestRecord(intent);
