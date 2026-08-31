@@ -23,7 +23,7 @@
  * that table.
  */
 
-import { isExpired, fromSmallestUnits, toSmallestUnits } from "@perihelion/sdk";
+import { isExpired, fromSmallestUnits, toSmallestUnits, MIN_FILL_HEADROOM_SECS } from "@perihelion/sdk";
 import type { Intent } from "@perihelion/sdk";
 import { zeroAddress, isAddressEqual, type Address } from "viem";
 import type { SolverConfig } from "./config.js";
@@ -228,6 +228,28 @@ export async function evaluate(
   }
   if (isExpired(intent)) {
     return { fill: false, reason: "intent expired", terminal: true };
+  }
+  // Reject intents that lack sufficient deadline headroom for the Soroban
+  // settlement contract.  The contract's validate_and_stage_fill guard is:
+  //   if now + MAX_DISPATCH_WINDOW > rec.deadline { return Err(IntentExpired) }
+  // where MAX_DISPATCH_WINDOW = 1_800 s.  An intent that passes the plain
+  // isExpired() check above but falls inside this window will have its EVM
+  // lock succeed and its LayerZero fee paid, only for deliver_intent to reject
+  // the fill — leaving the user's funds locked until cancelExpired.
+  //
+  // isExpired(intent, now, clockSkew) = intent.deadline <= now - clockSkew.
+  // Passing clockSkew = -MIN_FILL_HEADROOM_SECS gives:
+  //   intent.deadline <= now + MIN_FILL_HEADROOM_SECS
+  // which rejects precisely when the remaining time is below the headroom.
+  // This verdict is terminal: an intent inside the window now can never
+  // regain headroom — time only moves forward.
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (isExpired(intent, nowSec, -MIN_FILL_HEADROOM_SECS)) {
+    return {
+      fill: false,
+      reason: `insufficient deadline headroom: ${intent.deadline - nowSec}s remaining, need >${MIN_FILL_HEADROOM_SECS}s`,
+      terminal: true,
+    };
   }
   if (!config.supportedDestAssets.includes(intent.destAsset)) {
     return { fill: false, reason: `unsupported dest asset ${intent.destAsset}`, terminal: true };
