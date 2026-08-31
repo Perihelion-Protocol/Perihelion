@@ -51,6 +51,9 @@ export function loadExecutorConfig(
   const settlementContractId = env.PERIHELION_SETTLEMENT_CONTRACT_ID ?? "";
   if (!settlementContractId) errors.push("PERIHELION_SETTLEMENT_CONTRACT_ID is required");
 
+  const stellarNetwork = env.STELLAR_NETWORK ?? "";
+  if (!stellarNetwork) errors.push("STELLAR_NETWORK is required");
+
   const sourceChainId = Number(env.PERIHELION_SOURCE_CHAIN_ID ?? 1);
   if (!Number.isInteger(sourceChainId) || sourceChainId <= 0) {
     errors.push(
@@ -72,5 +75,6 @@ export function loadExecutorConfig(
     escrowAddress: getAddress(escrowAddress),
     settlementContractId,
     sourceChainId,
+    stellarNetwork,
   };
 }
