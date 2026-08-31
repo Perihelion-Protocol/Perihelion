@@ -633,3 +633,169 @@ test("reorg detected when block hash changes and cursor rolls back", async () =>
   assert.equal(relayer.readiness.cursor, 3, "cursor rolled back after reorg");
 });
 
+// ─── Issue #570: already-delivered must not pin the cursor ──────────────────
+
+test("two ticks over an already-delivered block still advance the cursor (#570)", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const watcher: SourceWatcher = {
+    // The block keeps re-surfacing on every poll, as it would after a restart
+    // that re-scans from the checkpoint.
+    async poll() {
+      return { messages: [makeMsg(10)], head: 10 };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      throw new Error("must not deliver an already-delivered message");
+    },
+    async isDelivered() {
+      return true;
+    },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent);
+
+  await relayer.tick();
+  assert.equal(
+    relayer.readiness.cursor,
+    11,
+    "cursor advances past the already-delivered block on the first tick",
+  );
+
+  await relayer.tick();
+  assert.equal(
+    relayer.readiness.cursor,
+    11,
+    "cursor does not regress on the second tick over the same block",
+  );
+  assert.equal(relayer.metrics.delivered, 0, "no fresh deliveries counted");
+  assert.ok(
+    relayer.metrics.alreadyDelivered >= 1,
+    "short-circuit counted under alreadyDelivered, not delivered",
+  );
+});
+
+test("a restart that re-scans already-delivered blocks keeps moving forward (#570)", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const checkpoint = memCheckpoint();
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      return "0xdst";
+    },
+    // LayerZero's own executor already delivered everything this relayer sees.
+    async isDelivered() {
+      return true;
+    },
+  };
+  const watcher: SourceWatcher = {
+    async poll(fromBlock) {
+      return {
+        messages: [makeMsg(fromBlock, { nonce: fromBlock })],
+        head: fromBlock + 5,
+      };
+    },
+  };
+
+  const first = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+  await first.resume();
+  await first.tick();
+  const cursorAfterFirst = first.readiness.cursor;
+  assert.ok(cursorAfterFirst > 0, "cursor advanced despite everything being already delivered");
+
+  const restarted = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+  await restarted.resume();
+  await restarted.tick();
+  assert.ok(
+    restarted.readiness.cursor > cursorAfterFirst,
+    "restarted relayer resumes forward from the checkpoint",
+  );
+});
+
+// ─── Issue #571: correlate results to messages by the full composite key ────
+
+test("batch with a resolved and an unresolved message sharing an intentHash pins the cursor correctly (#571)", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const sharedHash = `0x${"cd".repeat(32)}` as `0x${string}`;
+  const watcher: SourceWatcher = {
+    async poll() {
+      return {
+        messages: [
+          // block 5 — delivers fine
+          makeMsg(5, { intentHash: sharedHash, messageType: "FillInstruction", nonce: 1 }),
+          // block 6 — same intent hash, delivery keeps failing
+          makeMsg(6, { intentHash: sharedHash, messageType: "CancelIntent", nonce: 2 }),
+        ],
+        head: 10,
+      };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver(p) {
+      if (p.message.messageType === "CancelIntent") throw new Error("cancel delivery down");
+      return "0xdst";
+    },
+    async isDelivered() {
+      return false;
+    },
+  };
+  const retry: RetryPolicy = { maxAttempts: 10, baseBackoffMs: 0 };
+  const relayer = new Relayer(
+    config,
+    watcher,
+    delivery,
+    silent,
+    0,
+    memCheckpoint(),
+    new InMemoryDeadLetterStore(),
+    retry,
+  );
+
+  await relayer.tick();
+
+  // Correlating by intentHash alone would match the failing block-6 message to
+  // the delivered block-5 result and advance the cursor past block 6 — a
+  // permanent skip. The composite key keeps them distinct.
+  assert.equal(
+    relayer.readiness.cursor,
+    6,
+    "cursor stops at the unresolved message's block, not past it",
+  );
+});
+
+test("batch of two messages for one intent, both resolved, advances the cursor past both (#571)", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const sharedHash = `0x${"1a".repeat(32)}` as `0x${string}`;
+  const watcher: SourceWatcher = {
+    async poll() {
+      return {
+        messages: [
+          makeMsg(5, { intentHash: sharedHash, messageType: "FillInstruction", nonce: 1 }),
+          makeMsg(6, { intentHash: sharedHash, messageType: "CancelIntent", nonce: 2 }),
+        ],
+        head: 10,
+      };
+    },
+  };
+  const seen = new Set<string>();
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      return "0xdst";
+    },
+    async isDelivered(key) {
+      const k = messageKeyString(key);
+      if (seen.has(k)) return true;
+      seen.add(k);
+      return false;
+    },
+  };
+
+  const relayer = new Relayer(config, watcher, delivery, silent);
+  await relayer.tick();
+
+  assert.equal(
+    relayer.readiness.cursor,
+    11,
+    "both messages resolved — cursor advances to confirmedHead + 1",
+  );
+});
+

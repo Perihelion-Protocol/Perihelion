@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 import { MempoolServer } from "./index.js";
-import type { Address } from "@perihelion/sdk";
+import { loadConfig } from "./config.js";
 
-const port = parseInt(process.env.PORT ?? "3000", 10);
-const host = process.env.PERIHELION_MEMPOOL_HOST ?? "localhost";
+const config = loadConfig();
+const server = new MempoolServer(config);
 
 /**
  * Reads an optional positive-integer environment variable. An unset or empty
@@ -45,4 +45,5 @@ const server = new MempoolServer({
   readRateLimit: optionalPositiveInt("PERIHELION_MEMPOOL_READ_RATE_LIMIT"),
 });
 
-await server.start();
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
