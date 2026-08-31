@@ -37,7 +37,7 @@
   "dependencies": {
     "@perihelion/sdk": "*",
     "@stellar/stellar-sdk": "^12.3.0",
-    "viem": "^2.55.8"
+    "viem": "^2.56.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
