@@ -55,10 +55,75 @@ test("loadConfig defaults mempoolUrl to the mempool's own default port", () => {
   assert.equal(config.mempoolUrl, "http://localhost:3000");
 });
 
+test("loadConfig accepts a valid https:// mempoolUrl", () => {
+  const config = loadConfig({ ...baseSolverEnv(), PERIHELION_MEMPOOL_URL: "https://mempool.perihelion.xyz" });
+  assert.equal(config.mempoolUrl, "https://mempool.perihelion.xyz");
+});
+
+test("loadConfig accepts a valid http://localhost mempoolUrl", () => {
+  const config = loadConfig({ ...baseSolverEnv(), PERIHELION_MEMPOOL_URL: "http://localhost:3000" });
+  assert.equal(config.mempoolUrl, "http://localhost:3000");
+});
+
+test("loadConfig rejects a bare hostname (no scheme) as PERIHELION_MEMPOOL_URL", () => {
+  assert.throws(
+    () => loadConfig({ ...baseSolverEnv(), PERIHELION_MEMPOOL_URL: "mempool.example.com" }),
+    /PERIHELION_MEMPOOL_URL must be a valid URL/,
+  );
+});
+
+test("loadConfig rejects a completely invalid PERIHELION_MEMPOOL_URL", () => {
+  assert.throws(
+    () => loadConfig({ ...baseSolverEnv(), PERIHELION_MEMPOOL_URL: "not a url" }),
+    /PERIHELION_MEMPOOL_URL must be a valid URL/,
+  );
+});
+
+test("loadConfig includes PERIHELION_MEMPOOL_URL error in the consolidated startup message", () => {
+  // A missing required var + an invalid mempoolUrl must both appear in one throw.
+  assert.throws(
+    () => loadConfig({ PERIHELION_MEMPOOL_URL: "not-a-url" }),
+    (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return (
+        msg.includes("PERIHELION_SOLVER_ADDRESS is required") &&
+        msg.includes("PERIHELION_MEMPOOL_URL must be a valid URL")
+      );
+    },
+  );
+});
+
 test("loadConfig returns a valid config when all required vars are present", () => {
   const config = loadConfig(baseSolverEnv());
   assert.equal(config.solverAddress, VALID_SOLVER);
   assert.equal(config.escrowAddress, VALID_ESCROW);
+});
+
+test("loadConfig defaults the native fee floors to 0n", () => {
+  const config = loadConfig(baseSolverEnv());
+  assert.equal(config.sourceNativeFeeFloor, 0n);
+  assert.equal(config.stellarNativeFeeFloor, 0n);
+});
+
+test("loadConfig parses the native fee floors as bigints in smallest units", () => {
+  const config = loadConfig({
+    ...baseSolverEnv(),
+    PERIHELION_SOURCE_NATIVE_FEE_FLOOR: "5000000000000000",
+    PERIHELION_STELLAR_NATIVE_FEE_FLOOR: "20000000",
+  });
+  assert.equal(config.sourceNativeFeeFloor, 5_000_000_000_000_000n);
+  assert.equal(config.stellarNativeFeeFloor, 20_000_000n);
+});
+
+test("loadConfig rejects a negative or non-integer native fee floor", () => {
+  assert.throws(
+    () => loadConfig({ ...baseSolverEnv(), PERIHELION_STELLAR_NATIVE_FEE_FLOOR: "-1" }),
+    /PERIHELION_STELLAR_NATIVE_FEE_FLOOR must be a non-negative integer/,
+  );
+  assert.throws(
+    () => loadConfig({ ...baseSolverEnv(), PERIHELION_SOURCE_NATIVE_FEE_FLOOR: "1.5" }),
+    /PERIHELION_SOURCE_NATIVE_FEE_FLOOR must be a non-negative integer/,
+  );
 });
 
 function baseExecutorEnv() {

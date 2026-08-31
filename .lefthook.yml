@@ -68,6 +68,13 @@ pre-commit:
           exit 1
         fi
 
+    # ── Guard: SPDX license headers ─────────────────────────────
+    spdx-headers:
+      run: ./scripts/check-spdx-headers.sh
+      skip:
+        - merge
+        - rebase
+
     # ── Guard: debug logging ────────────────────────────────────
     no-debug-log:
       run: |
