@@ -46,6 +46,7 @@ import { messageKeyString } from "./types.js";
 import { BackoffState } from "./backoff.js";
 import type { DeadLetterStore } from "./dead-letter.js";
 import { InMemoryDeadLetterStore } from "./dead-letter.js";
+import { PerihelionClient, type MempoolIntentStatus } from "@perihelion/sdk";
 
 /** Observes bridge messages emitted on the source chain. */
 export interface SourceWatcher {
@@ -203,6 +204,13 @@ export class Relayer {
   /** Resolves an in-progress interruptibleSleep early when stop() is called. */
   private abortSleep: (() => void) | null = null;
 
+  /**
+   * Thin SDK client used for best-effort mempool status reporting.
+   * Only instantiated when both `mempoolUrl` and `mempoolStatusToken` are
+   * present in the config.
+   */
+  private readonly mempoolClient: PerihelionClient | null;
+
   constructor(
     private readonly config: RelayerConfig,
     private readonly watcher: SourceWatcher,
@@ -216,6 +224,10 @@ export class Relayer {
     this.cursor = startBlock;
     this.backoff = new BackoffState(config);
     this.readiness.cursor = startBlock;
+    this.mempoolClient =
+      config.mempoolUrl && config.mempoolStatusToken
+        ? new PerihelionClient({ mempoolUrl: config.mempoolUrl })
+        : null;
   }
 
   /**
@@ -445,6 +457,36 @@ export class Relayer {
       });
       await sleep(backoff);
       return { intentHash, key, delivered: false, resolved: false, error: String(err) };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mempool status reporting
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Best-effort: report `"refunded"` to the mempool after a `CancelIntent`
+   * delivery.  Errors are logged and swallowed — a failed status report must
+   * never affect the already-successful on-chain delivery or retry logic.
+   *
+   * Only called when both {@link RelayerConfig.mempoolUrl} and
+   * {@link RelayerConfig.mempoolStatusToken} are configured.
+   */
+  private async reportRefunded(intentHash: string): Promise<void> {
+    const { mempoolUrl, mempoolStatusToken } = this.config;
+    if (!this.mempoolClient || !mempoolStatusToken || !mempoolUrl) return;
+    try {
+      await this.mempoolClient.reportStatus(
+        intentHash as import("@perihelion/sdk").Hex,
+        "refunded" satisfies MempoolIntentStatus,
+        mempoolStatusToken,
+      );
+      this.log.info("reported refunded to mempool", { intentHash });
+    } catch (err) {
+      this.log.warn("failed to report refunded to mempool (non-fatal)", {
+        intentHash,
+        err: String(err),
+      });
     }
   }
 
