@@ -434,3 +434,6 @@ blockchain universe._
 
 <!-- handsoff-issue-696 -->
 - #696: evm: the rolling-window circuit breaker sets `rollingWindowTriggered` and then reverts, discarding it
+
+<!-- handsoff-issue-697 -->
+- #697: evm: `resetRollingWindowCap` does not clear the accumulated bucket, so the cap re-trips immediately
