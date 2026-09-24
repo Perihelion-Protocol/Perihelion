@@ -429,3 +429,8 @@ bodies. The shortest, most efficient path between Stellar and the rest of the
 blockchain universe._
 
 </div>
+
+## Handsoff notes
+
+<!-- handsoff-issue-693 -->
+- #693: relayer: the reorg-rollback test fails, leaving reorg handling unverified
