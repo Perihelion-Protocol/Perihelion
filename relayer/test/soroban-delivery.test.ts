@@ -6,9 +6,9 @@ import { scValToNative } from "@stellar/stellar-sdk";
 import { FatalError } from "../src/relayer.js";
 import { SorobanDestinationDelivery } from "../src/soroban-delivery.js";
 
-const SIGNER_SECRET = "SBZVMB74Z76QB3ZL2YFBN7EWUIXVXSNXKNQRIPZTKMZDDQ3FJBNRHWBU";
+const SIGNER_SECRET = "SATIFRDTRKIU6OIU3FURVUO2NIVO5KVH6GQIAGBFPMV4UE4WOXYK5PBW";
 const CONTRACT_ID = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
-const INTENT_HASH = "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab";
+const INTENT_HASH = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function makeDelivery(): SorobanDestinationDelivery {
   return new SorobanDestinationDelivery({
