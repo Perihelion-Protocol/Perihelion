@@ -429,3 +429,8 @@ bodies. The shortest, most efficient path between Stellar and the rest of the
 blockchain universe._
 
 </div>
+
+## Handsoff notes
+
+<!-- handsoff-issue-691 -->
+- #691: sdk: two `buildIntent` V_min warning tests fail because the warning now requires `sourceDecimals`
