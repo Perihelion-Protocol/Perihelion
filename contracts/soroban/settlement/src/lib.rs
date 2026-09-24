@@ -35,43 +35,61 @@ pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
 
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Symbol, symbol_short};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
 
 use messages::{encode_cancel_intent, encode_fill_confirmed};
 
 // =============================================================================
 // EVENT CONSTANTS (issue #341)
 // =============================================================================
-// All event names are compile-time constants to ensure consistency with the
-// event-shape spec, prevent typos, and enable compile-time checking. Names of
-// 9 characters or fewer use symbol_short!; longer names remain as Symbol::new
-// in runtime-evaluated const helpers.
+// Every event topic is the event's full snake_case name, exactly as listed in
+// the event-shape specification below (issue #679). Names of 9 characters or
+// fewer are compile-time constants built with symbol_short!; longer names
+// cannot use symbol_short! and are built at emission time by the helper
+// functions, which wrap Symbol::new. No topic is abbreviated.
 
 mod events {
-    use soroban_sdk::{symbol_short, Symbol};
+    use soroban_sdk::{symbol_short, Env, Symbol};
 
-    pub const INITIALIZED: Symbol = symbol_short!("initialized");
-    pub const ENDPOINT_SET: Symbol = symbol_short!("endpoint_set");
     pub const PEER_SET: Symbol = symbol_short!("peer_set");
-    pub const PEER_CHANGE_PROPOSED: Symbol = symbol_short!("peer_prop");
-    pub const PEER_CHANGE_CANCELLED: Symbol = symbol_short!("peer_cancel");
-    pub const ADMIN_TRANSFER_STARTED: Symbol = symbol_short!("adm_start");
-    pub const ADMIN_TRANSFER_COMPLETED: Symbol = symbol_short!("adm_complete");
-    pub const PAUSED_SET: Symbol = symbol_short!("paused_set");
-    pub const NATIVE_TOKEN_SET: Symbol = symbol_short!("native_tok");
-    pub const KEEPER_REWARD_SET: Symbol = symbol_short!("reward_set");
-    pub const KEEPER_REWARD_PAID: Symbol = symbol_short!("reward_pd");
-    pub const KEEPER_REWARD_SKIPPED: Symbol = symbol_short!("reward_sk");
-    pub const REGISTERED: Symbol = symbol_short!("registered");
     pub const FILLED: Symbol = symbol_short!("filled");
-    pub const CONFIRMATION_SENT: Symbol = symbol_short!("confirmed");
     pub const CANCELLED: Symbol = symbol_short!("cancelled");
-    pub const CANCELLED_INBOUND: Symbol = symbol_short!("canl_in");
-    pub const CANCEL_IGNORED: Symbol = symbol_short!("canl_ign");
-    pub const ROLLING_WINDOW_CAP_TRIGGERED: Symbol = symbol_short!("roll_cap");
-    /// Issue #500: delayed endpoint rotation, mirroring the peer-change events.
-    pub const ENDPOINT_CHANGE_PROPOSED: Symbol = symbol_short!("endp_prop");
-    pub const ENDPOINT_CHANGE_CANCELLED: Symbol = symbol_short!("endp_canl");
+
+    macro_rules! long_topics {
+        ($($name:ident),* $(,)?) => {
+            $(
+                pub fn $name(env: &Env) -> Symbol {
+                    Symbol::new(env, stringify!($name))
+                }
+            )*
+        };
+    }
+
+    long_topics!(
+        initialized,
+        endpoint_set,
+        endpoint_change_proposed,
+        endpoint_change_cancelled,
+        peer_change_proposed,
+        peer_change_cancelled,
+        peer_change_expired,
+        admin_transfer_started,
+        admin_transfer_completed,
+        paused_set,
+        paused_eid_set,
+        native_token_set,
+        keeper_reward_set,
+        keeper_reward_paid,
+        keeper_reward_skipped,
+        max_intent_amount_set,
+        rolling_window_cap_set,
+        rolling_window_cap_triggered,
+        rolling_window_cap_reset,
+        registered,
+        confirmation_sent,
+        cancelled_inbound,
+        cancel_ignored,
+    );
 }
 
 // =============================================================================
@@ -86,26 +104,37 @@ mod events {
 // EVM equivalence: See `contracts/evm/src/PerihelionEscrow.sol` for matching
 // event definitions. Cross-chain wire vectors in `contracts/shared/wire-vectors/`.
 //
-// Event shapes (topics tuple, data tuple):
+// Event shapes (topics tuple, data tuple). The Symbol column is the exact
+// topic placed on the wire — subscribe to it verbatim.
 //
-// | Symbol                   | Topics                          | Data                                           |
-// |--------------------------|---------------------------------|------------------------------------------------|
-// | `initialized`            | ("initialized",)                 | (admin: Address, endpoint: Address)              |
-// | `endpoint_set`         | ("endpoint_set",)                | (old: Address, new: Address)                     |
-// | `peer_set`             | ("peer_set",)                    | (eid: u32, old: Option<BytesN<32>>, new: BytesN<32>) |
-// | `admin_transfer_started` | ("admin_transfer_started",)      | (old: Address, new: Address)                     |
-// | `admin_transfer_completed` | ("admin_transfer_completed",)  | (old: Address, new: Address)                     |
-// | `paused_set`           | ("paused_set",)                  | (paused: bool)                                   |
-// | `native_token_set`     | ("native_token_set",)            | (native_token: Address)                          |
-// | `keeper_reward_set`    | ("keeper_reward_set",)           | (reward: i128)                                   |
-// | `keeper_reward_paid`   | ("keeper_reward_paid", intent_hash) | (caller: Address, reward: i128)               |
-// | `keeper_reward_skipped` | ("keeper_reward_skipped", intent_hash) | (caller: Address, reward: i128)            |
-// | `registered`           | ("registered", intent_hash)        | (src_eid: u32, deadline: u64)                    |
-// | `filled`               | ("filled", intent_hash)          | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32) |
-// | `confirmation_sent`    | ("confirmation_sent", intent_hash) | (solver: Address)                                |
-// | `cancelled`            | ("cancelled", intent_hash)       | (src_eid: u32, deadline: u64)                    |
-// | `cancelled_inbound`     | ("cancelled_inbound", intent_hash) | (src_eid: u32)                                  |
-// | `cancel_ignored`       | ("cancel_ignored", intent_hash)    | (status: u32)                           |
+// | Symbol                         | Topics                                 | Data
+// |--------------------------------|----------------------------------------|------
+// | `initialized`                  | ("initialized",)                       | (admin: Address, endpoint: Address)
+// | `endpoint_set`                 | ("endpoint_set",)                      | (old: Option<Address>, new: Address)
+// | `endpoint_change_proposed`     | ("endpoint_change_proposed",)          | (old: Option<Address>, new: Address, ready_at: u64)
+// | `endpoint_change_cancelled`    | ("endpoint_change_cancelled",)         | ()
+// | `peer_set`                     | ("peer_set",)                          | (eid: u32, old: Option<BytesN<32>>, new: BytesN<32>)
+// | `peer_change_proposed`         | ("peer_change_proposed",)              | (eid: u32, old: Option<BytesN<32>>, new: BytesN<32>, ready_at: u64)
+// | `peer_change_cancelled`        | ("peer_change_cancelled",)             | (eid: u32)
+// | `peer_change_expired`          | ("peer_change_expired",)               | (eid: u32)
+// | `admin_transfer_started`       | ("admin_transfer_started",)            | (old: Address, new: Address)
+// | `admin_transfer_completed`     | ("admin_transfer_completed",)          | (old: Address, new: Address)
+// | `paused_set`                   | ("paused_set",)                        | (paused: bool)
+// | `paused_eid_set`               | ("paused_eid_set",)                    | (eid: u32, paused: bool)
+// | `native_token_set`             | ("native_token_set",)                  | (native_token: Address)
+// | `keeper_reward_set`            | ("keeper_reward_set",)                 | (reward: i128)
+// | `keeper_reward_paid`           | ("keeper_reward_paid", intent_hash)    | (caller: Address, reward: i128)
+// | `keeper_reward_skipped`        | ("keeper_reward_skipped", intent_hash) | (caller: Address, reward: i128)
+// | `max_intent_amount_set`        | ("max_intent_amount_set",)             | (max_amount: i128)
+// | `rolling_window_cap_set`       | ("rolling_window_cap_set",)            | (duration: u64, cap: i128)
+// | `rolling_window_cap_triggered` | ("rolling_window_cap_triggered",)      | (window_start: u64, accumulated: i128)
+// | `rolling_window_cap_reset`     | ("rolling_window_cap_reset",)          | ()
+// | `registered`                   | ("registered", intent_hash)            | (src_eid: u32, deadline: u64)
+// | `filled`                       | ("filled", intent_hash)                | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32)
+// | `confirmation_sent`            | ("confirmation_sent", intent_hash)     | (solver: Address)
+// | `cancelled`                    | ("cancelled", intent_hash)             | (src_eid: u32, deadline: u64)
+// | `cancelled_inbound`            | ("cancelled_inbound", intent_hash)     | (src_eid: u32)
+// | `cancel_ignored`               | ("cancel_ignored", intent_hash)        | (status: u32)
 
 /// Default TTL ceiling for extensions (issue #340). Mirrors the representative
 /// network `max_entry_ttl`; operator must set_max_ttl if network value differs.
@@ -206,10 +235,8 @@ impl Perihelion {
 
         // Issue #16/#18: emit an event so deployment tooling and off-chain
         // monitors can confirm the configured roles without polling storage.
-        env.events().publish(
-            (events::INITIALIZED,),
-            (admin, endpoint),
-        );
+        env.events()
+            .publish((events::initialized(&env),), (admin, endpoint));
         Ok(())
     }
 
@@ -227,10 +254,8 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::Endpoint, &new_endpoint);
-        env.events().publish(
-            (events::ENDPOINT_SET,),
-            (old, new_endpoint),
-        );
+        env.events()
+            .publish((events::endpoint_set(&env),), (old, new_endpoint));
         Ok(())
     }
 
@@ -245,7 +270,7 @@ impl Perihelion {
     /// check even runs). `set_endpoint` is left in place unchanged; callers
     /// choose which path to use.
     ///
-    /// Emits `endp_prop(old, new, ready_at)`.
+    /// Emits `endpoint_change_proposed(old, new, ready_at)`.
     pub fn propose_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
         let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
@@ -259,7 +284,7 @@ impl Perihelion {
             .instance()
             .set(&DataKey::PendingEndpointTime, &now);
         env.events().publish(
-            (events::ENDPOINT_CHANGE_PROPOSED,),
+            (events::endpoint_change_proposed(&env),),
             (old, new_endpoint, ready_at),
         );
         Ok(())
@@ -315,17 +340,15 @@ impl Perihelion {
             .instance()
             .remove(&DataKey::PendingEndpointTime);
 
-        env.events().publish(
-            (events::ENDPOINT_SET,),
-            (old, proposed_endpoint),
-        );
+        env.events()
+            .publish((events::endpoint_set(&env),), (old, proposed_endpoint));
         Ok(())
     }
 
     /// Cancel a pending endpoint change (issue #500). Admin-only. Mirrors
     /// `cancel_pending_peer`.
     ///
-    /// Emits `endp_canl()`.
+    /// Emits `endpoint_change_cancelled()`.
     pub fn cancel_pending_endpoint(env: Env) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
 
@@ -334,7 +357,8 @@ impl Perihelion {
             .instance()
             .remove(&DataKey::PendingEndpointTime);
 
-        env.events().publish((events::ENDPOINT_CHANGE_CANCELLED,), ());
+        env.events()
+            .publish((events::endpoint_change_cancelled(&env),), ());
         Ok(())
     }
 
@@ -389,7 +413,7 @@ impl Perihelion {
             .instance()
             .set(&DataKey::PendingPeerTime(eid), &now);
         env.events().publish(
-            (events::PEER_CHANGE_PROPOSED,),
+            (events::peer_change_proposed(&env),),
             (eid, old_peer, new_peer, ready_at),
         );
         Ok(())
@@ -428,12 +452,12 @@ impl Perihelion {
         }
 
         if now > proposed_at + MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE {
-            env.events().publish(
-                (Symbol::new(&env, "peer_change_expired"),),
-                (eid,),
-            );
+            env.events()
+                .publish((events::peer_change_expired(&env),), (eid,));
             env.storage().instance().remove(&DataKey::PendingPeer(eid));
-            env.storage().instance().remove(&DataKey::PendingPeerTime(eid));
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingPeerTime(eid));
             return Err(PerihelionError::PeerChangeExpired);
         }
 
@@ -446,10 +470,8 @@ impl Perihelion {
             .instance()
             .remove(&DataKey::PendingPeerTime(eid));
 
-        env.events().publish(
-            (events::PEER_SET,),
-            (eid, old_peer, proposed_peer),
-        );
+        env.events()
+            .publish((events::PEER_SET,), (eid, old_peer, proposed_peer));
         Ok(())
     }
 
@@ -466,10 +488,8 @@ impl Perihelion {
             .instance()
             .remove(&DataKey::PendingPeerTime(eid));
 
-        env.events().publish(
-            (events::PEER_CHANGE_CANCELLED,),
-            (eid,),
-        );
+        env.events()
+            .publish((events::peer_change_cancelled(&env),), (eid,));
         Ok(())
     }
 
@@ -481,14 +501,19 @@ impl Perihelion {
     /// Retrieve a pending peer change, if one exists (issue #165).
     /// Returns (proposed_peer, proposed_at_timestamp, ready_at, expires_at) or None if no change pending.
     /// Allows callers to observe the confirmation window without manual computation (issue #292).
-    pub fn get_pending_peer(env: Env, eid: u32) -> Result<Option<(BytesN<32>, u64, u64, u64)>, PerihelionError> {
+    pub fn get_pending_peer(
+        env: Env,
+        eid: u32,
+    ) -> Result<Option<(BytesN<32>, u64, u64, u64)>, PerihelionError> {
         let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
         let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
 
         Ok(match (peer, time) {
             (Some(p), Some(t)) => {
                 let ready_at = t.saturating_add(MIN_PEER_CHANGE_DELAY);
-                let expires_at = t.saturating_add(MIN_PEER_CHANGE_DELAY).saturating_add(PEER_CHANGE_GRACE);
+                let expires_at = t
+                    .saturating_add(MIN_PEER_CHANGE_DELAY)
+                    .saturating_add(PEER_CHANGE_GRACE);
                 Some((p, t, ready_at, expires_at))
             }
             _ => None,
@@ -517,7 +542,7 @@ impl Perihelion {
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
         env.events().publish(
-            (events::ADMIN_TRANSFER_STARTED,),
+            (events::admin_transfer_started(&env),),
             (current, new_admin),
         );
         Ok(())
@@ -540,10 +565,8 @@ impl Perihelion {
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         env.storage().instance().extend_ttl(17_280, 1_209_600);
-        env.events().publish(
-            (events::ADMIN_TRANSFER_COMPLETED,),
-            (old, pending),
-        );
+        env.events()
+            .publish((events::admin_transfer_completed(&env),), (old, pending));
         Ok(())
     }
 
@@ -554,10 +577,7 @@ impl Perihelion {
     pub fn set_paused(env: Env, paused: bool) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
         env.storage().instance().set(&DataKey::Paused, &paused);
-        env.events().publish(
-            (events::PAUSED_SET,),
-            (paused,),
-        );
+        env.events().publish((events::paused_set(&env),), (paused,));
         Ok(())
     }
 
@@ -575,10 +595,8 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::PausedEid(eid), &paused);
-        env.events().publish(
-            (Symbol::new(&env, "paused_eid_set"),),
-            (eid, paused),
-        );
+        env.events()
+            .publish((events::paused_eid_set(&env),), (eid, paused));
         Ok(())
     }
 
@@ -601,11 +619,11 @@ impl Perihelion {
         if reward < 0 {
             return Err(PerihelionError::InvalidAmount);
         }
-        env.storage().instance().set(&DataKey::KeeperReward, &reward);
-        env.events().publish(
-            (events::KEEPER_REWARD_SET,),
-            (reward,),
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::KeeperReward, &reward);
+        env.events()
+            .publish((events::keeper_reward_set(&env),), (reward,));
         Ok(())
     }
 
@@ -623,10 +641,8 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::MaxIntentAmount, &max_amount);
-        env.events().publish(
-            (Symbol::new(&env, "max_intent_amount_set"),),
-            (max_amount,),
-        );
+        env.events()
+            .publish((events::max_intent_amount_set(&env),), (max_amount,));
         Ok(())
     }
 
@@ -640,7 +656,11 @@ impl Perihelion {
     /// - `cap`: maximum aggregate amount per window (0 to disable)
     ///
     /// Emits `rolling_window_cap_set(duration, cap)` event.
-    pub fn set_rolling_window_cap(env: Env, duration: u64, cap: i128) -> Result<(), PerihelionError> {
+    pub fn set_rolling_window_cap(
+        env: Env,
+        duration: u64,
+        cap: i128,
+    ) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
         if cap < 0 {
             return Err(PerihelionError::InvalidAmount);
@@ -651,10 +671,8 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::RollingWindowCap, &cap);
-        env.events().publish(
-            (Symbol::new(&env, "rolling_window_cap_set"),),
-            (duration, cap),
-        );
+        env.events()
+            .publish((events::rolling_window_cap_set(&env),), (duration, cap));
         Ok(())
     }
 
@@ -683,10 +701,8 @@ impl Perihelion {
         env.storage()
             .instance()
             .remove(&DataKey::RollingWindowResetEarliestAt);
-        env.events().publish(
-            (Symbol::new(&env, "rolling_window_cap_reset"),),
-            (),
-        );
+        env.events()
+            .publish((events::rolling_window_cap_reset(&env),), ());
         Ok(())
     }
 
@@ -698,10 +714,8 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::NativeToken, &native_token);
-        env.events().publish(
-            (events::NATIVE_TOKEN_SET,),
-            (native_token,),
-        );
+        env.events()
+            .publish((events::native_token_set(&env),), (native_token,));
         Ok(())
     }
 
@@ -794,7 +808,7 @@ impl Perihelion {
         }
 
         let key = DataKey::Intent(intent_hash.clone());
-        let mut rec: IntentRecord = env
+        let rec: IntentRecord = env
             .storage()
             .persistent()
             .get(&key)
@@ -839,7 +853,8 @@ impl Perihelion {
         solver.require_auth();
         Self::require_not_paused(&env)?;
 
-        let (key, mut rec) = Self::validate_and_stage_fill(&env, &solver, &intent_hash, fill_amount)?;
+        let (key, mut rec) =
+            Self::validate_and_stage_fill(&env, &solver, &intent_hash, fill_amount)?;
 
         // Effects before interactions: flip status, write the settled marker.
         rec.status = IntentStatus::Filled;
@@ -941,10 +956,8 @@ impl Perihelion {
         let fill_latency = env.ledger().sequence().saturating_sub(rec.fill_ledger);
         Self::update_solver_reputation(&env, &solver, fill_latency)?;
 
-        env.events().publish(
-            (events::CONFIRMATION_SENT, intent_hash),
-            (solver,),
-        );
+        env.events()
+            .publish((events::confirmation_sent(&env), intent_hash), (solver,));
         Ok(())
     }
 
@@ -963,7 +976,8 @@ impl Perihelion {
         solver.require_auth();
         Self::require_not_paused(&env)?;
 
-        let (key, mut rec) = Self::validate_and_stage_fill(&env, &solver, &intent_hash, fill_amount)?;
+        let (key, mut rec) =
+            Self::validate_and_stage_fill(&env, &solver, &intent_hash, fill_amount)?;
 
         // Idempotency marker written before the outbound dispatch.
         env.storage()
@@ -1121,7 +1135,7 @@ impl Perihelion {
                 );
                 // Emit an observable event for the reward payout. Issue #173.
                 env.events().publish(
-                    (events::KEEPER_REWARD_PAID, intent_hash.clone()),
+                    (events::keeper_reward_paid(&env), intent_hash.clone()),
                     (caller.clone(), keeper_reward),
                 );
             } else {
@@ -1137,7 +1151,7 @@ impl Perihelion {
                 // that funded the LayerZero fee expecting this reward would
                 // otherwise have no signal explaining the missing payout.
                 env.events().publish(
-                    (events::KEEPER_REWARD_SKIPPED, intent_hash.clone()),
+                    (events::keeper_reward_skipped(&env), intent_hash.clone()),
                     (caller.clone(), keeper_reward),
                 );
             }
@@ -1327,8 +1341,9 @@ impl Perihelion {
     }
 
     /// Get the earliest timestamp at which the rolling-window cap can be reset.
-    /// Returns None if not triggered (issue #286).
-    pub fn get_rolling_window_reset_earliest_at(env: Env) -> Option<u64> {
+    /// Returns None if not triggered (issue #286). Named `get_rolling_window_reset_at`
+    /// because Soroban caps contract function names at 32 characters.
+    pub fn get_rolling_window_reset_at(env: Env) -> Option<u64> {
         env.storage()
             .instance()
             .get(&DataKey::RollingWindowResetEarliestAt)
@@ -1496,7 +1511,7 @@ impl Perihelion {
                                     .ok_or(PerihelionError::ArithmeticError)?,
                             );
                             env.events().publish(
-                                (events::ROLLING_WINDOW_CAP_TRIGGERED,),
+                                (events::rolling_window_cap_triggered(env),),
                                 (window_start, accumulated),
                             );
                             return Err(PerihelionError::RollingWindowCapExceeded);
@@ -1602,7 +1617,7 @@ impl Perihelion {
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
 
         env.events().publish(
-            (events::REGISTERED, fi.intent_hash),
+            (events::registered(env), fi.intent_hash),
             (transport_src_eid, fi.deadline),
         );
         Ok(())
@@ -1612,13 +1627,17 @@ impl Perihelion {
         if Self::is_finalized(env, &ci.intent_hash) {
             // Emit cancel_ignored event to record the race: cancel arrived after intent was finalized.
             // This enables auditing and reconciliation to distinguish "never arrived" from "lost race".
-            let observed = if env.storage().persistent().has(&DataKey::Cancelled(ci.intent_hash.clone())) {
+            let observed = if env
+                .storage()
+                .persistent()
+                .has(&DataKey::Cancelled(ci.intent_hash.clone()))
+            {
                 IntentStatus::Cancelled
             } else {
                 IntentStatus::ConfirmationSent
             };
             env.events().publish(
-                (events::CANCEL_IGNORED, ci.intent_hash.clone()),
+                (events::cancel_ignored(env), ci.intent_hash.clone()),
                 (observed as u32,),
             );
             return Ok(());
@@ -1641,14 +1660,14 @@ impl Perihelion {
                     MAX_TTL,
                 );
                 env.events().publish(
-                    (events::CANCELLED_INBOUND, ci.intent_hash.clone()),
+                    (events::cancelled_inbound(env), ci.intent_hash.clone()),
                     (rec.src_eid,),
                 );
             } else {
                 // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
                 // Emit cancel_ignored event to record the race.
                 env.events().publish(
-                    (events::CANCEL_IGNORED, ci.intent_hash.clone()),
+                    (events::cancel_ignored(env), ci.intent_hash.clone()),
                     (rec.status as u32,),
                 );
             }

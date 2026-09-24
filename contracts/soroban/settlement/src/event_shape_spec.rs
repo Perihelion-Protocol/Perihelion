@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: MIT
 
 //! Assertions for the event-shape specification table documented above
-//! `mod events` in `lib.rs` (issue #102). That table calls each event shape
-//! a "VERSIONED INTERFACE" that "must be asserted by tests" — this module
-//! covers the rows where the documented topic name diverges from the actual
-//! `symbol_short!` constant the contract publishes, plus the two
-//! peer-rotation events the table omits entirely. See
-//! `docs/EVENT-SHAPES.md` for the full corrected mapping and the reasoning
-//! behind treating the short symbols (the code) as ground truth here rather
-//! than the table's long-form names.
+//! `mod events` in `lib.rs` (issues #102 and #679). That table calls each
+//! event shape a "VERSIONED INTERFACE" that "must be asserted by tests".
 //!
-//! Each test asserts the *actual* emitted topic tuple shape (symbol +
-//! topic count), not the documentation's name, so a future drift between
-//! the table and the code fails a test instead of only being caught by
-//! someone reading the source.
+//! Every event topic is the event's full snake_case name, exactly as listed
+//! in the table — no abbreviations. Each test here asserts the *actual*
+//! emitted topic (symbol + topic count), so a future rename of a topic, or
+//! drift between the table and the code, fails a test instead of only being
+//! caught by someone reading the source. See `docs/EVENT-SHAPES.md`.
 
 #![cfg(test)]
 
@@ -26,15 +21,18 @@ use soroban_sdk::{
     token, Address, BytesN, Env, Symbol, TryFromVal,
 };
 
-/// Minimal LayerZero endpoint stand-in. Only `send` is exercised by the
-/// entrypoints under test here (`dispatch_confirmation` via
-/// `deliver_intent` + `dispatch_confirmation`); `quote` is not needed since
-/// `lz_fee` is passed directly in these tests.
+/// Minimal LayerZero endpoint stand-in. `quote` and `send` are exercised by
+/// the entrypoints under test here (`dispatch_confirmation` and
+/// `cancel_expired_intent`); both are free so no fee needs to be funded.
 #[contract]
 pub struct EventSpecMockEndpoint;
 
 #[contractimpl]
 impl EventSpecMockEndpoint {
+    pub fn quote(_env: Env, _params: MessagingParams) -> i128 {
+        0
+    }
+
     pub fn send(
         env: Env,
         _params: MessagingParams,
@@ -161,43 +159,43 @@ fn assert_event_shape(env: &Env, expected_topic: &str, expected_topic_count: u32
 // --- Documented as `admin_transfer_started` / `admin_transfer_completed` -----
 
 #[test]
-fn admin_transfer_started_uses_declared_short_symbol() {
+fn admin_transfer_started_topic() {
     let s = setup();
     let new_admin = Address::generate(&s.env);
     s.client.set_admin(&new_admin);
-    assert_event_shape(&s.env, "adm_start", 1);
+    assert_event_shape(&s.env, "admin_transfer_started", 1);
 }
 
 #[test]
-fn admin_transfer_completed_uses_declared_short_symbol() {
+fn admin_transfer_completed_topic() {
     let s = setup();
     let new_admin = Address::generate(&s.env);
     s.client.set_admin(&new_admin);
     s.client.accept_admin();
-    assert_event_shape(&s.env, "adm_complete", 1);
+    assert_event_shape(&s.env, "admin_transfer_completed", 1);
 }
 
 // --- Documented as `native_token_set` -----------------------------------------
 
 #[test]
-fn native_token_set_uses_declared_short_symbol() {
+fn native_token_set_topic() {
     let s = setup();
     let new_native = Address::generate(&s.env);
     s.client.set_native_token(&new_native);
-    assert_event_shape(&s.env, "native_tok", 1);
+    assert_event_shape(&s.env, "native_token_set", 1);
 }
 
 // --- Documented as `keeper_reward_set` / `keeper_reward_paid` ----------------
 
 #[test]
-fn keeper_reward_set_uses_declared_short_symbol() {
+fn keeper_reward_set_topic() {
     let s = setup();
     s.client.set_keeper_reward(&1_000i128);
-    assert_event_shape(&s.env, "reward_set", 1);
+    assert_event_shape(&s.env, "keeper_reward_set", 1);
 }
 
 #[test]
-fn keeper_reward_paid_uses_declared_short_symbol() {
+fn keeper_reward_paid_topic() {
     let s = setup();
     let recipient = Address::generate(&s.env);
     let dest_issuer = Address::generate(&s.env);
@@ -215,13 +213,13 @@ fn keeper_reward_paid_uses_declared_short_symbol() {
     let keeper = Address::generate(&s.env);
     s.client.cancel_expired_intent(&keeper, &h, &0);
 
-    assert_event_shape(&s.env, "reward_pd", 2);
+    assert_event_shape(&s.env, "keeper_reward_paid", 2);
 }
 
 // --- Documented as `confirmation_sent` ----------------------------------------
 
 #[test]
-fn confirmation_sent_uses_declared_short_symbol() {
+fn confirmation_sent_topic() {
     let s = setup();
     let recipient = Address::generate(&s.env);
     let solver = Address::generate(&s.env);
@@ -240,13 +238,13 @@ fn confirmation_sent_uses_declared_short_symbol() {
     let caller = Address::generate(&s.env);
     s.client.dispatch_confirmation(&caller, &h, &0);
 
-    assert_event_shape(&s.env, "confirmed", 2);
+    assert_event_shape(&s.env, "confirmation_sent", 2);
 }
 
 // --- Documented as `cancelled_inbound` / `cancel_ignored` --------------------
 
 #[test]
-fn cancelled_inbound_uses_declared_short_symbol() {
+fn cancelled_inbound_topic() {
     let s = setup();
     let recipient = Address::generate(&s.env);
     let dest_issuer = Address::generate(&s.env);
@@ -257,11 +255,11 @@ fn cancelled_inbound_uses_declared_short_symbol() {
     deliver_fill_instruction(&s, &h, &recipient, &dest_asset, 5_000, 1);
     deliver_cancel(&s, &h, 2);
 
-    assert_event_shape(&s.env, "canl_in", 2);
+    assert_event_shape(&s.env, "cancelled_inbound", 2);
 }
 
 #[test]
-fn cancel_ignored_uses_declared_short_symbol() {
+fn cancel_ignored_topic() {
     let s = setup();
     let recipient = Address::generate(&s.env);
     let solver = Address::generate(&s.env);
@@ -280,24 +278,76 @@ fn cancel_ignored_uses_declared_short_symbol() {
     // Intent is already finalized (Settled) — the inbound cancel is ignored.
     deliver_cancel(&s, &h, 2);
 
-    assert_event_shape(&s.env, "canl_ign", 2);
+    assert_event_shape(&s.env, "cancel_ignored", 2);
 }
 
-// --- Undocumented: peer rotation delayed-flow events -------------------------
+// --- Peer rotation delayed-flow events ---------------------------------------
 
 #[test]
-fn peer_change_proposed_uses_undocumented_short_symbol() {
+fn peer_change_proposed_topic() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0x11; 32]);
     s.client.propose_peer(&s.src_eid, &new_peer);
-    assert_event_shape(&s.env, "peer_prop", 1);
+    assert_event_shape(&s.env, "peer_change_proposed", 1);
 }
 
 #[test]
-fn peer_change_cancelled_uses_undocumented_short_symbol() {
+fn peer_change_cancelled_topic() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0x11; 32]);
     s.client.propose_peer(&s.src_eid, &new_peer);
     s.client.cancel_pending_peer(&s.src_eid);
-    assert_event_shape(&s.env, "peer_cancel", 1);
+    assert_event_shape(&s.env, "peer_change_cancelled", 1);
+}
+
+// --- Issue #679: topics longer than symbol_short!'s 9-character limit --------
+//
+// These four, together with admin_transfer_completed, native_token_set,
+// keeper_reward_set and peer_change_cancelled above, are the eight events
+// whose topics previously failed to compile.
+
+#[test]
+fn initialized_topic() {
+    let s = setup();
+    // `initialize` ran inside `setup`; re-run it on a fresh contract so the
+    // event is the latest invocation's output.
+    let id = s.env.register(Perihelion, ());
+    let client = PerihelionClient::new(&s.env, &id);
+    let admin = Address::generate(&s.env);
+    let endpoint = s.env.register(EventSpecMockEndpoint, ());
+    client.initialize(&admin, &endpoint, &s.native_token);
+    assert_event_shape(&s.env, "initialized", 1);
+}
+
+#[test]
+fn endpoint_set_topic() {
+    let s = setup();
+    let new_endpoint = s.env.register(EventSpecMockEndpoint, ());
+    s.client.propose_endpoint(&new_endpoint);
+    s.env.ledger().with_mut(|li| {
+        li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
+    });
+    s.client.confirm_endpoint();
+    assert_event_shape(&s.env, "endpoint_set", 1);
+}
+
+#[test]
+fn paused_set_topic() {
+    let s = setup();
+    s.client.set_paused(&true);
+    assert_event_shape(&s.env, "paused_set", 1);
+}
+
+#[test]
+fn registered_topic() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let dest_issuer = Address::generate(&s.env);
+    let dest_asset = s
+        .env
+        .register_stellar_asset_contract_v2(dest_issuer)
+        .address();
+    let h = hash(&s.env, 5);
+    deliver_fill_instruction(&s, &h, &recipient, &dest_asset, 5_000, 1);
+    assert_event_shape(&s.env, "registered", 2);
 }

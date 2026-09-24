@@ -4,7 +4,7 @@
 
 extern crate std;
 
-use std::{collections::BTreeMap, fs, path::PathBuf, string::String};
+use std::{collections::BTreeMap, format, fs, path::PathBuf, string::String};
 
 use super::*;
 use serde::Deserialize;
@@ -86,6 +86,9 @@ struct ResourceThreshold {
 
 #[derive(Debug, Deserialize)]
 struct ResourceBaselines {
+    // Deserialized to validate the baseline file; the wasm size itself is
+    // checked by the release build step, not in unit tests.
+    #[allow(dead_code)]
     max_wasm_size_bytes: u64,
     tolerance_percent: u64,
     entrypoints: BTreeMap<String, ResourceThreshold>,
@@ -495,19 +498,28 @@ fn nonce_unbounded_accepts_wide_gap_and_backfill() {
     // Nonce 1 — first message on a fresh channel.
     let h1 = hash(&s.env, 0xB1);
     register_intent(&s, &h1, &recipient, 1, 5_000, 1, None);
-    assert!(s.client.get_intent(&h1).is_some(), "nonce 1 must be accepted");
+    assert!(
+        s.client.get_intent(&h1).is_some(),
+        "nonce 1 must be accepted"
+    );
 
     // Nonce 100 — far ahead of nonce 1 (gap = 99, previously would have
     // advanced the base and thrown away [2, 99]).
     let h100 = hash(&s.env, 0xB2);
     register_intent(&s, &h100, &recipient, 1, 5_000, 100, None);
-    assert!(s.client.get_intent(&h100).is_some(), "nonce 100 must be accepted");
+    assert!(
+        s.client.get_intent(&h100).is_some(),
+        "nonce 100 must be accepted"
+    );
 
     // Nonce 50 — a back-fill that falls between the two already-delivered nonces.
     // This is the nonce the windowed bitmap would have silently dropped.
     let h50 = hash(&s.env, 0xB3);
     register_intent(&s, &h50, &recipient, 1, 5_000, 50, None);
-    assert!(s.client.get_intent(&h50).is_some(), "nonce 50 must be accepted after the gap");
+    assert!(
+        s.client.get_intent(&h50).is_some(),
+        "nonce 50 must be accepted after the gap"
+    );
 
     // Belt-and-suspenders: all three intents registered.
     assert!(s.client.get_intent(&h1).is_some());
@@ -557,11 +569,9 @@ fn nonce_unbounded_replay_returns_stale_nonce() {
         let guid = BytesN::from_array(&s.env, &[0u8; 32]);
         // on_fill_instruction will skip re-registration (idempotent), but
         // accept_nonce must still fire StaleNonce before we get there.
-        let result = s.client.try_lz_receive(
-            &origin,
-            &guid,
-            &LzMessage::FillInstruction(fi),
-        );
+        let result = s
+            .client
+            .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
         assert!(
             result.is_err(),
             "re-delivery of nonce {} must be rejected as StaleNonce",
@@ -590,7 +600,9 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
     let mut seed: u64 = 0xDEAD_BEEF_CAFE_BABEu64;
     for i in (1..nonces.len()).rev() {
         // Knuth / Fisher–Yates with an LCG.
-        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         let j = (seed >> 33) as usize % (i + 1);
         nonces.swap(i, j);
     }
@@ -660,11 +672,7 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
         let result = s
             .client
             .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
-        assert!(
-            result.is_err(),
-            "replay of nonce {} must be rejected",
-            n
-        );
+        assert!(result.is_err(), "replay of nonce {} must be rejected", n);
     }
 }
 
@@ -678,7 +686,7 @@ fn nonce_zero_always_rejected() {
     register_intent(&s, &hash(&s.env, 0xF0), &recipient, 1, 5_000, 0, None);
 }
 
-
+#[test]
 fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
     let s = setup();
     let recipient = Address::generate(&s.env);
@@ -909,7 +917,7 @@ fn peer_governance_get_pending_peer() {
     s.client.propose_peer(&s.src_eid, &new_peer);
     let pending = s.client.try_get_pending_peer(&s.src_eid);
     assert!(pending.is_ok());
-    let (peer, _time) = pending.unwrap().unwrap().unwrap();
+    let (peer, _proposed_at, _ready_at, _expires_at) = pending.unwrap().unwrap().unwrap();
     assert_eq!(peer, new_peer);
 }
 
@@ -1075,7 +1083,10 @@ fn status_filled_after_deliver_without_dispatch() {
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
 
     // Settled marker is set but ConfirmationSent is not.
-    assert!(s.client.is_settled(&h), "Settled marker must be set after deliver_intent");
+    assert!(
+        s.client.is_settled(&h),
+        "Settled marker must be set after deliver_intent"
+    );
     assert_eq!(
         s.client.status(&h),
         Some(IntentStatus::Filled),
@@ -1163,7 +1174,6 @@ fn status_uses_markers_independently_of_record() {
     s.client.dispatch_confirmation(&caller, &hb, &0);
     assert_eq!(s.client.status(&hb), Some(IntentStatus::ConfirmationSent));
 }
-
 
 #[test]
 fn initialized_event_shape() {
@@ -2220,12 +2230,16 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
 
     // Test 1: expired intent
     {
-        let h = hash(&s.env, 1001);
+        let h = hash(&s.env, 201);
         register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
         s.env.ledger().with_mut(|li| li.timestamp = 6_000); // past deadline
 
-        let deliver_err = s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
-        let fill_err = s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &0);
+        let deliver_err = s
+            .client
+            .try_deliver_intent(&solver, &solver_evm, &h, &250_000);
+        let fill_err = s
+            .client
+            .try_fill_intent(&solver, &solver_evm, &h, &250_000, &0);
 
         match (deliver_err, fill_err) {
             (Err(e1), Err(e2)) => {
@@ -2243,11 +2257,15 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
 
     // Test 2: amount below minimum
     {
-        let h = hash(&s.env, 1002);
+        let h = hash(&s.env, 202);
         register_intent(&s, &h, &recipient, 100_000, 5_000, 2, None);
 
-        let deliver_err = s.client.deliver_intent(&solver, &solver_evm, &h, &50_000); // below 100_000
-        let fill_err = s.client.fill_intent(&solver, &solver_evm, &h, &50_000, &0);
+        let deliver_err = s
+            .client
+            .try_deliver_intent(&solver, &solver_evm, &h, &50_000); // below 100_000
+        let fill_err = s
+            .client
+            .try_fill_intent(&solver, &solver_evm, &h, &50_000, &0);
 
         match (deliver_err, fill_err) {
             (Err(e1), Err(e2)) => {
@@ -2263,12 +2281,16 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
 
     // Test 3: already filled
     {
-        let h = hash(&s.env, 1003);
+        let h = hash(&s.env, 203);
         register_intent(&s, &h, &recipient, 100_000, 5_000, 3, None);
         s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
 
-        let deliver_err = s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
-        let fill_err = s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &0);
+        let deliver_err = s
+            .client
+            .try_deliver_intent(&solver, &solver_evm, &h, &250_000);
+        let fill_err = s
+            .client
+            .try_fill_intent(&solver, &solver_evm, &h, &250_000, &0);
 
         match (deliver_err, fill_err) {
             (Err(e1), Err(e2)) => {
@@ -2284,11 +2306,11 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
 
     // Test 4: invalid amount (zero)
     {
-        let h = hash(&s.env, 1004);
+        let h = hash(&s.env, 204);
         register_intent(&s, &h, &recipient, 100_000, 5_000, 4, None);
 
-        let deliver_err = s.client.deliver_intent(&solver, &solver_evm, &h, &0);
-        let fill_err = s.client.fill_intent(&solver, &solver_evm, &h, &0, &0);
+        let deliver_err = s.client.try_deliver_intent(&solver, &solver_evm, &h, &0);
+        let fill_err = s.client.try_fill_intent(&solver, &solver_evm, &h, &0, &0);
 
         match (deliver_err, fill_err) {
             (Err(e1), Err(e2)) => {

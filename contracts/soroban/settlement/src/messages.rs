@@ -27,8 +27,8 @@ use soroban_sdk::{Address, Bytes, BytesN, Env};
 
 use crate::types::{
     CancelInstruction, FillInstruction, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED,
-    CANCEL_REASON_INVALID, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION,
-    FILL_INSTRUCTION_LENGTH, PROTOCOL_VERSION,
+    CANCEL_REASON_INVALID, FILL_INSTRUCTION_LENGTH, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED,
+    MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
 };
 
 /// Build an `Address` from a raw 32-byte contract-id payload.
@@ -252,8 +252,8 @@ fn decode_fill_instruction(
     // Extract recipient (offset 38, 56 bytes): ASCII strkey characters right-zero-padded.
     // Strip trailing zeros and decode as a Stellar strkey (G... or C...).
     let mut recipient_raw = [0u8; 56];
-    for i in 0..56 {
-        recipient_raw[i] = message
+    for (i, byte) in recipient_raw.iter_mut().enumerate() {
+        *byte = message
             .get(38 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
@@ -263,8 +263,8 @@ fn decode_fill_instruction(
     // The field is 69 bytes wide (not 32) so CODE:ISSUER assets survive the wire
     // without truncation — see #270. Strip trailing zeros and decode.
     let mut dest_asset_raw = [0u8; 69];
-    for i in 0..69 {
-        dest_asset_raw[i] = message
+    for (i, byte) in dest_asset_raw.iter_mut().enumerate() {
+        *byte = message
             .get(94 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
@@ -272,8 +272,8 @@ fn decode_fill_instruction(
 
     // Extract min_dest_amount (offset 163, 16 bytes, big-endian)
     let mut min_dest_amount_bytes = [0u8; 16];
-    for i in 0..16 {
-        min_dest_amount_bytes[i] = message
+    for (i, byte) in min_dest_amount_bytes.iter_mut().enumerate() {
+        *byte = message
             .get(163 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
@@ -284,8 +284,8 @@ fn decode_fill_instruction(
 
     // Extract deadline (offset 179, 8 bytes, big-endian)
     let mut deadline_bytes = [0u8; 8];
-    for i in 0..8 {
-        deadline_bytes[i] = message
+    for (i, byte) in deadline_bytes.iter_mut().enumerate() {
+        *byte = message
             .get(179 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
@@ -321,7 +321,11 @@ fn decode_fill_instruction(
 fn decode_strkey_address(env: &Env, padded: &[u8]) -> Result<Address, crate::PerihelionError> {
     use crate::PerihelionError;
     // Find length by trimming trailing zero bytes.
-    let len = padded.iter().rposition(|&b| b != 0).map(|p| p + 1).unwrap_or(0);
+    let len = padded
+        .iter()
+        .rposition(|&b| b != 0)
+        .map(|p| p + 1)
+        .unwrap_or(0);
     if len == 0 {
         return Err(PerihelionError::MalformedPayload);
     }
@@ -374,7 +378,10 @@ pub(crate) fn encode_fill_instruction(env: &Env, fi: &FillInstruction) -> Bytes 
     ));
     b.append(&Bytes::from_array(env, &fi.deadline.to_be_bytes()));
     b.append(&Bytes::from_array(env, &[0u8; 32]));
-    b.append(&Bytes::from_array(env, &fi.reservation_window.to_be_bytes()));
+    b.append(&Bytes::from_array(
+        env,
+        &fi.reservation_window.to_be_bytes(),
+    ));
     b
 }
 
@@ -420,6 +427,7 @@ mod tests {
     use std::string::ToString;
 
     use super::*;
+    use crate::fuzz::decode_hex;
 
     // A known valid G... account strkey (all-zeros account).
     const ZERO_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -482,39 +490,45 @@ mod tests {
         assert!(decode_fill_instruction(&env, &long).is_err());
     }
 
-    /// A well-formed 227-byte FillInstruction with G... recipient and C... dest_asset decodes
-    /// correctly using from_string_bytes (not from_contract_id).
+    /// The shared off-by-one negative vectors (one byte short / one byte long)
+    /// must both be rejected by the decoder.
     #[test]
-    fn test_decode_fill_instruction_strkey_addresses() {
+    fn test_decode_fill_instruction_rejects_neg_length_vectors() {
+        const SHORT: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_short.hex");
+        const LONG: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_long.hex");
+
         let env = Env::default();
 
-        // Build a 227-byte payload manually.
-        let mut msg = Bytes::new(&env);
-
-        let env = Env::default();
-
-        // 218-byte payload (one byte short) — must be rejected.
         let short_bytes = decode_hex(SHORT);
-        assert_eq!(short_bytes.len(), 218, "fill_instruction_short.hex must be 218 bytes");
+        assert_eq!(
+            short_bytes.len() as u32,
+            FILL_INSTRUCTION_LENGTH - 1,
+            "fill_instruction_short.hex must be one byte short"
+        );
         let mut short_msg = Bytes::new(&env);
         for b in short_bytes {
             short_msg.push_back(b);
         }
         assert!(
             decode_fill_instruction(&env, &short_msg).is_err(),
-            "decoder must reject a 218-byte payload (one byte short)"
+            "decoder must reject a payload one byte short"
         );
 
-        // 220-byte payload (one byte long) — must be rejected.
         let long_bytes = decode_hex(LONG);
-        assert_eq!(long_bytes.len(), 220, "fill_instruction_long.hex must be 220 bytes");
+        assert_eq!(
+            long_bytes.len() as u32,
+            FILL_INSTRUCTION_LENGTH + 1,
+            "fill_instruction_long.hex must be one byte long"
+        );
         let mut long_msg = Bytes::new(&env);
         for b in long_bytes {
             long_msg.push_back(b);
         }
         assert!(
             decode_fill_instruction(&env, &long_msg).is_err(),
-            "decoder must reject a 220-byte payload (one byte long)"
+            "decoder must reject a payload one byte long"
         );
     }
 
@@ -526,27 +540,25 @@ mod tests {
     /// encoder or decoder diverges from the documented layout, a test goes red.
     #[test]
     fn test_decode_fill_instruction_strkey_addresses() {
-        // The canonical 219-byte golden vector (see wire-vectors/README.md for
-        // the full field table). Loaded via include_str! so it is baked into the
-        // test binary at compile time and cannot differ between runs.
-        const GOLDEN: &str =
-            include_str!("../../../shared/wire-vectors/fill_instruction.hex");
+        // Loaded via include_str! so it is baked into the test binary at
+        // compile time and cannot differ between runs.
+        const GOLDEN: &str = include_str!("../../../shared/wire-vectors/fill_instruction.hex");
 
         let env = Env::default();
 
         let bytes = decode_hex(GOLDEN);
-        assert_eq!(bytes.len(), 219, "golden fill_instruction.hex must be 219 bytes");
+        assert_eq!(
+            bytes.len() as u32,
+            FILL_INSTRUCTION_LENGTH,
+            "golden fill_instruction.hex must be FILL_INSTRUCTION_LENGTH bytes"
+        );
 
         let mut msg = Bytes::new(&env);
         for b in &bytes {
             msg.push_back(*b);
         }
-        // reservation_window (8 bytes) = zero, no reservation
-        for _ in 0..8u32 {
-            msg.push_back(0x00);
-        }
 
-        assert_eq!(msg.len(), 227);
+        let fi = decode_fill_instruction(&env, &msg).expect("golden vector must decode");
 
         // Values match the canonical table in wire-vectors/README.md.
         assert_eq!(fi.src_eid, 30316);
@@ -563,16 +575,34 @@ mod tests {
         let mut msg = Bytes::new(&env);
         msg.push_back(0x01);
         msg.push_back(0x01);
-        for _ in 0..32u32 { msg.push_back(0xaa); }
-        for byte in [0u8, 0, 0, 1] { msg.push_back(byte); }
-        for byte in ZERO_ACCOUNT.as_bytes() { msg.push_back(*byte); }
-        for byte in ZERO_CONTRACT.as_bytes() { msg.push_back(*byte); }
-        for _ in 0..13u32 { msg.push_back(0); }
+        for _ in 0..32u32 {
+            msg.push_back(0xaa);
+        }
+        for byte in [0u8, 0, 0, 1] {
+            msg.push_back(byte);
+        }
+        for byte in ZERO_ACCOUNT.as_bytes() {
+            msg.push_back(*byte);
+        }
+        for byte in ZERO_CONTRACT.as_bytes() {
+            msg.push_back(*byte);
+        }
+        for _ in 0..13u32 {
+            msg.push_back(0);
+        }
         msg.push_back(0x80);
-        for _ in 1..16u32 { msg.push_back(0); }
-        for _ in 0..8u32 { msg.push_back(0); }
-        for _ in 0..32u32 { msg.push_back(0); }
-        for _ in 0..8u32 { msg.push_back(0); }
+        for _ in 1..16u32 {
+            msg.push_back(0);
+        }
+        for _ in 0..8u32 {
+            msg.push_back(0);
+        }
+        for _ in 0..32u32 {
+            msg.push_back(0);
+        }
+        for _ in 0..8u32 {
+            msg.push_back(0);
+        }
         assert_eq!(msg.len(), 227);
         assert!(decode_fill_instruction(&env, &msg).is_err());
     }
