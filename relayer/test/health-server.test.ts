@@ -21,6 +21,7 @@ import { loadConfig } from "../src/config.js";
 import { Relayer } from "../src/relayer.js";
 import { HealthServer } from "../src/health-server.js";
 import type { Logger, SourceWatcher, DestinationDelivery } from "../src/relayer.js";
+import { validConfigEnv } from "./fixtures.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,19 +29,9 @@ import type { Logger, SourceWatcher, DestinationDelivery } from "../src/relayer.
 
 const silent: Logger = { info() {}, warn() {}, error() {} };
 
-const VALID_ESCROW = "0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA";
-const VALID_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4";
-
 function baseConfig() {
   return loadConfig({
-    PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
-    PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
-    PERIHELION_EVM_RPC_URL: "http://localhost:8545",
-    PERIHELION_STELLAR_RPC_URL: "https://soroban-testnet.stellar.org",
-    PERIHELION_SOURCE_EID: "30101",
-    PERIHELION_STELLAR_EID: "40161",
-    STELLAR_NETWORK: "Test SDF Network ; September 2015",
-    SIGNER_SECRET: "SBZVMB74Z76QB3ZL2YFBN7EWUIXVXSNXKNQRIPZTKMZDDQ3FJBNRHWBU",
+    ...validConfigEnv(),
     PERIHELION_POLL_INTERVAL_MS: "1000",
   });
 }
@@ -238,7 +229,7 @@ test("HealthServer unknown path returns 404", async () => {
   await server.start();
 
   try {
-    const res = await httpGet(port, "/unknown");
+    const res = await httpGet(port, "/nope");
     assert.equal(res.status, 404);
   } finally {
     server.stop();
