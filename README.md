@@ -429,3 +429,8 @@ bodies. The shortest, most efficient path between Stellar and the rest of the
 blockchain universe._
 
 </div>
+
+## Handsoff notes
+
+<!-- handsoff-issue-700 -->
+- #700: evm: `eip712Domain()` reports the live `block.chainid` while `DOMAIN_SEPARATOR` is frozen at deployment
