@@ -47,8 +47,8 @@ async function main(): Promise<void> {
     stellarEid: config.stellarEid,
     confirmations: config.confirmations,
     pollIntervalMs: config.pollIntervalMs,
-    evmRpcUrl: config.evmRpcUrl,
-    stellarRpcUrl: config.stellarRpcUrl,
+    evmRpcOrigin: new URL(config.evmRpcUrl).origin,
+    stellarRpcOrigin: new URL(config.stellarRpcUrl).origin,
     stellarNetwork: config.stellarNetwork,
     signerSecretConfigured: !!config.signerSecret,
   });

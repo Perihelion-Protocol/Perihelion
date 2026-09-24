@@ -131,11 +131,25 @@ test("loadConfig succeeds with valid required fields and applies defaults", () =
   const cfg = loadConfig({
     PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
     PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
+    PERIHELION_EVM_RPC_URL: "https://base.example/v2/test-key",
+    PERIHELION_STELLAR_RPC_URL: "https://soroban.example/rpc-key",
+    PERIHELION_SOURCE_EID: "30101",
+    PERIHELION_STELLAR_EID: "40161",
+    STELLAR_NETWORK: "Test SDF Network ; September 2015",
+    SIGNER_SECRET: "SBZVMB74Z76QB3ZL2YFBN7EWUIXVXSNXKNQRIPZTKMZDDQ3FJBNRHWBU",
   });
   assert.equal(cfg.escrowAddress, VALID_ESCROW);
   assert.equal(cfg.settlementContractId, VALID_CONTRACT);
   assert.equal(cfg.confirmations, 6);
   assert.equal(cfg.pollIntervalMs, 5000);
+});
+
+test("loadConfig does not echo any part of an invalid signer secret", () => {
+  const secret = "SSECRET-MUST-NOT-APPEAR";
+  assert.throws(
+    () => loadConfig({ SIGNER_SECRET: secret }),
+    (error: unknown) => error instanceof Error && !error.message.includes(secret),
+  );
 });
 
 test("loadConfig error message lists all invalid fields together", () => {

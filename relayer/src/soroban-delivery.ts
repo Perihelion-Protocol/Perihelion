@@ -14,7 +14,7 @@ import {
   scValToNative,
   type Account,
 } from "@stellar/stellar-sdk";
-import type { DestinationDelivery } from "./relayer.js";
+import { FatalError, type DestinationDelivery } from "./relayer.js";
 import type { PendingMessage, MessageKey, MessageType } from "./types.js";
 
 /** Configuration for SorobanDestinationDelivery. */
@@ -100,7 +100,11 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
       }
       throw new Error(`Transaction confirmation timeout: ${result.hash}`);
     } catch (err) {
-      throw new Error(`Failed to deliver to Soroban: ${String(err)}`);
+      if (err instanceof FatalError) throw err;
+      if (err instanceof Error && /signer|secret key|network passphrase/i.test(err.message)) {
+        throw new FatalError("Soroban delivery configuration is invalid", err);
+      }
+      throw new Error(`Failed to deliver to Soroban: ${String(err)}`, { cause: err });
     }
   }
 
@@ -145,7 +149,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
       fee: "100",
       networkPassphrase: this.networkPassphrase,
     })
-      .addOperation(contract.call("status", nativeToScVal(intentHash, { type: "bytes" })))
+      .addOperation(contract.call("status", this.intentHashScVal(intentHash)))
       .setTimeout(30)
       .build();
 
@@ -223,7 +227,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     const args = [
       nativeToScVal(srcEid, { type: "u32" }),
       nativeToScVal(dstEid, { type: "u32" }),
-      nativeToScVal(intentHash, { type: "bytes" }),
+      this.intentHashScVal(intentHash),
       nativeToScVal(solver, { type: "string" }),
       nativeToScVal(recipient, { type: "string" }),
       nativeToScVal(destAsset, { type: "string" }),
@@ -236,5 +240,17 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     );
 
     return builder;
+  }
+
+  private intentHashScVal(intentHash: string) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(intentHash)) {
+      throw new FatalError("Invalid intent hash: expected a 32-byte hex value");
+    }
+
+    const bytes = Buffer.from(intentHash.slice(2), "hex");
+    if (bytes.length !== 32) {
+      throw new FatalError("Invalid intent hash: expected exactly 32 bytes");
+    }
+    return nativeToScVal(bytes, { type: "bytes" });
   }
 }

@@ -212,9 +212,10 @@ export class EVMSourceWatcher implements SourceWatcher {
           blocksWithMessages.add(Number(log.blockNumber));
         }
         const pending = this.decodeLockedLog(log);
-        if (pending !== null) {
-          messages.push(pending);
+        if (pending === null) {
+          throw new Error(`Failed to decode Locked event in transaction ${log.transactionHash ?? "unknown"}`);
         }
+        messages.push(pending);
       }
 
       scanHead = toBlock + 1;
@@ -224,21 +225,20 @@ export class EVMSourceWatcher implements SourceWatcher {
     // relayer can detect reorgs deeper than one block.
     const blockHeaders: Array<{ number: number; hash: string; parentHash: string }> = [];
     if (headHash !== undefined && parentHash !== undefined) {
-      for (const blockNum of blocksWithMessages) {
-        try {
-          const block = await this.client.getBlock({ blockNumber: BigInt(blockNum) });
-          if (block.hash && block.parentHash) {
-            blockHeaders.push({
-              number: blockNum,
-              hash: block.hash,
-              parentHash: block.parentHash as string,
-            });
-          }
-        } catch {
-          // If we can't fetch a block's header, skip it; reorg detection
-          // degrades gracefully but continues.
-        }
-      }
+      const headerTasks = [...blocksWithMessages].map((blockNum) => async () => {
+        const block = await this._withTimeout(
+          this.client.getBlock({ blockNumber: BigInt(blockNum) }),
+          this.transactionFetchTimeoutMs,
+        );
+        if (!block.hash || !block.parentHash) return null;
+        return {
+          number: blockNum,
+          hash: block.hash,
+          parentHash: block.parentHash as string,
+        };
+      });
+      const headers = await this._batchConcurrent(headerTasks, this.transactionFetchConcurrency);
+      blockHeaders.push(...headers.filter((header): header is NonNullable<typeof header> => header !== null));
     }
 
     return { messages, head, headHash, parentHash, blockHeaders: blockHeaders.length > 0 ? blockHeaders : undefined };
@@ -248,6 +248,40 @@ export class EVMSourceWatcher implements SourceWatcher {
     if (!(err instanceof Error)) return false;
     const msg = err.message.toLowerCase();
     return msg.includes("range") || msg.includes("too large") || msg.includes("limit");
+  }
+
+  private async _batchConcurrent<T>(
+    tasks: Array<() => Promise<T>>,
+    concurrency: number,
+  ): Promise<T[]> {
+    const results: T[] = new Array(tasks.length);
+    let next = 0;
+
+    const worker = async (): Promise<void> => {
+      while (next < tasks.length) {
+        const index = next++;
+        results[index] = await tasks[index]!();
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()),
+    );
+    return results;
+  }
+
+  private async _withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`RPC request timed out after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   /**

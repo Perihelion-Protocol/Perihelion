@@ -515,6 +515,17 @@ restart). Message delivery resume is **immediate** after restart.
 - Generated in the RPC provider's dashboard
 - Stored in the relayer process's environment (encrypted at rest)
 
+RPC URLs commonly contain the provider credential in their path, for example
+`https://base-mainnet.g.alchemy.com/v2/API_KEY`. Treat the complete URL as a
+secret: do not commit it, include it in startup logs, error messages, metrics,
+traces, or support bundles. The relayer logs only the URL origin, which keeps
+the provider and network visible without exposing the credential.
+
+Use a secret manager or an environment injection mechanism with restricted
+read access. Do not reuse one RPC key across unrelated environments or
+services. Rotate the key immediately after suspected exposure, and verify that
+the old key is disabled by checking provider usage and rate-limit dashboards.
+
 ### 5.2 Rotation
 
 **Planned rotation:** Every 6 months

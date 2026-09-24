@@ -160,7 +160,7 @@ test("EVMSourceWatcher: includes headHash and parentHash from latest block", asy
   assert.equal(parentHash, "0xparenthash");
 });
 
-test("EVMSourceWatcher: skips logs with insufficient topics", async () => {
+test("EVMSourceWatcher: rejects logs with insufficient topics", async () => {
   const log = makeLockedLog();
   (log as unknown as { topics: Hex[] }).topics = [log.topics[0]!]; // only event sig topic
 
@@ -168,11 +168,13 @@ test("EVMSourceWatcher: skips logs with insufficient topics", async () => {
   const watcher = new EVMSourceWatcher(BASE_CONFIG);
   (watcher as unknown as { client: unknown }).client = client;
 
-  const { messages } = await watcher.poll(0);
-  assert.equal(messages.length, 0, "log with insufficient topics skipped");
+  await assert.rejects(
+    () => watcher.poll(0),
+    /Failed to decode Locked event/,
+  );
 });
 
-test("EVMSourceWatcher: skips logs whose event data cannot be decoded", async () => {
+test("EVMSourceWatcher: rejects when a Locked event cannot be decoded", async () => {
   const log = {
     ...makeLockedLog(),
     data: "0xdeadbeef" as Hex, // garbage data
@@ -181,8 +183,39 @@ test("EVMSourceWatcher: skips logs whose event data cannot be decoded", async ()
   const watcher = new EVMSourceWatcher(BASE_CONFIG);
   (watcher as unknown as { client: unknown }).client = client;
 
-  const { messages } = await watcher.poll(0);
-  assert.equal(messages.length, 0, "log with bad data skipped");
+  await assert.rejects(
+    () => watcher.poll(0),
+    /Failed to decode Locked event/,
+  );
+});
+
+test("EVMSourceWatcher: bounds concurrent block-header requests", async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const logs = Array.from({ length: 25 }, (_, index) => ({
+    ...makeLockedLog(),
+    blockNumber: BigInt(index + 1),
+  }));
+  const client = {
+    ...makeMockClient(),
+    getLogs: async () => logs,
+    getBlock: async ({ blockNumber }: { blockNumber: bigint }) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight--;
+      return {
+        hash: `0x${blockNumber.toString(16)}` as Hex,
+        parentHash: "0xparenthash" as Hex,
+      };
+    },
+  };
+  const watcher = new EVMSourceWatcher(BASE_CONFIG);
+  (watcher as unknown as { client: unknown }).client = client;
+
+  await watcher.poll(0);
+
+  assert.ok(maxInFlight <= 10, `expected at most 10 concurrent requests, got ${maxInFlight}`);
 });
 
 test("EVMSourceWatcher: returns empty messages when no logs emitted", async () => {
