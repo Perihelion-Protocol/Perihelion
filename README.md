@@ -440,3 +440,6 @@ blockchain universe._
 
 <!-- handsoff-issue-698 -->
 - #698: evm: `lock` truncates `minDestAmount` from `uint256` to `uint128` without checking, weakening the under-delivery guard
+
+<!-- handsoff-issue-699 -->
+- #699: evm: `lock` truncates `deadline` to `uint64` without checking, which can open the refund window early
