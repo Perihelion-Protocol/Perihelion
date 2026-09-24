@@ -429,3 +429,8 @@ bodies. The shortest, most efficient path between Stellar and the rest of the
 blockchain universe._
 
 </div>
+
+## Handsoff notes
+
+<!-- handsoff-issue-696 -->
+- #696: evm: the rolling-window circuit breaker sets `rollingWindowTriggered` and then reverts, discarding it
