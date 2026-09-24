@@ -434,3 +434,6 @@ blockchain universe._
 
 <!-- handsoff-issue-693 -->
 - #693: relayer: the reorg-rollback test fails, leaving reorg handling unverified
+
+<!-- handsoff-issue-694 -->
+- #694: solver: ten tests fail against the `{records}` mempool envelope, disabling the verification-cache suite
