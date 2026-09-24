@@ -434,3 +434,6 @@ blockchain universe._
 
 <!-- handsoff-issue-704 -->
 - #704: evm: `cancelOwnershipTransfer` reverts with `NotOwner` when there is no pending transfer
+
+<!-- handsoff-issue-705 -->
+- #705: evm: the contract-level event-shape table omits three events that the contract emits
