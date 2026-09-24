@@ -434,3 +434,6 @@ blockchain universe._
 
 <!-- handsoff-issue-700 -->
 - #700: evm: `eip712Domain()` reports the live `block.chainid` while `DOMAIN_SEPARATOR` is frozen at deployment
+
+<!-- handsoff-issue-701 -->
+- #701: evm: no recovery path for native token stranded in the escrow
