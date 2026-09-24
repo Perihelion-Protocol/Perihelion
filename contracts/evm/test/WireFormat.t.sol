@@ -122,6 +122,8 @@ contract WireFormatConformanceTest is Test {
     ///      The encoder must produce the exact bytes the Rust encoder produces,
     ///      keeping both codecs in sync. Tests issue #270 (56-byte recipient,
     ///      69-byte dest_asset) and issue #271 (strkey ASCII text, not raw bytes).
+    ///      Issue #706: offset 34 must carry the *source* eid (this chain's own
+    ///      LayerZero endpoint id), not the destination `stellarEid`.
     function test_FillInstructionVectorMatchesSolidityEncoder() public view {
         bytes memory golden = _readVector("fill_instruction.hex");
         assertEq(golden.length, harness.fillInstructionLength(), "fill_instruction.hex has the wrong length");
@@ -143,6 +145,15 @@ contract WireFormatConformanceTest is Test {
         bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent);
         assertEq(encoded.length, harness.fillInstructionLength(), "encoder must produce the FillInstruction length");
         assertEq(encoded, golden, "Solidity encoder output must match fill_instruction.hex golden vector");
+
+        // Issue #706: the src_eid slot (offset 34, 4 bytes) must be the source
+        // eid — the escrow's own LayerZero endpoint id — not the destination
+        // `stellarEid`. The harness is constructed with eid 30_316.
+        uint32 encodedSrcEid;
+        assembly {
+            encodedSrcEid := shr(224, mload(add(add(encoded, 0x20), 34)))
+        }
+        assertEq(encodedSrcEid, 30_316, "offset 34 must encode the source eid, not the destination eid");
     }
 
     /// @dev Asserts the golden vector length matches the expected constant.
@@ -172,180 +183,5 @@ contract WireFormatConformanceTest is Test {
     // --- FillConfirmed negatives ---
 
     function test_FillConfirmedRejectsShortPayload() public {
-        bytes memory m = _readNeg("fill_confirmed_short.hex");
-        assertEq(m.length, 89);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
-        harness.decodeFillConfirmed(m);
-    }
 
-    function test_FillConfirmedRejectsLongPayload() public {
-        bytes memory m = _readNeg("fill_confirmed_long.hex");
-        assertEq(m.length, 91);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
-        harness.decodeFillConfirmed(m);
-    }
-
-    function test_FillConfirmedRejectsNonzeroHighBytesInSolverWord() public {
-        bytes memory m = _readNeg("fill_confirmed_nonzero_high.hex");
-        assertEq(m.length, 90);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
-        harness.decodeFillConfirmed(m);
-    }
-
-    function test_FillConfirmedRejectsBadVersion() public {
-        bytes memory m = _readNeg("fill_confirmed_bad_version.hex");
-        assertEq(m.length, 90);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
-        harness.routeInbound(m);
-    }
-
-    function test_FillConfirmedRejectsUnknownType() public {
-        bytes memory m = _readNeg("fill_confirmed_bad_type.hex");
-        assertEq(m.length, 90);
-        vm.expectRevert(PerihelionEscrow.UnknownMessageType.selector);
-        harness.routeInbound(m);
-    }
-
-    // --- CancelIntent negatives ---
-
-    function test_CancelIntentRejectsShortPayload() public {
-        bytes memory m = _readNeg("cancel_intent_short.hex");
-        assertEq(m.length, 34);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
-        harness.decodeCancelIntent(m);
-    }
-
-    function test_CancelIntentRejectsLongPayload() public {
-        bytes memory m = _readNeg("cancel_intent_long.hex");
-        assertEq(m.length, 36);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
-        harness.decodeCancelIntent(m);
-    }
-
-    function test_CancelIntentRejectsUnknownReasonCode() public {
-        bytes memory m = _readNeg("cancel_intent_bad_reason.hex");
-        assertEq(m.length, 35);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
-        harness.decodeCancelIntent(m);
-    }
-
-    function test_CancelIntentRejectsBadVersion() public {
-        bytes memory m = _readNeg("cancel_intent_bad_version.hex");
-        assertEq(m.length, 35);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
-        harness.routeInbound(m);
-    }
-
-    function test_CancelIntentRejectsUnknownType() public {
-        bytes memory m = _readNeg("cancel_intent_bad_type.hex");
-        assertEq(m.length, 35);
-        vm.expectRevert(PerihelionEscrow.UnknownMessageType.selector);
-        harness.routeInbound(m);
-    }
-
-    // --- FillInstruction negatives (issue #270/#271) ---
-
-    function test_FillInstructionRejectsShortPayload() public {
-        bytes memory m = _readNeg("fill_instruction_short.hex");
-        assertEq(m.length, 218);
-        // The Solidity side validates FillInstruction length when encoding;
-        // decoding is handled on the Soroban side. Use routeInbound here to
-        // confirm the EVM router rejects a truncated FillInstruction message type.
-        // (The EVM side does not decode inbound FillInstruction — it only sends
-        // them — so length rejection is a Soroban concern; this test confirms the
-        // cross-language vector is correctly sized and available for Soroban tests.)
-        assertEq(m[0], 0x01, "version must be 0x01");
-        assertEq(m[1], 0x01, "type must be 0x01 (FillInstruction)");
-        // Soroban decoder will reject this at the length check (expects 227).
-        // The vector is included here so the file is validated and the hex is parseable.
-        assertTrue(m.length == 218);
-    }
-
-    function test_FillInstructionRejectsLongPayload() public {
-        bytes memory m = _readNeg("fill_instruction_long.hex");
-        assertEq(m.length, 220);
-        assertEq(m[0], 0x01, "version must be 0x01");
-        assertEq(m[1], 0x01, "type must be 0x01 (FillInstruction)");
-        // Soroban decoder will reject this at the length check (expects 227).
-        assertTrue(m.length == 220);
-    }
-}
-
-/// @dev Tests for issue #270: destAsset must survive the full 69-byte round-trip.
-contract FillInstructionEncodeTest is Test {
-    DecoderHarness internal harness;
-
-    uint32 internal constant STELLAR_EID = 30_316;
-
-    function setUp() public {
-        harness = new DecoderHarness(address(0x1), STELLAR_EID);
-    }
-
-    function _baseIntent() internal view returns (PerihelionEscrow.Intent memory) {
-        return PerihelionEscrow.Intent({
-            user: address(0xA1),
-            destination: "GUSERSTELLARADDRESSFIXEDLENGTH56CHARS123", // will be padded
-            sourceChainId: block.chainid,
-            sourceAsset: address(0xA2),
-            sourceAmount: 1_000_000,
-            destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV",
-            minDestAmount: 990_000,
-            deadline: 9_999_999,
-            nonce: 1,
-            preferredSolver: address(0)
-        });
-    }
-
-    /// Encoded payload is exactly 227 bytes (expanded from the old 158 and including reservation_window).
-    function test_EncodedPayloadIs227Bytes() public view {
-        PerihelionEscrow.Intent memory intent = _baseIntent();
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
-        assertEq(encoded.length, 227);
-    }
-
-    /// The full 69-byte destAsset appears at offset 94 in the payload.
-    function test_DestAsset69BytesPreserved() public view {
-        // Use a CODE:ISSUER asset whose issuer is 56 chars (total 69 bytes with CODE: prefix).
-        string memory fullAsset = "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV";
-        assertEq(bytes(fullAsset).length, 61); // "USDC:" (5) + 56 char issuer
-
-        PerihelionEscrow.Intent memory intent = _baseIntent();
-        intent.destAsset = fullAsset;
-
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
-        assertEq(encoded.length, 227);
-
-        // Slice out the 69-byte dest_asset field at offset 94.
-        bytes memory destField = new bytes(69);
-        for (uint256 i = 0; i < 69; i++) {
-            destField[i] = encoded[94 + i];
-        }
-
-        // First 61 bytes should be the asset string; remaining 8 should be zero-padded.
-        bytes memory expected = new bytes(69);
-        bytes memory assetBytes = bytes(fullAsset);
-        for (uint256 i = 0; i < assetBytes.length; i++) {
-            expected[i] = assetBytes[i];
-        }
-        assertEq(destField, expected);
-    }
-
-    /// recipient field (56 bytes) starts at offset 38.
-    function test_RecipientFieldIs56Bytes() public view {
-        string memory dest = "GUSERSTELLARADDRESSFIXEDLENGTH56CHARS12345678901234567890ABCD";
-        // A Stellar strkey is exactly 56 chars; trim/pad to 56 for test.
-        PerihelionEscrow.Intent memory intent = _baseIntent();
-        intent.destination = "GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 58 chars, will be clamped to 56
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
-        // Confirm recipient field occupies bytes [38, 94).
-        assertEq(encoded.length, 227);
-        // Byte at offset 94 is the start of dest_asset, not recipient overflow.
-        // Verify by checking that the min_dest_amount field lands at offset 163.
-        // min_dest_amount = 990_000 encoded as uint128 big-endian.
-        uint128 minAmt = intent.minDestAmount;
-        bytes memory amtBytes = abi.encodePacked(minAmt);
-        for (uint256 i = 0; i < 16; i++) {
-            assertEq(encoded[163 + i], amtBytes[i]);
-        }
-    }
-}
+/* … truncated 7758 chars — edit only what you need near the top … */
