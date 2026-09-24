@@ -440,3 +440,6 @@ blockchain universe._
 
 <!-- handsoff-issue-702 -->
 - #702: evm: `cancelExpired` is `whenNotPaused`, so governance can hold the guaranteed refund path shut indefinitely
+
+<!-- handsoff-issue-703 -->
+- #703: evm: `setPeer` accepts `bytes32(0)`, silently disabling all inbound settlement
