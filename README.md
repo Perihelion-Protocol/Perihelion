@@ -437,3 +437,6 @@ blockchain universe._
 
 <!-- handsoff-issue-705 -->
 - #705: evm: the contract-level event-shape table omits three events that the contract emits
+
+<!-- handsoff-issue-707 -->
+- #707: evm: `_encodeFillInstruction` copies 125 bytes one at a time in unbounded Solidity loops
