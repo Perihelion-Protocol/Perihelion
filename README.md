@@ -437,3 +437,6 @@ blockchain universe._
 
 <!-- handsoff-issue-701 -->
 - #701: evm: no recovery path for native token stranded in the escrow
+
+<!-- handsoff-issue-702 -->
+- #702: evm: `cancelExpired` is `whenNotPaused`, so governance can hold the guaranteed refund path shut indefinitely
