@@ -437,3 +437,6 @@ blockchain universe._
 
 <!-- handsoff-issue-697 -->
 - #697: evm: `resetRollingWindowCap` does not clear the accumulated bucket, so the cap re-trips immediately
+
+<!-- handsoff-issue-698 -->
+- #698: evm: `lock` truncates `minDestAmount` from `uint256` to `uint128` without checking, weakening the under-delivery guard
