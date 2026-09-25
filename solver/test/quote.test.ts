@@ -184,7 +184,17 @@ test("evaluate: implausible profit is rejected by the sanity bound", async () =>
   );
   assert.equal(decision.fill, false);
   assert.equal(decision.terminal, false);
-  assert.match(decision.reason, /implausible profit/);
+  assert.equal(decision.implausibleProfit, true);
+  assert.match(decision.reason, /implausible profit .* exceeds sanity bound/);
+
+  // Configurable bound test
+  const customConfig = { ...config, maxPlausibleProfitBps: 50_000_000 };
+  const allowedDecision = await evaluate(
+    intent({ sourceAmount: "1000000", minDestAmount: "8000000" }), // ~2000 bps profit
+    customConfig,
+    usdcDeps,
+  );
+  assert.equal(allowedDecision.fill, true);
 });
 
 // ─── decimal corridor tests (#87) ────────────────────────────────────────────

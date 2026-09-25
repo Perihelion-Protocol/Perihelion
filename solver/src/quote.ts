@@ -23,7 +23,7 @@
  * that table.
  */
 
-import { isExpired, fromSmallestUnits, toSmallestUnits, MIN_FILL_HEADROOM_SECS } from "@perihelion/sdk";
+import { isExpired, MIN_FILL_HEADROOM_SECS } from "@perihelion/sdk";
 import type { Intent } from "@perihelion/sdk";
 import { zeroAddress, isAddressEqual, type Address } from "viem";
 import type { SolverConfig } from "./config.js";
@@ -63,7 +63,6 @@ export type FeeEstimator = (intent: Intent) => Promise<bigint>;
 const KNOWN_DECIMALS: Record<string, number> = {
   // Stellar (7dp)
   "native": 7,
-  // EVM stablecoins (6dp) — matched by lower-cased address prefix check below
 };
 
 /** Fallback decimal lookup: known table → 7dp for Stellar assets → error. */
@@ -150,6 +149,10 @@ export interface FillDecision {
   readonly terminal: boolean;
   /** Estimated profit in basis points of capital deployed, when computed. */
   readonly profitBps?: number;
+  /** Estimated net profit in dest-asset smallest units (proceeds - minOut - fees). */
+  readonly estimatedProfitSmallestUnits?: bigint;
+  /** Estimated fee cost in dest-asset smallest units. */
+  readonly estimatedFeeSmallestUnits?: bigint;
   /**
    * Set when the skip is caused by the solver lacking the *native* balance to
    * pay a fill leg's fees (source-chain gas + LayerZero, or Stellar XLM).
@@ -158,6 +161,11 @@ export interface FillDecision {
    * should surface it as an alert rather than a routine info log.
    */
   readonly nativeShortfall?: boolean;
+  /**
+   * Set when the skip is caused by profit exceeding the sanity bound (config.maxPlausibleProfitBps).
+   * Indicates pricing or decimals misconfiguration.
+   */
+  readonly implausibleProfit?: boolean;
 }
 
 // ─── native-balance deps ─────────────────────────────────────────────────────
@@ -314,14 +322,15 @@ export async function evaluate(
   // A stablecoin corridor should never yield >10% profit; a figure this large
   // is far more likely to be a decimals/pricing misconfiguration than a real
   // opportunity, so refuse to fill rather than risk a catastrophic mis-quote.
-  const MAX_PLAUSIBLE_PROFIT_BPS = 1000;
-  if (profitBps > MAX_PLAUSIBLE_PROFIT_BPS) {
+  const maxPlausibleBps = config.maxPlausibleProfitBps ?? 1000;
+  if (profitBps > maxPlausibleBps) {
     return {
       fill: false,
       code: "implausible_profit",
-      reason: `implausible profit ${profitBps}bps exceeds sanity bound ${MAX_PLAUSIBLE_PROFIT_BPS}bps — check decimals/pricing config`,
+      reason: `implausible profit ${profitBps}bps exceeds sanity bound ${maxPlausibleBps}bps — check decimals/pricing config`,
       terminal: false,
       profitBps,
+      implausibleProfit: true,
     };
   }
 
@@ -380,5 +389,12 @@ export async function evaluate(
     }
   }
 
-  return { fill: true, reason: "profitable", terminal: false, profitBps };
+  return {
+    fill: true,
+    reason: "profitable",
+    terminal: false,
+    profitBps,
+    estimatedProfitSmallestUnits: profit,
+    estimatedFeeSmallestUnits: fees,
+  };
 }

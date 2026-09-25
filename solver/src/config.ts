@@ -16,6 +16,17 @@ export interface SolverConfig {
   /** Minimum profit, in basis points of source amount, required to fill. */
   readonly minMarginBps: number;
   /**
+   * Maximum plausible profit in basis points (sanity bound). Profits exceeding
+   * this bound trigger an alarm and skip the fill to prevent mis-quotes from
+   * pricing/decimals misconfigurations. Defaults to 1000 bps (10%).
+   */
+  readonly maxPlausibleProfitBps?: number;
+  /**
+   * Maximum consecutive implausible profit triggers before halting the fill loop.
+   * Defaults to 5.
+   */
+  readonly maxImplausibleProfitTriggers?: number;
+  /**
    * Estimated source-chain native cost of one fill, in wei (gas for
    * `PerihelionEscrow.lock` plus its LayerZero message fee). Used as the floor
    * the solver's source-chain native balance is checked against at decision
@@ -130,6 +141,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     );
   }
 
+  const maxPlausibleProfitBps = Number(env.PERIHELION_MAX_PLAUSIBLE_PROFIT_BPS ?? 1000);
+  if (!Number.isInteger(maxPlausibleProfitBps) || maxPlausibleProfitBps < 0) {
+    errors.push(
+      `PERIHELION_MAX_PLAUSIBLE_PROFIT_BPS must be a non-negative integer, got: "${env.PERIHELION_MAX_PLAUSIBLE_PROFIT_BPS}"`,
+    );
+  }
+
+  const maxImplausibleProfitTriggers = Number(env.PERIHELION_MAX_IMPLAUSIBLE_PROFIT_TRIGGERS ?? 5);
+  if (!Number.isInteger(maxImplausibleProfitTriggers) || maxImplausibleProfitTriggers <= 0) {
+    errors.push(
+      `PERIHELION_MAX_IMPLAUSIBLE_PROFIT_TRIGGERS must be a positive integer, got: "${env.PERIHELION_MAX_IMPLAUSIBLE_PROFIT_TRIGGERS}"`,
+    );
+  }
+
   const pollIntervalMs = Number(env.PERIHELION_POLL_INTERVAL_MS ?? 2_000);
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs <= 0) {
     errors.push(
@@ -224,6 +249,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     sourceChainId,
     escrowAddress: escrowAddress as Address,
     minMarginBps,
+    maxPlausibleProfitBps,
+    maxImplausibleProfitTriggers,
     sourceNativeFeeFloor,
     stellarNativeFeeFloor,
     pollIntervalMs,

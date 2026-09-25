@@ -18,10 +18,12 @@ export interface CorridorStats {
   /** Fills that threw an executor error (lost race or revert). */
   fillsLost: number;
   /**
-   * Realized profit = sum of (deliverable − minDestAmount) for every won fill,
+   * Estimated profit = sum of (deliverable − minDestAmount - fees) for every won fill,
    * in dest-asset smallest units.
    */
-  realizedProfitSmallestUnits: bigint;
+  estimatedProfitSmallestUnits: bigint;
+  /** Backward-compatible alias for estimatedProfitSmallestUnits. */
+  readonly realizedProfitSmallestUnits?: bigint;
 }
 
 export interface FillFees {
@@ -46,6 +48,8 @@ export interface MetricsSnapshot {
   readonly stellarFeeStroops: bigint;
   /** Histogram of skip reasons: reason → count. */
   readonly skipReasons: Readonly<Record<string, number>>;
+  /** Dedicated counter for implausible profit sanity bound triggers. */
+  readonly implausibleProfitTriggers: number;
   /** ISO timestamp of the last reset (or process start). */
   readonly since: string;
 }
@@ -53,9 +57,14 @@ export interface MetricsSnapshot {
 /** Interface used by Solver to record events without importing the concrete class. */
 export interface Metrics {
   recordFillAttempt(destAsset: string): void;
-  recordFillWon(destAsset: string, minDestAmount: bigint, marginBps: number): void;
+  recordFillWon(
+    destAsset: string,
+    minDestAmountOrProfit: bigint,
+    marginBpsOrFee?: number | bigint,
+  ): void;
   recordFillLost(destAsset: string, reason: string): void;
   recordSkip(reason: string): void;
+  recordImplausibleProfitTrigger?(): void;
   recordFee(wei: bigint): void;
   recordFees?(fees: FillFees): void;
   snapshot(): MetricsSnapshot;
@@ -68,6 +77,7 @@ export class SolverMetrics implements Metrics {
   private lzFeeWei = 0n;
   private stellarFeeStroops = 0n;
   private readonly skipReasons = new Map<string, number>();
+  private implausibleProfitTriggers = 0;
   private readonly since = new Date().toISOString();
 
   private corridor(asset: string): CorridorStats {
@@ -77,7 +87,10 @@ export class SolverMetrics implements Metrics {
         fillsAttempted: 0,
         fillsWon: 0,
         fillsLost: 0,
-        realizedProfitSmallestUnits: 0n,
+        estimatedProfitSmallestUnits: 0n,
+        get realizedProfitSmallestUnits() {
+          return this.estimatedProfitSmallestUnits;
+        },
       };
       this.corridors.set(asset, s);
     }
@@ -90,15 +103,28 @@ export class SolverMetrics implements Metrics {
 
   /**
    * Record a successful fill.
-   * @param destAsset    The destination asset key.
-   * @param minDestAmount The user's minimum accepted amount (our cost to fill).
-   * @param marginBps    Margin in basis points of minDestAmount — used to back-compute profit.
+   *
+   * Supports two signatures:
+   * 1. (destAsset, estimatedProfitSmallestUnits, feeSmallestUnits?) - exact profit units.
+   * 2. (destAsset, minDestAmount, marginBps) - backward compatibility back-computing against minDestAmount.
    */
-  recordFillWon(destAsset: string, minDestAmount: bigint, marginBps: number): void {
+  recordFillWon(
+    destAsset: string,
+    amountOrProfit: bigint,
+    bpsOrFee?: number | bigint,
+  ): void {
     const c = this.corridor(destAsset);
     c.fillsWon += 1;
-    // profit = minDestAmount * marginBps / 10_000
-    c.realizedProfitSmallestUnits += (minDestAmount * BigInt(marginBps)) / 10_000n;
+    if (typeof bpsOrFee === "number") {
+      // Legacy call: recordFillWon(destAsset, minDestAmount, marginBps)
+      c.estimatedProfitSmallestUnits += (amountOrProfit * BigInt(bpsOrFee)) / 10_000n;
+    } else {
+      // Modern call: recordFillWon(destAsset, profitSmallestUnits, feeSmallestUnits)
+      c.estimatedProfitSmallestUnits += amountOrProfit;
+      if (typeof bpsOrFee === "bigint" && bpsOrFee > 0n) {
+        this.recordFee(bpsOrFee);
+      }
+    }
   }
 
   recordFillLost(destAsset: string, _reason: string): void {
@@ -114,6 +140,10 @@ export class SolverMetrics implements Metrics {
       return;
     }
     this.skipReasons.set(reason, (this.skipReasons.get(reason) ?? 0) + 1);
+  }
+
+  recordImplausibleProfitTrigger(): void {
+    this.implausibleProfitTriggers += 1;
   }
 
   recordFee(wei: bigint): void {
@@ -138,7 +168,13 @@ export class SolverMetrics implements Metrics {
   snapshot(): MetricsSnapshot {
     const corridors: Record<string, CorridorStats> = {};
     for (const [k, v] of this.corridors) {
-      corridors[k] = { ...v };
+      corridors[k] = {
+        fillsAttempted: v.fillsAttempted,
+        fillsWon: v.fillsWon,
+        fillsLost: v.fillsLost,
+        estimatedProfitSmallestUnits: v.estimatedProfitSmallestUnits,
+        realizedProfitSmallestUnits: v.estimatedProfitSmallestUnits,
+      };
     }
     const skipReasons: Record<string, number> = {};
     for (const [k, v] of this.skipReasons) {
@@ -151,6 +187,7 @@ export class SolverMetrics implements Metrics {
       lzFeeWei: this.lzFeeWei,
       stellarFeeStroops: this.stellarFeeStroops,
       skipReasons,
+      implausibleProfitTriggers: this.implausibleProfitTriggers,
       since: this.since,
     };
   }
@@ -194,15 +231,25 @@ export class SolverMetrics implements Metrics {
       lines.push(`solver_fills_lost{asset="${this.escapeLabelValue(asset)}"} ${c.fillsLost}`);
     }
 
-    lines.push("# HELP solver_realized_profit_units Realized profit sum in destination asset smallest units");
+    lines.push("# HELP solver_estimated_profit_units Estimated profit sum (net of fees) in destination asset smallest units");
+    lines.push("# TYPE solver_estimated_profit_units counter");
+    for (const [asset, c] of Object.entries(snap.corridors)) {
+      lines.push(`solver_estimated_profit_units{asset="${this.escapeLabelValue(asset)}"} ${c.estimatedProfitSmallestUnits}`);
+    }
+
+    lines.push("# HELP solver_realized_profit_units Deprecated alias for solver_estimated_profit_units");
     lines.push("# TYPE solver_realized_profit_units counter");
     for (const [asset, c] of Object.entries(snap.corridors)) {
-      lines.push(`solver_realized_profit_units{asset="${this.escapeLabelValue(asset)}"} ${c.realizedProfitSmallestUnits}`);
+      lines.push(`solver_realized_profit_units{asset="${this.escapeLabelValue(asset)}"} ${c.estimatedProfitSmallestUnits}`);
     }
 
     lines.push("# HELP solver_fees_total_wei Total fees paid in wei (deprecated: use leg-specific metrics)");
     lines.push("# TYPE solver_fees_total_wei counter");
     lines.push(`solver_fees_total_wei ${snap.totalFeesWei}`);
+
+    lines.push("# HELP solver_implausible_profit_triggers_total Quotes rejected by the implausible-profit sanity bound");
+    lines.push("# TYPE solver_implausible_profit_triggers_total counter");
+    lines.push(`solver_implausible_profit_triggers_total ${snap.implausibleProfitTriggers}`);
 
     lines.push("# HELP solver_source_gas_wei Total gas spent on source chain transactions in wei");
     lines.push("# TYPE solver_source_gas_wei counter");
