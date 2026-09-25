@@ -1017,6 +1017,11 @@ impl Perihelion {
             .persistent()
             .set(&DataKey::ConfirmationSent(intent_hash.clone()), &true);
 
+        // Update solver reputation (PROPOSED Phase 3) — issue #709: fill_intent must emit
+        // confirmation_sent and update reputation like dispatch_confirmation does.
+        let fill_latency = env.ledger().sequence().saturating_sub(rec.fill_ledger);
+        Self::update_solver_reputation(&env, &solver, fill_latency)?;
+
         // Refresh TTLs touched by this call.
         let bump = Self::ttl_for_deadline(&env, rec.deadline);
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
@@ -1033,8 +1038,15 @@ impl Perihelion {
         env.storage().instance().extend_ttl(17_280, 1_209_600);
 
         env.events().publish(
-            (events::FILLED, intent_hash),
-            (solver, rec.dest_asset, fill_amount, rec.src_eid),
+            (events::FILLED, intent_hash.clone()),
+            (solver.clone(), rec.dest_asset, fill_amount, rec.src_eid),
+        );
+
+        // Emit confirmation_sent event — issue #709: this event is needed for off-chain
+        // reconciliation to know the repayment message has been dispatched.
+        env.events().publish(
+            (events::CONFIRMATION_SENT, intent_hash),
+            (solver,),
         );
         Ok(())
     }
