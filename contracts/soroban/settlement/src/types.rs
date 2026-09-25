@@ -38,6 +38,9 @@ pub enum DataKey {
     /// Timestamp when the current pending peer change was proposed.
     /// Used to enforce the minimum peer-change delay. Issue #165.
     PendingPeerTime(u32),
+    /// Configurable delay (in seconds) for the current pending peer change.
+    /// Validated to be between MIN_PEER_CHANGE_DELAY and MAX_PEER_CHANGE_DELAY. Issue #715.
+    PendingPeerDelay(u32),
     /// Per-corridor pause flag. When set for an eid, all inbound and outbound
     /// operations for that corridor are blocked independently of the global flag.
     /// Allows quarantining a single compromised chain without halting others.
