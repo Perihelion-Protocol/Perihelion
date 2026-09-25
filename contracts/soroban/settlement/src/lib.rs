@@ -1144,9 +1144,9 @@ impl Perihelion {
 
         Self::send_cancel(&env, &caller, &rec, types::CANCEL_REASON_EXPIRED, lz_fee)?;
 
-        // Issue #173: pay keeper reward if configured. The reward is paid from
-        // contract reserves after the cancellation is finalized, so failures to
-        // pay do not roll back the cancellation.
+        // Pay the configured keeper reward after cancellation bookkeeping. Soroban
+        // invocations are atomic: if this transfer fails because the reserve is
+        // underfunded, the cancellation is rolled back too.
         let keeper_reward: i128 = env
             .storage()
             .instance()
