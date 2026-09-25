@@ -452,3 +452,15 @@ blockchain universe._
 
 <!-- handsoff-issue-707 -->
 - #707: evm: `_encodeFillInstruction` copies 125 bytes one at a time in unbounded Solidity loops
+
+<!-- handsoff-issue-700 -->
+- #700: evm: `eip712Domain()` reports the live `block.chainid` while `DOMAIN_SEPARATOR` is frozen at deployment
+
+<!-- handsoff-issue-701 -->
+- #701: evm: no recovery path for native token stranded in the escrow
+
+<!-- handsoff-issue-702 -->
+- #702: evm: `cancelExpired` is `whenNotPaused`, so governance can hold the guaranteed refund path shut indefinitely
+
+<!-- handsoff-issue-703 -->
+- #703: evm: `setPeer` accepts `bytes32(0)`, silently disabling all inbound settlement
