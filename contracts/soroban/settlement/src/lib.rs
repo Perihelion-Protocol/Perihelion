@@ -835,10 +835,7 @@ impl Perihelion {
             return Err(PerihelionError::AlreadyFilled);
         }
         let now = env.ledger().timestamp();
-        if now >= rec.deadline {
-            return Err(PerihelionError::IntentExpired);
-        }
-        if now + MIN_DISPATCH_WINDOW > rec.deadline {
+        if now.saturating_add(MIN_DISPATCH_WINDOW) > rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
