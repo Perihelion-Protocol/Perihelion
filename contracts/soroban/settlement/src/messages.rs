@@ -417,7 +417,6 @@ fn decode_cancel_intent(
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use std::string::ToString;
 
     use super::*;
 
@@ -437,8 +436,11 @@ mod tests {
 
         let addr = decode_strkey_address(&env, &buf).expect("should decode G... strkey");
         // Round-trip: the decoded Address should re-encode to the same strkey.
-        let roundtrip = addr.to_string().to_string();
-        assert_eq!(&roundtrip[..copy_len], &ZERO_ACCOUNT[..copy_len]);
+        // `Address::to_string` already returns a `soroban_sdk::String`, and that
+        // type has no `Index`/`Deref`-to-`str`, so the comparison stays in the
+        // SDK's own string domain instead of converting out of it.
+        let roundtrip = addr.to_string();
+        assert_eq!(roundtrip, soroban_sdk::String::from_str(&env, ZERO_ACCOUNT));
     }
 
     /// decode_strkey_address correctly decodes a C... strkey from a zero-padded buffer.
