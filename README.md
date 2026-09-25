@@ -464,3 +464,6 @@ blockchain universe._
 
 <!-- handsoff-issue-703 -->
 - #703: evm: `setPeer` accepts `bytes32(0)`, silently disabling all inbound settlement
+
+<!-- handsoff-issue-685 -->
+- #685: soroban: two warnings in `lib.rs` will fail the `clippy -D warnings` CI gate once the crate compiles
