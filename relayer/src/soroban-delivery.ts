@@ -17,7 +17,7 @@ import {
   Asset,
   type Account,
 } from "@stellar/stellar-sdk";
-import type { DestinationDelivery } from "./relayer.js";
+import { FatalError, type DestinationDelivery } from "./relayer.js";
 import type { PendingMessage, MessageKey, MessageType } from "./types.js";
 
 /** Configuration for SorobanDestinationDelivery. */
@@ -110,7 +110,11 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
       }
       throw new Error(`Transaction confirmation timeout: ${result.hash}`);
     } catch (err) {
-      throw new Error(`Failed to deliver to Soroban: ${String(err)}`);
+      if (err instanceof FatalError) throw err;
+      if (err instanceof Error && /signer|secret key|network passphrase/i.test(err.message)) {
+        throw new FatalError("Soroban delivery configuration is invalid", err);
+      }
+      throw new Error(`Failed to deliver to Soroban: ${String(err)}`, { cause: err });
     }
   }
 
@@ -155,7 +159,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
       fee: "100",
       networkPassphrase: this.networkPassphrase,
     })
-      .addOperation(contract.call("status", nativeToScVal(intentHash, { type: "bytes" })))
+      .addOperation(contract.call("status", this.intentHashScVal(intentHash)))
       .setTimeout(this.timeoutSeconds)
       .build();
 
@@ -299,8 +303,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     const guidScVal = xdr.ScVal.scvBytes(Buffer.alloc(32));
 
     // 4. Build LzMessage enum: FillInstruction or Cancel
-    const cleanHash = intentHash.startsWith("0x") ? intentHash.slice(2) : intentHash;
-    const hashBytes = Buffer.from(cleanHash.padStart(64, "0"), "hex");
+    const hashScVal = this.intentHashScVal(intentHash);
 
     let messageScVal: xdr.ScVal;
 
@@ -310,7 +313,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
       const cancelScVal = xdr.ScVal.scvMap([
         new xdr.ScMapEntry({
           key: xdr.ScVal.scvSymbol("intent_hash"),
-          val: xdr.ScVal.scvBytes(hashBytes),
+          val: hashScVal,
         }),
         new xdr.ScMapEntry({
           key: xdr.ScVal.scvSymbol("reason"),
@@ -344,7 +347,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
         }),
         new xdr.ScMapEntry({
           key: xdr.ScVal.scvSymbol("intent_hash"),
-          val: xdr.ScVal.scvBytes(hashBytes),
+          val: hashScVal,
         }),
         new xdr.ScMapEntry({
           key: xdr.ScVal.scvSymbol("min_dest_amount"),
@@ -379,6 +382,18 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     );
 
     return builder;
+  }
+
+  private intentHashScVal(intentHash: string) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(intentHash)) {
+      throw new FatalError("Invalid intent hash: expected a 32-byte hex value");
+    }
+
+    const bytes = Buffer.from(intentHash.slice(2), "hex");
+    if (bytes.length !== 32) {
+      throw new FatalError("Invalid intent hash: expected exactly 32 bytes");
+    }
+    return nativeToScVal(bytes, { type: "bytes" });
   }
 }
 

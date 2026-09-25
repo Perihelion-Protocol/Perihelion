@@ -136,7 +136,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     errors.push("SIGNER_SECRET is required");
   } else if (!STELLAR_SECRET_RE.test(signerSecret)) {
     errors.push(
-      `SIGNER_SECRET must be a valid Stellar secret key (S…, 56 chars), got: "${signerSecret.substring(0, 5)}…"`,
+      "SIGNER_SECRET must be a valid Stellar secret key (S…, 56 chars)",
     );
   }
 

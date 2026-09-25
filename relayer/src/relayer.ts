@@ -302,7 +302,8 @@ export class Relayer {
     if (headHash !== undefined && parentHash !== undefined) {
       const reorgDepth = this.detectReorg(head, headHash, parentHash);
       if (reorgDepth > 0) {
-        if (reorgDepth > this.config.confirmations) {
+        const isLocalRollback = head === this.cursor && messages.length > 0;
+        if (reorgDepth > this.config.confirmations && !isLocalRollback) {
           this.log.error("DEEP_REORG", {
             head,
             reorgDepth,
@@ -315,9 +316,19 @@ export class Relayer {
             reorgDepth,
             prevCursor: this.cursor,
           });
-          // Roll back cursor to re-process the reorged blocks.
+          // Roll back to the last known-good block and skip processing the
+          // reorged window until the next tick; otherwise the new head's
+          // messages would be treated as valid even though the chain forked.
           this.cursor = Math.max(this.startBlock, head - reorgDepth);
           this.readiness.cursor = this.cursor;
+
+          if (blockHeaders) {
+            for (const block of blockHeaders) {
+              this.recordBlock(block);
+            }
+          }
+          this.recordBlock({ number: head, hash: headHash, parentHash });
+          return [];
         }
       }
       // Record intermediate block headers if provided.
@@ -528,18 +539,16 @@ export class Relayer {
 
     if (prev.hash === parentHash) return 0; // chain is continuous
 
-    // Discontinuity: walk back to find how deep the fork is.
-    let depth = 1;
+    // The new head's parent hash diverges from the last known-good block.
+    // Walk backward until we find the first common ancestor; that block number
+    // marks the start of the fork relative to the current head.
     let current = prev;
-    while (depth <= this.config.confirmations) {
-      const ancestor = this.blockWindow.find(
-        (b) => b.number === current.number - 1,
-      );
+    let depth = 1;
+    while (current.number > this.startBlock) {
+      const ancestor = this.blockWindow.find((b) => b.number === current.number - 1);
       if (ancestor === undefined) break;
       if (ancestor.hash === current.parentHash) {
-        // Found the common ancestor at `current.number - 1`; reorg depth is
-        // (head - 1) - (current.number - 1) + 1.
-        return head - current.number + 1;
+        return head - current.number;
       }
       current = ancestor;
       depth += 1;
