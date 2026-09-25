@@ -12,10 +12,27 @@ versioned independently.
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Nothing yet — see [CONTRIBUTING.md](./CONTRIBUTING.md#release-process) for
-  what belongs here.
+- **Breaking (Soroban events):** every settlement-contract event topic is now
+  the event's full documented name — e.g. `admin_transfer_started` (was
+  `adm_start`), `confirmation_sent` (was `confirmed`), `cancelled_inbound`
+  (was `canl_in`). Indexers must subscribe to the names in
+  [docs/EVENT-SHAPES.md](./docs/EVENT-SHAPES.md) (#679).
+- **Breaking (Soroban):** `get_rolling_window_reset_earliest_at` is renamed
+  `get_rolling_window_reset_at`; Soroban caps contract function names at 32
+  characters (#678).
+- `@perihelion/relayer` and `@perihelion/solver`: the runnable node moved from
+  `index.ts` to `cli.ts`. Importing either package no longer starts a node,
+  binds a port or calls `process.exit`; the `bin` entries, `npm start` and the
+  Docker image now run `dist/cli.js`, and `sideEffects` lists only the CLI
+  (#579).
+
+### Fixed
+
+- The Soroban settlement crate compiles again: over-long `symbol_short!`
+  event topics and test-only compile errors that had been hidden behind the
+  `messages.rs` parse error are fixed (#678, #679).
 
 ## [0.1.0] - 2026-07-28
 

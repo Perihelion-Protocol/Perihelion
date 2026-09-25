@@ -257,7 +257,7 @@ Set up alerts for:
 
 ### Network exposure
 
-`/metrics` (`solver/src/index.ts`) publishes `SolverMetrics`: fill attempts,
+`/metrics` (`solver/src/cli.ts`) publishes `SolverMetrics`: fill attempts,
 wins, losses, and realised profit in basis points. On a fill-race market,
 handing a competitor your realised margin is directly adversarial (see
 [ECONOMICS.md](./ECONOMICS.md) on the fill race) — it is a materially more

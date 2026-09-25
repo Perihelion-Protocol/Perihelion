@@ -53,7 +53,8 @@ poll mempool ──► validate hash ──► verify signature ──► evalua
 | `config.ts`   | Load operator config from environment                         |
 | `quote.ts`    | Price the destination asset and decide whether to fill        |
 | `solver.ts`   | The poll → evaluate → fill loop                                |
-| `index.ts`    | CLI entry point + graceful shutdown                            |
+| `index.ts`    | Library entry point — re-exports only, no side effects         |
+| `cli.ts`      | CLI entry point (`perihelion-solver`) + graceful shutdown      |
 
 ## Customizing
 

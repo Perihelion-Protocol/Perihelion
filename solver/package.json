@@ -6,9 +6,11 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "perihelion-solver": "./dist/index.js"
+    "perihelion-solver": "./dist/cli.js"
   },
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/cli.js"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -27,8 +29,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts",
+    "start": "node dist/cli.js",
+    "dev": "tsx watch src/cli.ts",
     "test": "node --test --import tsx test/*.test.ts",
     "test:coverage": "c8 --all --src src --include 'src/**' --exclude 'dist/**' --exclude 'test/**' --reporter=lcov --reporter=text --report-dir=coverage node --test --import tsx test/*.test.ts",
     "clean": "rm -rf dist",
