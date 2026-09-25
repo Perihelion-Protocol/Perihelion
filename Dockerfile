@@ -46,4 +46,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "const port = process.env.PACKAGE === 'solver' ? (process.env.PERIHELION_METRICS_PORT || 9090) : (process.env.PERIHELION_HEALTH_PORT || 8080); require('http').get('http://localhost:' + port + '/healthz', (r) => { if (r.statusCode === 200) process.exit(0); process.exit(1); }).on('error', () => process.exit(1));" || exit 1
 
 # Start the relayer or solver with shell expansion and exec to maintain PID 1
-CMD ["sh", "-c", "exec node \"$PACKAGE/dist/index.js\""]
+CMD ["sh", "-c", "exec node \"$PACKAGE/dist/cli.js\""]

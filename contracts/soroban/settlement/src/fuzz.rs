@@ -17,7 +17,7 @@
 
 extern crate std;
 
-use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env};
+use soroban_sdk::{Address, Bytes, BytesN, Env};
 
 use crate::messages::{decode_message, encode_cancel_intent, encode_fill_confirmed};
 use crate::types::{
@@ -215,7 +215,13 @@ fn fill_instruction_matches_golden_vector() {
         crate::types::FILL_INSTRUCTION_LENGTH,
         "golden FillInstruction vector has the wrong length"
     );
-    assert_eq!(encoded.len() as usize, expected.len(), "length mismatch: encoder produced {} bytes, golden vector is {} bytes", encoded.len(), expected.len());
+    assert_eq!(
+        encoded.len() as usize,
+        expected.len(),
+        "length mismatch: encoder produced {} bytes, golden vector is {} bytes",
+        encoded.len(),
+        expected.len()
+    );
     for (i, b) in expected.iter().enumerate() {
         assert_eq!(encoded.get(i as u32).unwrap(), *b, "byte {} mismatch", i);
     }
@@ -224,7 +230,7 @@ fn fill_instruction_matches_golden_vector() {
 /// Minimal `0x`-prefixed hex decoder (mirrors `test.rs::decode_vector`, kept
 /// local here since `fuzz.rs` and `test.rs` are compiled as siblings, not a
 /// shared module).
-fn decode_hex(s: &str) -> std::vec::Vec<u8> {
+pub(crate) fn decode_hex(s: &str) -> std::vec::Vec<u8> {
     let s = s.trim();
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = s.as_bytes();
@@ -278,7 +284,7 @@ fn fill_instruction_recipient_round_trips_with_227_byte_format() {
     payload.push_back(MSG_FILL_INSTRUCTION);
     payload.append(&Bytes::from_array(&env, &[0xAAu8; 32])); // intent_hash
     payload.append(&Bytes::from_array(&env, &30316u32.to_be_bytes())); // src_eid
-    payload.append(&Bytes::from_array(&env, &strkey_bytes));    // recipient (56 bytes, full strkey text)
+    payload.append(&Bytes::from_array(&env, &strkey_bytes)); // recipient (56 bytes, full strkey text)
     payload.append(&Bytes::from_array(&env, &dest_asset_bytes)); // dest_asset (69 bytes)
     payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes()));
     payload.append(&Bytes::from_array(&env, &9_999_999_999u64.to_be_bytes()));
@@ -414,7 +420,11 @@ mod tests {
             include_str!("../../../shared/wire-vectors/neg/fill_instruction_short.hex");
         let env = Env::default();
         let bytes = decode_hex(SHORT);
-        assert_eq!(bytes.len(), 218, "fill_instruction_short.hex must be 218 bytes");
+        assert_eq!(
+            bytes.len(),
+            218,
+            "fill_instruction_short.hex must be 218 bytes"
+        );
         let mut payload = Bytes::new(&env);
         for b in bytes {
             payload.push_back(b);
@@ -468,7 +478,11 @@ mod tests {
             include_str!("../../../shared/wire-vectors/neg/fill_instruction_long.hex");
         let env = Env::default();
         let bytes = decode_hex(LONG);
-        assert_eq!(bytes.len(), 220, "fill_instruction_long.hex must be 220 bytes");
+        assert_eq!(
+            bytes.len(),
+            220,
+            "fill_instruction_long.hex must be 220 bytes"
+        );
         let mut payload = Bytes::new(&env);
         for b in bytes {
             payload.push_back(b);

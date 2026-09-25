@@ -38,7 +38,7 @@ Three extension points to implement for a live deployment:
    decode each log into a `PendingMessage`.
 2. **`DestinationDelivery`** — submit the message to the Soroban settlement
    contract and expose an `isDelivered` view for the replay guard.
-3. **`CheckpointStore`** — persist the cursor durably. `index.ts` ships a
+3. **`CheckpointStore`** — persist the cursor durably. `cli.ts` ships a
    `FileCheckpointStore` (`PERIHELION_CHECKPOINT_FILE`) by default; inject a
    DB-backed implementation for multi-instance or higher-durability setups.
 
@@ -49,7 +49,8 @@ Three extension points to implement for a live deployment:
 | `relayer.ts`                | The watch → confirm → deliver loop                 |
 | `checkpoint.ts`             | `CheckpointStore` interface + no-op default        |
 | `file-checkpoint-store.ts`  | Durable file-backed `CheckpointStore`              |
-| `index.ts`                  | CLI entry point + graceful shutdown                |
+| `index.ts`                  | Library entry point — re-exports only, no side effects |
+| `cli.ts`                    | CLI entry point (`perihelion-relayer`) + graceful shutdown |
 
 ## Cursor durability
 

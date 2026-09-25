@@ -190,7 +190,7 @@ and associated costs. Increasing it delays initial pickup of new messages.
 npm run build --workspace=relayer
 
 # Production
-node relayer/dist/index.js
+node relayer/dist/cli.js
 
 # Development (watch + reload)
 npm run dev --workspace=relayer
@@ -210,7 +210,7 @@ Type=simple
 User=relayer
 WorkingDirectory=/opt/perihelion
 EnvironmentFile=/etc/perihelion/relayer.env
-ExecStart=/usr/local/bin/node relayer/dist/index.js
+ExecStart=/usr/local/bin/node relayer/dist/cli.js
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -227,7 +227,7 @@ FROM node:20-alpine
 WORKDIR /app
 COPY . .
 RUN npm ci && npm run build
-CMD ["node", "relayer/dist/index.js"]
+CMD ["node", "relayer/dist/cli.js"]
 ```
 
 ### 5.2 Expected startup output
@@ -374,7 +374,7 @@ This means:
 sudo systemctl restart perihelion-relayer
 
 # Manual:
-node relayer/dist/index.js
+node relayer/dist/cli.js
 ```
 
 The relayer handles `SIGTERM` and `SIGINT` with a graceful shutdown: the
