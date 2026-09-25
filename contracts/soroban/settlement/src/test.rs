@@ -1258,6 +1258,46 @@ fn paused_set_event_shape() {
     assert_event_with_symbol(&s.env, &events, "paused_set", 1);
 }
 
+/// Assert `max_ttl_set` event: topics = ("max_ttl_set",), data = (old, new),
+/// and that the accepted `[MIN_MAX_TTL, MAX_TTL_CEILING]` range is enforced
+/// (issue #719).
+#[test]
+fn max_ttl_set_event_and_bounds() {
+    let s = setup();
+
+    // Effective clamp before any set is the documented default.
+    assert_eq!(s.client.get_max_ttl(), MAX_TTL_DEFAULT);
+
+    // In-range values are accepted and persisted; the event carries (old, new).
+    let new_ttl = MAX_TTL_DEFAULT + 100_000;
+    s.client.set_max_ttl(&new_ttl);
+    let events = s.env.events().all();
+    // Event: ("max_ttl_set",) -> (old, new)
+    assert_event_with_symbol(&s.env, &events, "max_ttl_set", 2);
+    assert_eq!(s.client.get_max_ttl(), new_ttl);
+
+    // Below the contract's own MAX_TTL extension target.
+    assert_eq!(
+        s.client.try_set_max_ttl(&(MIN_MAX_TTL - 1)),
+        Err(Ok(PerihelionError::InvalidAmount))
+    );
+    // Zero would disable the clamp entirely.
+    assert_eq!(
+        s.client.try_set_max_ttl(&0),
+        Err(Ok(PerihelionError::InvalidAmount))
+    );
+    // Above the protocol's max_entry_ttl ceiling.
+    assert_eq!(
+        s.client.try_set_max_ttl(&(MAX_TTL_CEILING + 1)),
+        Err(Ok(PerihelionError::InvalidAmount))
+    );
+
+    // Both bounds are inclusive.
+    assert!(s.client.try_set_max_ttl(&MIN_MAX_TTL).is_ok());
+    assert!(s.client.try_set_max_ttl(&MAX_TTL_CEILING).is_ok());
+    assert_eq!(s.client.get_max_ttl(), MAX_TTL_CEILING);
+}
+
 /// Assert `admin_transfer_started` event: topics = ("admin_transfer_started",), data = (old, new)
 #[test]
 fn admin_transfer_started_event_shape() {

@@ -338,6 +338,15 @@ fn paused_set_topic() {
     assert_event_shape(&s.env, "paused_set", 1);
 }
 
+// --- Documented as `max_ttl_set` (issue #719) ---------------------------------
+
+#[test]
+fn max_ttl_set_topic() {
+    let s = setup();
+    s.client.set_max_ttl(&(MIN_MAX_TTL + 1));
+    assert_event_shape(&s.env, "max_ttl_set", 1);
+}
+
 #[test]
 fn registered_topic() {
     let s = setup();
