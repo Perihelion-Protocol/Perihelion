@@ -443,3 +443,12 @@ blockchain universe._
 
 <!-- handsoff-issue-699 -->
 - #699: evm: `lock` truncates `deadline` to `uint64` without checking, which can open the refund window early
+
+<!-- handsoff-issue-704 -->
+- #704: evm: `cancelOwnershipTransfer` reverts with `NotOwner` when there is no pending transfer
+
+<!-- handsoff-issue-705 -->
+- #705: evm: the contract-level event-shape table omits three events that the contract emits
+
+<!-- handsoff-issue-707 -->
+- #707: evm: `_encodeFillInstruction` copies 125 bytes one at a time in unbounded Solidity loops
