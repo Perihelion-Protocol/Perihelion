@@ -25,6 +25,7 @@ If FillConfirmed never arrives at the EVM escrow:
 If the Stellar-side settlement also fails:
 
 1. User (or keeper) calls `cancel_expired_intent(caller, hash, lz_fee)` on Soroban.
+   - **Note**: `lz_fee` must be quoted using `quote_cancel_fee(dst_eid)`. Quoting with an empty payload returns a lower bound that will under-fund the dispatch and cause the cancellation to fail.
 2. Stellar settlement sends CancelIntent back to EVM (may race with step 1 above).
 3. Both paths converge on a refunded state via idempotency markers.
 

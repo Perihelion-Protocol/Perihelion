@@ -158,7 +158,7 @@ covers one of them:
    cross-chain message.
 3. **XLM on Stellar** — `deliver_intent` and `dispatch_confirmation` each need a
    funded source account, and `dispatch_confirmation` takes an `lz_fee` the
-   caller supplies.
+   caller supplies. Use `quote_fill_confirmed_fee(dst_eid)` to quote this accurately; passing an empty payload to `quote_lz_fee` returns a lower bound that will revert.
 
 Running out of either native balance *after* a fill is committed is far worse
 than skipping it: the worst ordering is running out of XLM once the EVM `lock`

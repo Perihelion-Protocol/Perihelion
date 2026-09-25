@@ -46,9 +46,24 @@ impl MockEndpoint {
         BytesN::from_array(&env, &[0u8; 32])
     }
 
-    /// Returns 0 so that any non-negative lz_fee passes the pre-check in tests.
-    pub fn quote(_env: Env, _params: MessagingParams) -> i128 {
+    /// Returns 0 by default so that any non-negative lz_fee passes the pre-check in tests.
+    /// If `quote_dyn` flag is set, returns a fee dependent on message length.
+    pub fn quote(env: Env, params: MessagingParams) -> i128 {
+        let is_dynamic: bool = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("quote_dyn"))
+            .unwrap_or(false);
+        if is_dynamic {
+            return params.message.len() as i128;
+        }
         0
+    }
+
+    pub fn set_dynamic_quote(env: Env, is_dynamic: bool) {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("quote_dyn"), &is_dynamic);
     }
 
     pub fn sent(env: Env) -> u32 {
@@ -2302,3 +2317,43 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         }
     }
 }
+
+#[test]
+fn test_quote_lz_fee_empty_vs_correct_size() {
+    let s = Setup::new(true);
+    s.mock.set_dynamic_quote(&true);
+
+    let empty_payload = soroban_sdk::Bytes::new(&s.env);
+    let floor_quote = s.client.quote_lz_fee(&s.src_eid, &empty_payload);
+    
+    let correct_quote = s.client.quote_fill_confirmed_fee(&s.src_eid);
+    
+    // empty quote should be strictly less than correct quote
+    assert!(floor_quote < correct_quote);
+
+    let h = hash(&s.env, 1);
+    s.client.register_intent(
+        &h,
+        &s.asset,
+        &250_000,
+        &200_000,
+        &s.env.ledger().timestamp(),
+        &10,
+        &Address::generate(&s.env),
+    );
+
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &250_000);
+    let solver_evm = BytesN::from_array(&s.env, &[7u8; 32]);
+
+    // Using floor quote should fail
+    let err = s.client
+        .try_fill_intent(&solver, &solver_evm, &h, &250_000, &floor_quote)
+        .expect_err("floor quote should fail")
+        .unwrap();
+    assert_eq!(err, PerihelionError::InsufficientLzFee);
+
+    // Using correct quote should succeed
+    s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &correct_quote);
+}
+

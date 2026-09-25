@@ -1242,9 +1242,10 @@ impl Perihelion {
     /// (token delivery or cancellation) is performed.
     ///
     /// The `message` parameter is a pre-encoded LayerZero payload. Passing a
-    /// zero-length message is valid for a rough worst-case estimate; the actual
-    /// fee depends on the encoded message length, which is fixed per message
-    /// type (FillConfirmed: 90 bytes, CancelIntent: 35 bytes).
+    /// zero-length message yields a floor (the cheapest possible quote) and
+    /// MUST NOT be used for sizing. Instead, quote with a payload of the exact
+    /// length of the message type being dispatched, or use the size-specific
+    /// helpers `quote_fill_confirmed_fee` and `quote_cancel_fee`.
     pub fn quote_lz_fee(
         env: Env,
         dst_eid: u32,
@@ -1262,6 +1263,26 @@ impl Perihelion {
             message,
         };
         Ok(EndpointClient::new(&env, &endpoint).quote(&params))
+    }
+
+    /// Quote the LayerZero native fee required to dispatch a FillConfirmed message
+    /// to `dst_eid` (the source-chain EVM escrow).
+    pub fn quote_fill_confirmed_fee(
+        env: Env,
+        dst_eid: u32,
+    ) -> Result<i128, PerihelionError> {
+        let dummy_message = soroban_sdk::Bytes::from_slice(&env, &[0u8; 90]);
+        Self::quote_lz_fee(env, dst_eid, dummy_message)
+    }
+
+    /// Quote the LayerZero native fee required to dispatch a CancelIntent message
+    /// to `dst_eid` (the source-chain EVM escrow).
+    pub fn quote_cancel_fee(
+        env: Env,
+        dst_eid: u32,
+    ) -> Result<i128, PerihelionError> {
+        let dummy_message = soroban_sdk::Bytes::from_slice(&env, &[0u8; 35]);
+        Self::quote_lz_fee(env, dst_eid, dummy_message)
     }
 
     /// Current trusted endpoint.
