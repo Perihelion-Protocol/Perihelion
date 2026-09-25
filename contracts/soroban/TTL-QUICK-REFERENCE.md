@@ -9,7 +9,7 @@
 | Intent Record | `deadline + 7 days` (max 180 days) | Detailed data, archives after settlement window |
 | Settled Marker | `MAX_TTL` (180 days) | Tiny flag, must outlive record for correctness |
 | Cancelled Marker | `MAX_TTL` (180 days) | Tiny flag, must outlive record for correctness |
-| Nonce Tracking | `MAX_TTL` (180 days) | Critical for replay protection |
+| Nonce Tracking | `MAX_TTL` (180 days), prunable | Critical for replay protection; fully-consumed words below the floor are reclaimed by `prune_nonce_words` (issue #718) |
 
 ### View Functions
 
@@ -166,6 +166,30 @@ async function relayFillConfirmation(event: FillConfirmedEvent) {
 ```
 
 ## For Operators
+
+### Nonce-Word Rent Reclamation (issue #718)
+
+Inbound-nonce bitmap words (`InboundNonceWord(eid, w)`) carry `MAX_TTL` rent.
+`prune_nonce_words(eid)` — **permissionless**, anyone may call it — deletes
+every *fully-consumed* word of a corridor (all 64 nonces delivered) and raises
+the per-eid floor (`get_inbound_nonce_floor(eid)`) past them. Nonces below the
+floor are rejected by the floor check in `accept_nonce`, so deleting their
+words cannot re-open a replay.
+
+Operational runbook:
+
+1. Read the floor: `contract.get_inbound_nonce_floor({ eid })`.
+2. Call `contract.prune_nonce_words({ eid })` periodically (cron / keeper).
+   Work per call is capped (`MAX_PRUNE_WORDS_PER_CALL` = 256 words ≈ 16,384
+   nonces); repeat calls advance further, so schedule more calls after
+   traffic spikes.
+3. Alert on `nonce_words_pruned` events — a *lack* of them while message
+   volume grows means the footprint is creeping (see `docs/MONITORING.md`,
+   Alert M4).
+4. Never prune a corridor that is paused **and** suspected of having
+   unconsumed in-flight nonces — pruning is still *safe* (incomplete words
+   block the floor), but the reclaim opportunity is missed until traffic
+   resumes.
 
 ### Monitoring
 

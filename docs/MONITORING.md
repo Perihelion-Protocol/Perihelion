@@ -253,6 +253,28 @@ These indicate degraded performance or minor anomalies.
   - Log event; may indicate mempool congestion or bad nonce
   - No action; solver will eventually succeed or refund
 
+#### Alert M4: Nonce-Word Rent Growth Stalled (Soroban, issue #718)
+- **Condition:** The contract's inbound-nonce storage footprint grows without
+  being reclaimed. Inbound-nonce bitmap words (`InboundNonceWord(eid, w)`)
+  carry `MAX_TTL` rent until pruned; without reclamation the rent liability of
+  solvers/keepers grows monotonically with lifetime message volume.
+- **Signal:** `nonce_words_pruned(eid, old_floor, new_floor)` events (per
+  corridor) and the `get_inbound_nonce_floor(eid)` view.
+- **Trigger:** Floor growth rate < message-consumption rate / 64 over a
+  rolling window (e.g. 7 days), i.e. words accumulate faster than they are
+  pruned. Also alert if no `nonce_words_pruned` event is seen for > 30 days on
+  an active corridor.
+- **Action:**
+  - Schedule `prune_nonce_words(eid)` invocations — permissionless, any
+    operator account may call it; repeat calls each reclaim up to
+    `MAX_PRUNE_WORDS_PER_CALL` (256 words ≈ 16,384 nonces)
+  - Verify floor advances: `get_inbound_nonce_floor(eid)` increases toward
+    `(latest consumed nonce / 64) * 64`
+  - If the floor stalls at a fixed value while traffic flows, a partially
+    consumed word is blocking it (expected — in-flight stragglers); confirm
+    the blocking word eventually completes and the floor resumes
+  - Track reclaimed-entry count as a cost-saving metric per corridor
+
 ---
 
 ## Part III: Integration with Circuit-Breaker & Pause Controls
