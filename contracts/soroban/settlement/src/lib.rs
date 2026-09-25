@@ -1328,7 +1328,7 @@ impl Perihelion {
 
     /// Get the earliest timestamp at which the rolling-window cap can be reset.
     /// Returns None if not triggered (issue #286).
-    pub fn get_rolling_window_reset_earliest_at(env: Env) -> Option<u64> {
+    pub fn get_rolling_window_reset_at(env: Env) -> Option<u64> {
         env.storage()
             .instance()
             .get(&DataKey::RollingWindowResetEarliestAt)

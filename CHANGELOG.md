@@ -17,6 +17,15 @@ versioned independently.
 - Nothing yet — see [CONTRIBUTING.md](./CONTRIBUTING.md#release-process) for
   what belongs here.
 
+### Changed
+
+- **Breaking (Soroban settlement ABI)**: renamed the contract accessor
+  `get_rolling_window_reset_earliest_at` to `get_rolling_window_reset_at`.
+  The old name was 36 characters, over Soroban's 32-character limit for
+  exported function names, so the contract did not compile. Deployment
+  tooling and monitoring that read the rolling-window reset time must call
+  the new name (#680).
+
 ## [0.1.0] - 2026-07-28
 
 The first snapshot of the protocol after its initial build-out. This entry
