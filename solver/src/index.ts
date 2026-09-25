@@ -36,7 +36,16 @@ async function main(): Promise<void> {
   // binds to loopback by default and supports optional bearer-token auth —
   // widen or open it up only deliberately.
   const metricsPort = Number(process.env.PERIHELION_METRICS_PORT ?? 9090);
-  const metricsHost = process.env.PERIHELION_HEALTH_HOST ?? "127.0.0.1";
+  let metricsHost = process.env.PERIHELION_METRICS_HOST;
+  if (!metricsHost && process.env.PERIHELION_HEALTH_HOST) {
+    log.warn(
+      "PERIHELION_HEALTH_HOST is deprecated for the solver; use PERIHELION_METRICS_HOST instead",
+    );
+    metricsHost = process.env.PERIHELION_HEALTH_HOST;
+  }
+  if (!metricsHost) {
+    metricsHost = "127.0.0.1";
+  }
   const metricsToken = process.env.PERIHELION_METRICS_TOKEN || undefined;
   const isAuthorized = (authHeader: string | undefined): boolean => {
     if (!metricsToken) return true;
@@ -46,10 +55,63 @@ async function main(): Promise<void> {
     const actual = Buffer.from(token);
     return expected.length === actual.length && timingSafeEqual(expected, actual);
   };
+  const stalenessThresholdMs = Number(
+    process.env.PERIHELION_READINESS_STALE_MS ?? config.pollIntervalMs * 3,
+  );
+  const maxConsecutiveFailures = Number(
+    process.env.PERIHELION_MAX_CONSECUTIVE_FAILURES ?? 5,
+  );
+
   const server = createServer((req, res) => {
     if (req.url === "/healthz") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
+    } else if (req.url === "/readyz") {
+      const r = solver.readiness;
+      const now = Date.now();
+      const reasons: string[] = [];
+
+      if (!r.lastTickOk || r.lastTickAt === 0) {
+        reasons.push("no successful tick yet");
+      } else {
+        const age = now - r.lastTickAt;
+        if (age > stalenessThresholdMs) {
+          reasons.push(
+            `last tick was ${age}ms ago (threshold: ${stalenessThresholdMs}ms)`,
+          );
+        }
+      }
+
+      if (r.consecutiveFailures > maxConsecutiveFailures) {
+        reasons.push(
+          `consecutive failures ${r.consecutiveFailures} exceeds threshold ${maxConsecutiveFailures}`,
+        );
+      }
+
+      if (reasons.length > 0) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            status: "not ready",
+            reasons,
+            lastTickAt: r.lastTickAt,
+            consecutiveFailures: r.consecutiveFailures,
+            seenCount: r.seenCount,
+            retryStateCount: r.retryStateCount,
+          }),
+        );
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            status: "ready",
+            lastTickAt: r.lastTickAt,
+            consecutiveFailures: r.consecutiveFailures,
+            seenCount: r.seenCount,
+            retryStateCount: r.retryStateCount,
+          }),
+        );
+      }
     } else if (req.url === "/metrics") {
       if (!isAuthorized(req.headers.authorization)) {
         res.writeHead(401, { "Content-Type": "application/json" });
@@ -59,15 +121,15 @@ async function main(): Promise<void> {
       res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
       res.end(metrics.toPrometheusText());
     } else {
-      res.writeHead(404);
-      res.end();
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
     }
   });
   server.listen(metricsPort, metricsHost, () => {
-    log.info("metrics endpoint listening", {
+    log.info("health and metrics server listening", {
       host: metricsHost,
       port: metricsPort,
-      path: "/metrics",
+      paths: ["/healthz", "/readyz", "/metrics"],
     });
     if (metricsHost !== "127.0.0.1" && metricsHost !== "localhost") {
       log.warn("metrics endpoint bound to a non-loopback address; solver margin data is reachable from the network", {

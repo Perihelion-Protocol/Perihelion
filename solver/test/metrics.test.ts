@@ -61,6 +61,32 @@ test("recordFee accumulates", () => {
   m.recordFee(1_000n);
   m.recordFee(2_000n);
   assert.equal(m.snapshot().totalFeesWei, 3_000n);
+  assert.equal(m.snapshot().sourceGasWei, 3_000n);
+});
+
+test("recordFees tracks source gas, lz fee, and stellar fees separately", () => {
+  const m = new SolverMetrics();
+  m.recordFees({
+    sourceGasWei: 50_000n,
+    lzFeeWei: 12_000n,
+    stellarFeeStroops: 10_000n,
+  });
+  const snap = m.snapshot();
+  assert.equal(snap.sourceGasWei, 50_000n);
+  assert.equal(snap.lzFeeWei, 12_000n);
+  assert.equal(snap.stellarFeeStroops, 10_000n);
+  assert.equal(snap.totalFeesWei, 62_000n);
+
+  const text = m.toPrometheusText();
+  assert.ok(text.includes("# HELP solver_source_gas_wei"));
+  assert.ok(text.includes("# TYPE solver_source_gas_wei counter"));
+  assert.ok(text.includes("solver_source_gas_wei 50000"));
+  assert.ok(text.includes("# HELP solver_lz_fee_wei"));
+  assert.ok(text.includes("# TYPE solver_lz_fee_wei counter"));
+  assert.ok(text.includes("solver_lz_fee_wei 12000"));
+  assert.ok(text.includes("# HELP solver_stellar_fee_stroops"));
+  assert.ok(text.includes("# TYPE solver_stellar_fee_stroops counter"));
+  assert.ok(text.includes("solver_stellar_fee_stroops 10000"));
 });
 
 test("toPrometheusText includes expected metric names", () => {
@@ -86,4 +112,32 @@ test("snapshot is a defensive copy (mutations don't affect later snapshots)", ()
   snap1.corridors[ASSET]!.fillsAttempted = 999;
   const snap2 = m.snapshot();
   assert.equal(snap2.corridors[ASSET]?.fillsAttempted, 1);
+});
+
+test("toPrometheusText includes HELP and TYPE lines for all series", () => {
+  const m = new SolverMetrics();
+  const text = m.toPrometheusText();
+  assert.ok(text.includes("# HELP solver_fills_attempted"));
+  assert.ok(text.includes("# TYPE solver_fills_attempted counter"));
+  assert.ok(text.includes("# HELP solver_fees_total_wei"));
+  assert.ok(text.includes("# TYPE solver_fees_total_wei counter"));
+  assert.ok(text.includes("# HELP solver_skips_total"));
+  assert.ok(text.includes("# TYPE solver_skips_total counter"));
+});
+
+test("toPrometheusText properly escapes quotes, backslashes, and newlines in label values", () => {
+  const m = new SolverMetrics();
+  m.recordSkip('error: "unexpected"\nline 2\\path');
+  const text = m.toPrometheusText();
+  assert.ok(text.includes('reason="error: \\"unexpected\\"\\nline 2\\\\path"'));
+});
+
+test("skipReasons cardinality is bounded", () => {
+  const m = new SolverMetrics();
+  for (let i = 0; i < 150; i++) {
+    m.recordSkip(`reason_${i}`);
+  }
+  const snap = m.snapshot();
+  assert.ok(Object.keys(snap.skipReasons).length <= 101);
+  assert.ok(snap.skipReasons["other"] !== undefined);
 });

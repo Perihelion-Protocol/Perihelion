@@ -18,7 +18,7 @@ import {
 import type { SolverConfig } from "./config.js";
 import { evaluate, type PricingDeps, type NativeCostDeps } from "./quote.js";
 import { BackoffState } from "./backoff.js";
-import type { Metrics } from "./metrics.js";
+import type { Metrics, FillFees } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
 import { InFlightTracker } from "./inventory.js";
 import { SeenLRU } from "./seen-lru.js";
@@ -29,9 +29,9 @@ export interface Executor {
   /**
    * Lock the user's source funds in the EVM escrow against the intent hash and
    * release the destination assets on Stellar once the LayerZero message is
-   * confirmed. Returns the Stellar settlement tx hash.
+   * confirmed. Returns the Stellar settlement tx hash and optional fee breakdown.
    */
-  fill(signed: SignedIntent): Promise<{ settlementTx: string }>;
+  fill(signed: SignedIntent): Promise<{ settlementTx: string; fees?: FillFees }>;
 }
 
 /** Minimal logger interface so callers can inject structured logging. */
@@ -39,6 +39,22 @@ export interface Logger {
   info(msg: string, meta?: Record<string, unknown>): void;
   warn(msg: string, meta?: Record<string, unknown>): void;
   error(msg: string, meta?: Record<string, unknown>): void;
+}
+
+/**
+ * Readiness snapshot for the solver health/readiness server.
+ */
+export interface SolverReadinessState {
+  /** True if the last tick completed without throwing. */
+  lastTickOk: boolean;
+  /** Timestamp (ms since epoch) of the last successful tick, or 0 if none yet. */
+  lastTickAt: number;
+  /** Number of consecutive tick failures. */
+  consecutiveFailures: number;
+  /** Current size of the seen-set cache. */
+  seenCount: number;
+  /** Current size of the retry-state cache. */
+  retryStateCount: number;
 }
 
 /**
@@ -340,6 +356,15 @@ export class Solver {
   /** Resolves an in-progress interruptibleSleep early when stop() is called. */
   private abortSleep: (() => void) | null = null;
 
+  /** Readiness state snapshot for orchestrator checks. */
+  readonly readiness: SolverReadinessState = {
+    lastTickOk: false,
+    lastTickAt: 0,
+    consecutiveFailures: 0,
+    seenCount: 0,
+    retryStateCount: 0,
+  };
+
   constructor(
     private readonly config: SolverConfig,
     private readonly executor: Executor,
@@ -377,6 +402,10 @@ export class Solver {
         this.backoff.recordSuccess();
         this.consecutiveUnrecoverableFailures = 0;
       } catch (err) {
+        this.readiness.lastTickOk = false;
+        this.readiness.consecutiveFailures = this.backoff.consecutiveFailures + 1;
+        this.readiness.seenCount = this.seen.size();
+        this.readiness.retryStateCount = this.retryState.size();
         if (err instanceof FatalError) {
           this.log.error("fatal error, solver stopping", { err: String(err) });
           throw err;
@@ -559,7 +588,7 @@ export class Solver {
       } else {
         this.log.info("skipping intent", { hash, reason: decision.reason });
       }
-      this.metrics?.recordSkip(decision.reason);
+      this.metrics?.recordSkip(decision.code ?? decision.reason);
       // Terminal: this intent will never become fillable (wrong chain,
       // expired, unsupported asset, reserved for another solver, ...).
       // Without this, evaluate() re-derives the same terminal verdict
@@ -578,7 +607,8 @@ export class Solver {
     let fillSucceeded = false;
     let caughtErr: unknown = undefined;
     try {
-      const { settlementTx } = await this.executor.fill(record);
+      const settlement = await this.executor.fill(record);
+      const { settlementTx } = settlement;
       fillSucceeded = true;
       this.log.info("filled", { hash, settlementTx });
       this.metrics?.recordFillWon(
@@ -586,6 +616,13 @@ export class Solver {
         BigInt(intent.minDestAmount),
         decision.profitBps ?? 0,
       );
+      if (settlement.fees) {
+        if (this.metrics?.recordFees) {
+          this.metrics.recordFees(settlement.fees);
+        } else if (settlement.fees.sourceGasWei) {
+          this.metrics?.recordFee(settlement.fees.sourceGasWei);
+        }
+      }
       // Terminal: filled successfully.
       this.seen.add(hash, deadlineMs);
       this.retryState.delete(hash);

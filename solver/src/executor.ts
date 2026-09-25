@@ -127,7 +127,14 @@ export class Executor {
    * Fill an intent: lock source funds and deliver destination assets.
    * Idempotent: checks fill status before attempting retry.
    */
-  async fill(signed: SignedIntent): Promise<{ settlementTx: string }> {
+  async fill(signed: SignedIntent): Promise<{
+    settlementTx: string;
+    fees?: {
+      sourceGasWei: bigint;
+      lzFeeWei: bigint;
+      stellarFeeStroops: bigint;
+    };
+  }> {
     const { hash } = signed;
 
     // Check if already filled (idempotency)
@@ -138,14 +145,26 @@ export class Executor {
     }
 
     // Step 1: Lock on EVM escrow
-    const lockTx = await this.lockOnEvm(signed);
+    const lockResult = await this.lockOnEvm(signed);
+    const lockTx = typeof lockResult === "string" ? lockResult : lockResult.txHash;
+    const sourceGasWei = typeof lockResult === "object" ? lockResult.gasWei : 0n;
+    const lzFeeWei = typeof lockResult === "object" ? lockResult.lzFeeWei : 0n;
     this.logger.info("locked on EVM", { hash, lockTx });
 
     // Step 2: Fill on Soroban (deliver dest asset, dispatch FillConfirmed)
-    const settlementTx = await this.fillOnSoroban(signed, lockTx);
+    const fillResult = await this.fillOnSoroban(signed, lockTx);
+    const settlementTx = typeof fillResult === "string" ? fillResult : (fillResult as { txHash: string }).txHash;
+    const stellarFeeStroops = typeof fillResult === "object" && "feeStroops" in (fillResult as any) ? (fillResult as any).feeStroops : 10000n;
     this.logger.info("filled on Soroban", { hash, settlementTx });
 
-    return { settlementTx };
+    return {
+      settlementTx,
+      fees: {
+        sourceGasWei,
+        lzFeeWei,
+        stellarFeeStroops,
+      },
+    };
   }
 
   /**
@@ -218,7 +237,7 @@ export class Executor {
    * 3. Calls `escrow.lock(intent, signature, value)`.
    * 4. Waits for the receipt and returns the tx hash.
    */
-  private async lockOnEvm(signed: SignedIntent): Promise<Hex> {
+  private async lockOnEvm(signed: SignedIntent): Promise<Hex | { txHash: Hex; gasWei: bigint; lzFeeWei: bigint }> {
     const { intent, signature } = signed;
 
     const account = privateKeyToAccount(this.evmPrivateKey);
@@ -266,9 +285,10 @@ export class Executor {
     });
 
     // Wait for the transaction to be included in a block.
-    await publicClient.waitForTransactionReceipt({ hash: txHash });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    const gasWei = (receipt.gasUsed ?? 0n) * (receipt.effectiveGasPrice ?? 0n);
 
-    return txHash;
+    return { txHash, gasWei, lzFeeWei: nativeFee };
   }
 
   /**

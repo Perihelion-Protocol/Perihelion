@@ -1019,3 +1019,45 @@ test("consider: releases the reservation when a fill fails, freeing capacity for
     "intentB's fill should have been attempted after intentA's reservation was released",
   );
 });
+
+test("fill records fee outlay breakdown when executor returns fees", async () => {
+  const intent = buildTestIntent();
+  const record = buildTestRecord(intent);
+  const inventory: InventoryProvider = { availableBalance: async () => 990000n };
+
+  const mockExecutor: Executor = {
+    fill: async () => ({
+      settlementTx: "0xfilled",
+      fees: {
+        sourceGasWei: 75_000n,
+        lzFeeWei: 25_000n,
+        stellarFeeStroops: 10_000n,
+      },
+    }),
+  };
+
+  const recorded: Array<Parameters<NonNullable<import("../src/metrics.js").Metrics["recordFees"]>>[0]> = [];
+  const metrics: import("../src/metrics.js").Metrics = {
+    recordFillAttempt: () => {},
+    recordFillWon: () => {},
+    recordFillLost: () => {},
+    recordSkip: () => {},
+    recordFee: () => {},
+    recordFees: (fees) => recorded.push(fees),
+    snapshot: () => ({} as any),
+  };
+
+  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => ({ records: [], nextCursor: undefined }) })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, { info: () => {}, warn: () => {}, error: () => {} }, metrics, inventory, async () => true, testPricingDeps);
+  const consider = (solver as unknown as { consider(record: IntentRecord): Promise<void> }).consider.bind(solver);
+
+  await consider(record);
+
+  assert.equal(recorded.length, 1);
+  assert.deepEqual(recorded[0], {
+    sourceGasWei: 75_000n,
+    lzFeeWei: 25_000n,
+    stellarFeeStroops: 10_000n,
+  });
+});
