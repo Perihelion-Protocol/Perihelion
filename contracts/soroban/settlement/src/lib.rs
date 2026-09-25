@@ -167,7 +167,7 @@ pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 /// to complete. Solvers cannot deliver into a window too short for the confirmation
 /// to land before the deadline. Mirrors EVM's MIN_CONFIRMATION_GRACE (issue #293).
 /// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
-pub const MAX_DISPATCH_WINDOW: u64 = 1_800;
+pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
 
 /// Minimum delay for peer changes (issue #165). Brings Soroban peer-management
 /// under comparable delay/governance as the EVM side (PerihelionTimelock.MIN_DELAY).
@@ -838,7 +838,7 @@ impl Perihelion {
         if now >= rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
-        if now + MAX_DISPATCH_WINDOW > rec.deadline {
+        if now + MIN_DISPATCH_WINDOW > rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
