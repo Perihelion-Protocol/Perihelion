@@ -2222,11 +2222,26 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
     // Verify that both fill_intent and deliver_intent share identical validation
     // logic and reject the same invalid inputs with the same error variant.
     // This is a regression test to prevent the two paths from diverging.
+    //
+    // Each case pins the expected variant, so weakening a guard in
+    // validate_and_stage_fill turns the case red instead of letting both
+    // entrypoints drift to the same (wrong) outcome.
     let s = setup();
     let recipient = Address::generate(&s.env);
     let solver = Address::generate(&s.env);
     let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
     s.asset_admin.mint(&solver, &5_000_000);
+
+    let assert_parity = |h: &BytesN<32>, amount: i128, expected: PerihelionError, case: &str| {
+        let deliver = s
+            .client
+            .try_deliver_intent(&solver, &solver_evm, h, &amount);
+        let fill = s
+            .client
+            .try_fill_intent(&solver, &solver_evm, h, &amount, &0);
+        assert_eq!(deliver, Err(Ok(expected)), "{}: deliver_intent", case);
+        assert_eq!(fill, Err(Ok(expected)), "{}: fill_intent", case);
+    };
 
     // Test 1: expired intent
     {
@@ -2234,23 +2249,12 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
         s.env.ledger().with_mut(|li| li.timestamp = 6_000); // past deadline
 
-        let deliver_err = s
-            .client
-            .try_deliver_intent(&solver, &solver_evm, &h, &250_000);
-        let fill_err = s
-            .client
-            .try_fill_intent(&solver, &solver_evm, &h, &250_000, &0);
-
-        match (deliver_err, fill_err) {
-            (Err(e1), Err(e2)) => {
-                assert_eq!(
-                    format!("{:?}", e1),
-                    format!("{:?}", e2),
-                    "expired intent: deliver and fill should reject with same error"
-                );
-            }
-            _ => panic!("both should error on expired intent"),
-        }
+        assert_parity(
+            &h,
+            250_000,
+            PerihelionError::IntentExpired,
+            "expired intent",
+        );
 
         s.env.ledger().with_mut(|li| li.timestamp = 1_000); // reset for next test
     }
@@ -2260,23 +2264,13 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         let h = hash(&s.env, 202);
         register_intent(&s, &h, &recipient, 100_000, 5_000, 2, None);
 
-        let deliver_err = s
-            .client
-            .try_deliver_intent(&solver, &solver_evm, &h, &50_000); // below 100_000
-        let fill_err = s
-            .client
-            .try_fill_intent(&solver, &solver_evm, &h, &50_000, &0);
-
-        match (deliver_err, fill_err) {
-            (Err(e1), Err(e2)) => {
-                assert_eq!(
-                    format!("{:?}", e1),
-                    format!("{:?}", e2),
-                    "insufficient amount: deliver and fill should reject with same error"
-                );
-            }
-            _ => panic!("both should error on insufficient fill amount"),
-        }
+        // below the 100_000 minimum
+        assert_parity(
+            &h,
+            50_000,
+            PerihelionError::InsufficientFillAmount,
+            "insufficient amount",
+        );
     }
 
     // Test 3: already filled
@@ -2285,23 +2279,12 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         register_intent(&s, &h, &recipient, 100_000, 5_000, 3, None);
         s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
 
-        let deliver_err = s
-            .client
-            .try_deliver_intent(&solver, &solver_evm, &h, &250_000);
-        let fill_err = s
-            .client
-            .try_fill_intent(&solver, &solver_evm, &h, &250_000, &0);
-
-        match (deliver_err, fill_err) {
-            (Err(e1), Err(e2)) => {
-                assert_eq!(
-                    format!("{:?}", e1),
-                    format!("{:?}", e2),
-                    "already filled: deliver and fill should reject with same error"
-                );
-            }
-            _ => panic!("both should error on already filled intent"),
-        }
+        assert_parity(
+            &h,
+            250_000,
+            PerihelionError::IntentFinalized,
+            "already filled",
+        );
     }
 
     // Test 4: invalid amount (zero)
@@ -2309,18 +2292,53 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         let h = hash(&s.env, 204);
         register_intent(&s, &h, &recipient, 100_000, 5_000, 4, None);
 
-        let deliver_err = s.client.try_deliver_intent(&solver, &solver_evm, &h, &0);
-        let fill_err = s.client.try_fill_intent(&solver, &solver_evm, &h, &0, &0);
-
-        match (deliver_err, fill_err) {
-            (Err(e1), Err(e2)) => {
-                assert_eq!(
-                    format!("{:?}", e1),
-                    format!("{:?}", e2),
-                    "zero amount: deliver and fill should reject with same error"
-                );
-            }
-            _ => panic!("both should error on zero fill amount"),
-        }
+        assert_parity(&h, 0, PerihelionError::InvalidAmount, "zero amount");
     }
+
+    // Test 5: reserved for another solver
+    {
+        let h = hash(&s.env, 205);
+        let preferred = Address::generate(&s.env);
+        register_intent_with_window(
+            &s,
+            &h,
+            &recipient,
+            100_000,
+            5_000,
+            5,
+            Some(preferred),
+            1_000,
+        );
+
+        assert_parity(
+            &h,
+            250_000,
+            PerihelionError::ReservedForSolver,
+            "reserved for solver",
+        );
+    }
+}
+
+// --- Rolling-window accessors (issue #680) -----------------------------------
+
+#[test]
+fn get_rolling_window_reset_at_reports_latched_reset_time() {
+    let s = setup();
+
+    // Nothing latched before the cap triggers.
+    assert_eq!(s.client.get_rolling_window_reset_at(), None);
+
+    // Seed the latched state the breaker writes when the cap trips. Driving it
+    // through lz_receive is not possible today: the breaker returns `Err`
+    // after writing, so the latch is rolled back with the rest of the call
+    // (tracked separately in #710).
+    let reset_at: u64 = 1_000 + 3_600;
+    s.env.as_contract(&s.client.address, || {
+        let storage = s.env.storage().instance();
+        storage.set(&DataKey::RollingWindowTriggered, &true);
+        storage.set(&DataKey::RollingWindowResetEarliestAt, &reset_at);
+    });
+
+    assert!(s.client.is_rolling_window_cap_triggered());
+    assert_eq!(s.client.get_rolling_window_reset_at(), Some(reset_at));
 }
