@@ -331,6 +331,11 @@ impl Perihelion {
             return Err(PerihelionError::EndpointChangeExpired);
         }
 
+        let admin = Self::require_admin(&env)?;
+        if admin == proposed_endpoint {
+            return Err(PerihelionError::AdminEndpointCollision);
+        }
+
         let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
         env.storage()
             .instance()
@@ -678,7 +683,7 @@ impl Perihelion {
 
     /// Reset the triggered rolling-window cap to allow new intents. Admin-only.
     /// Must be called at or after RollingWindowResetEarliestAt to unblock registration.
-    /// Issue #286: Mirrors the EVM's resetRollingWindowCap behavior.
+    /// Issue #286/#711: Clears the breached window's bucket and re-anchors the window start.
     ///
     /// Emits `rolling_window_cap_reset()` event.
     pub fn reset_rolling_window_cap(env: Env) -> Result<(), PerihelionError> {
@@ -695,12 +700,24 @@ impl Perihelion {
             }
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::RollingWindowTriggered, &false);
-        env.storage()
-            .instance()
-            .remove(&DataKey::RollingWindowResetEarliestAt);
+        let storage = env.storage().instance();
+
+        // Clear the breached window's bucket (issue #711).
+        if let Some(window_start) = storage.get::<DataKey, u64>(&DataKey::LatestWindowStart) {
+            storage.remove(&DataKey::RollingWindowBucket(window_start));
+        }
+
+        // Re-anchor the window start to the current reset time so a fresh window begins.
+        let duration = storage
+            .get::<DataKey, u64>(&DataKey::RollingWindowDuration)
+            .unwrap_or(0);
+        if duration > 0 {
+            let new_window_start = (now / duration) * duration;
+            storage.set(&DataKey::LatestWindowStart, &new_window_start);
+        }
+
+        storage.set(&DataKey::RollingWindowTriggered, &false);
+        storage.remove(&DataKey::RollingWindowResetEarliestAt);
         env.events()
             .publish((events::rolling_window_cap_reset(&env),), ());
         Ok(())
@@ -1015,6 +1032,11 @@ impl Perihelion {
             .persistent()
             .set(&DataKey::ConfirmationSent(intent_hash.clone()), &true);
 
+        // Update solver reputation (PROPOSED Phase 3) — issue #709: fill_intent must emit
+        // confirmation_sent and update reputation like dispatch_confirmation does.
+        let fill_latency = env.ledger().sequence().saturating_sub(rec.fill_ledger);
+        Self::update_solver_reputation(&env, &solver, fill_latency)?;
+
         // Refresh TTLs touched by this call.
         let bump = Self::ttl_for_deadline(&env, rec.deadline);
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
@@ -1031,8 +1053,15 @@ impl Perihelion {
         env.storage().instance().extend_ttl(17_280, 1_209_600);
 
         env.events().publish(
-            (events::FILLED, intent_hash),
-            (solver, rec.dest_asset, fill_amount, rec.src_eid),
+            (events::FILLED, intent_hash.clone()),
+            (solver.clone(), rec.dest_asset, fill_amount, rec.src_eid),
+        );
+
+        // Emit confirmation_sent event — issue #709: this event is needed for off-chain
+        // reconciliation to know the repayment message has been dispatched.
+        env.events().publish(
+            (events::confirmation_sent(&env), intent_hash),
+            (solver,),
         );
         Ok(())
     }
@@ -1472,13 +1501,6 @@ impl Perihelion {
             if duration > 0 {
                 if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap) {
                     if cap > 0 {
-                        // Reject if cap has already been triggered.
-                        if let Some(true) =
-                            storage.get::<DataKey, bool>(&DataKey::RollingWindowTriggered)
-                        {
-                            return Err(PerihelionError::RollingWindowCapTriggered);
-                        }
-
                         // Calculate current window start. Each window spans [windowStart, windowStart + duration).
                         let now = env.ledger().timestamp();
                         let window_start = (now / duration) * duration;
@@ -1495,16 +1517,28 @@ impl Perihelion {
                             }
                         }
 
-                        // Accumulate this intent's amount into the current window.
-                        let accumulated = storage
+                        // Check if the current window's bucket already exceeds the cap.
+                        // If it does, a previous call breached the cap in this window and we latch
+                        // (issue #710: the accumulated value persists even if the breaching call
+                        // returned Err, so the bucket value itself acts as the latch).
+                        let current_accumulated = storage
                             .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
-                            .unwrap_or(0)
+                            .unwrap_or(0);
+                        if current_accumulated > cap {
+                            return Err(PerihelionError::RollingWindowCapTriggered);
+                        }
+
+                        // Accumulate this intent's amount into the current window.
+                        let accumulated = current_accumulated
                             .checked_add(amount)
                             .ok_or(PerihelionError::ArithmeticError)?;
 
+                        // Update the bucket before checking the cap, so the accumulated value
+                        // persists even if the breaching call returns Err (issue #710).
+                        storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
+
                         if accumulated > cap {
                             // Cap exceeded: trigger halt and record the window for diagnostics.
-                            storage.set(&DataKey::RollingWindowTriggered, &true);
                             storage.set(
                                 &DataKey::RollingWindowResetEarliestAt,
                                 &now.checked_add(duration)
@@ -1516,9 +1550,6 @@ impl Perihelion {
                             );
                             return Err(PerihelionError::RollingWindowCapExceeded);
                         }
-
-                        // Update the bucket.
-                        storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
                     }
                 }
             }
