@@ -1,4 +1,5 @@
 import { test } from "node:test";
+// SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
 import { loadConfig } from "../src/config.js";
 import { baseConfig, requiredConfigKeys, validConfig } from "./fixtures.js";

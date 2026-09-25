@@ -2391,3 +2391,295 @@ fn test_quote_lz_fee_empty_vs_correct_size() {
     s.client
         .fill_intent(&solver, &solver_evm, &h, &250_000, &correct_quote);
 }
+
+// --- dispatch_confirmation keeper reward (stalled-dispatch recovery path) -----
+//
+// Acceptance criteria from the issue:
+//  AC1: A keeper calls dispatch_confirmation after the solver fails to do so,
+//       receives the dispatch_keeper_reward, and the intent reaches ConfirmationSent.
+//  AC2: dispatch_keeper_reward view returns the configured value.
+//  AC3: keeper_reward_paid event is emitted with the correct caller + reward.
+//  AC4: When native_token is not configured, reward is skipped (not reverted),
+//       keeper_reward_skipped event is emitted.
+//  AC5: list_undispatched_intents returns only Filled-but-undispatched hashes.
+//  AC6: The intent is NOT recoverable by cancel_expired_intent once Settled —
+//       a keeper must dispatch, not cancel.
+
+/// AC2: dispatch_keeper_reward view returns the configured value; defaults to 0.
+#[test]
+fn dispatch_keeper_reward_view_defaults_to_zero() {
+    let s = setup();
+    assert_eq!(s.client.dispatch_keeper_reward(), 0i128);
+}
+
+#[test]
+fn set_dispatch_keeper_reward_persists_and_emits_event() {
+    let s = setup();
+    let reward = 75_000i128;
+    s.client.set_dispatch_keeper_reward(&reward);
+    assert_eq!(s.client.dispatch_keeper_reward(), reward);
+
+    let events = s.env.events().all();
+    let expected = Symbol::new(&s.env, "dispatch_keeper_reward_set");
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|t| {
+            Symbol::try_from_val(&s.env, &t)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
+    });
+    assert!(found, "dispatch_keeper_reward_set event not emitted");
+}
+
+#[test]
+fn set_dispatch_keeper_reward_rejects_negative() {
+    let s = setup();
+    let err = s
+        .client
+        .try_set_dispatch_keeper_reward(&-1i128)
+        .expect_err("negative reward should fail")
+        .unwrap();
+    assert_eq!(err, PerihelionError::InvalidAmount);
+}
+
+/// AC1 + AC3: Keeper dispatches a stalled confirmation and earns the reward.
+///
+/// Timeline:
+///   1. Solver calls deliver_intent (asset delivered, no confirmation dispatched).
+///   2. Third-party keeper calls dispatch_confirmation, supplying lz_fee.
+///   3. Keeper receives dispatch_keeper_reward from contract balance.
+///   4. Intent reaches ConfirmationSent; FillConfirmed is dispatched (mock sent count = 1).
+#[test]
+fn keeper_dispatches_stalled_confirmation_and_earns_reward() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let keeper = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let native_token = s
+        .client
+        .native_token()
+        .expect("native_token should be configured");
+    let native_admin = token::StellarAssetClient::new(&s.env, &native_token);
+    let native_client = token::TokenClient::new(&s.env, &native_token);
+
+    // Fund the contract with enough XLM to pay the reward.
+    let reward_amount = 80_000i128;
+    native_admin.mint(&s.client.address, &(reward_amount * 10));
+
+    s.client.set_dispatch_keeper_reward(&reward_amount);
+
+    let h = hash(&s.env, 0xE1);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+
+    // Solver delivers but does NOT dispatch.
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+
+    // State: Filled, mock sent 0.
+    assert_eq!(s.client.status(&h), Some(IntentStatus::Filled));
+    assert_eq!(s.mock.sent(), 0, "no confirmation sent yet");
+
+    let keeper_balance_before = native_client.balance(&keeper);
+
+    // Keeper dispatches the stalled confirmation.
+    s.client.dispatch_confirmation(&keeper, &h, &0);
+
+    // Collect events before making additional reads that would reset the log.
+    let events = s.env.events().all();
+
+    // State: ConfirmationSent, mock sent 1.
+    assert_eq!(
+        s.client.status(&h),
+        Some(IntentStatus::ConfirmationSent),
+        "intent must reach ConfirmationSent"
+    );
+    assert_eq!(s.mock.sent(), 1, "FillConfirmed must be dispatched");
+
+    // Keeper received the reward.
+    let keeper_balance_after = native_client.balance(&keeper);
+    assert_eq!(
+        keeper_balance_after,
+        keeper_balance_before + reward_amount,
+        "keeper must receive the dispatch reward"
+    );
+
+    // keeper_reward_paid event must be emitted.
+    let expected_paid = Symbol::new(&s.env, "keeper_reward_paid");
+    let paid_found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|t| {
+            Symbol::try_from_val(&s.env, &t)
+                .map(|sym| sym == expected_paid)
+                .unwrap_or(false)
+        })
+    });
+    assert!(paid_found, "keeper_reward_paid event not emitted");
+
+    // confirmation_sent event must also be emitted.
+    let expected_sent = Symbol::new(&s.env, "confirmation_sent");
+    let sent_found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|t| {
+            Symbol::try_from_val(&s.env, &t)
+                .map(|sym| sym == expected_sent)
+                .unwrap_or(false)
+        })
+    });
+    assert!(sent_found, "confirmation_sent event not emitted");
+}
+
+/// AC3 variant: When dispatch_keeper_reward is 0, no reward is paid and
+/// dispatch still succeeds (zero-reward is the default / opt-out path).
+#[test]
+fn dispatch_confirmation_with_zero_reward_still_succeeds() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let keeper = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    // dispatch_keeper_reward left at default 0.
+    let h = hash(&s.env, 0xE2);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+
+    s.client.dispatch_confirmation(&keeper, &h, &0);
+
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+    assert_eq!(s.mock.sent(), 1);
+}
+
+/// AC4: When dispatch_keeper_reward > 0 but native_token is not configured,
+/// the confirmation is dispatched and keeper_reward_skipped is emitted instead
+/// of reverting (matches cancel_expired_intent behaviour).
+#[test]
+fn dispatch_confirmation_skips_reward_when_native_token_unset() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let keeper = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    // Set a non-zero reward, then wipe the native_token config to simulate
+    // a deployment where the admin forgot to call set_native_token.
+    s.client.set_dispatch_keeper_reward(&50_000i128);
+    s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .remove(&DataKey::NativeToken);
+    });
+
+    let h = hash(&s.env, 0xE3);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+
+    // Should not revert despite missing native_token.
+    s.client.dispatch_confirmation(&keeper, &h, &0);
+    let events = s.env.events().all();
+
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+
+    // keeper_reward_skipped event emitted.
+    let expected = Symbol::new(&s.env, "keeper_reward_skipped");
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|t| {
+            Symbol::try_from_val(&s.env, &t)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
+    });
+    assert!(found, "keeper_reward_skipped event not emitted");
+}
+
+/// AC5: list_undispatched_intents returns only hashes in Filled-but-undispatched state.
+#[test]
+fn list_undispatched_intents_filters_correctly() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &5_000_000);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+
+    // h1: Locked (never filled).
+    let h1 = hash(&s.env, 0xF1);
+    register_intent(&s, &h1, &recipient, 100_000, 9_000, 1, None);
+
+    // h2: Filled via deliver_intent (undispatched) — should appear in output.
+    let h2 = hash(&s.env, 0xF2);
+    register_intent(&s, &h2, &recipient, 100_000, 9_000, 2, None);
+    s.client.deliver_intent(&solver, &solver_evm, &h2, &100_000);
+
+    // h3: Fully confirmed via fill_intent — should NOT appear.
+    let h3 = hash(&s.env, 0xF3);
+    register_intent(&s, &h3, &recipient, 100_000, 9_000, 3, None);
+    s.client.fill_intent(&solver, &solver_evm, &h3, &100_000, &0);
+
+    // h4: Filled via deliver_intent, then dispatched — should NOT appear.
+    let h4 = hash(&s.env, 0xF4);
+    register_intent(&s, &h4, &recipient, 100_000, 9_000, 4, None);
+    s.client.deliver_intent(&solver, &solver_evm, &h4, &100_000);
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h4, &0);
+
+    let mut input = soroban_sdk::Vec::new(&s.env);
+    input.push_back(h1.clone());
+    input.push_back(h2.clone());
+    input.push_back(h3.clone());
+    input.push_back(h4.clone());
+
+    let undispatched = s.client.list_undispatched_intents(&input);
+
+    assert_eq!(undispatched.len(), 1, "only h2 should be undispatched");
+    assert_eq!(undispatched.get(0), Some(h2), "h2 must be the result");
+}
+
+/// AC6: After deliver_intent, cancel_expired_intent refuses to act (AlreadyFilled).
+/// The only recovery path is dispatch_confirmation, not cancellation.
+///
+/// This confirms that once a solver has delivered the asset, the intent is
+/// permanently locked from the cancel path — the keeper-dispatch incentive is
+/// the designed recovery mechanism.
+#[test]
+fn cancel_expired_intent_blocked_after_deliver_intent() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let h = hash(&s.env, 0xE4);
+    // Set a tight deadline so we can advance past it.
+    register_intent(&s, &h, &recipient, 100_000, 3_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+
+    // Deliver asset but do not dispatch confirmation.
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+
+    // Advance time past the deadline.
+    s.env.ledger().with_mut(|li| li.timestamp = 4_000);
+
+    // cancel_expired_intent must be refused.
+    let keeper = Address::generate(&s.env);
+    let err = s
+        .client
+        .try_cancel_expired_intent(&keeper, &h, &0)
+        .expect_err("cancel must fail on a Filled intent")
+        .unwrap();
+    assert_eq!(
+        err,
+        PerihelionError::AlreadyFilled,
+        "must return AlreadyFilled, not let the cancel proceed"
+    );
+
+    // The user still received the asset.
+    let tok = token::TokenClient::new(&s.env, &s.asset);
+    assert_eq!(tok.balance(&recipient), 100_000);
+
+    // The keeper can still dispatch to recover the solver's capital.
+    s.env.ledger().with_mut(|li| li.timestamp = 1_000); // reset to before-deadline for dispatch
+    // (dispatch_confirmation has no deadline restriction — it's the recovery path)
+    s.client.dispatch_confirmation(&keeper, &h, &0);
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+}

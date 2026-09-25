@@ -81,6 +81,7 @@ mod events {
         keeper_reward_set,
         keeper_reward_paid,
         keeper_reward_skipped,
+        dispatch_keeper_reward_set,
         max_intent_amount_set,
         rolling_window_cap_set,
         rolling_window_cap_triggered,
@@ -125,6 +126,7 @@ mod events {
 // | `keeper_reward_set`            | ("keeper_reward_set",)                 | (reward: i128)
 // | `keeper_reward_paid`           | ("keeper_reward_paid", intent_hash)    | (caller: Address, reward: i128)
 // | `keeper_reward_skipped`        | ("keeper_reward_skipped", intent_hash) | (caller: Address, reward: i128)
+// | `dispatch_keeper_reward_set`   | ("dispatch_keeper_reward_set",)        | (reward: i128)
 // | `max_intent_amount_set`        | ("max_intent_amount_set",)             | (max_amount: i128)
 // | `rolling_window_cap_set`       | ("rolling_window_cap_set",)            | (duration: u64, cap: i128)
 // | `rolling_window_cap_triggered` | ("rolling_window_cap_triggered",)      | (window_start: u64, accumulated: i128)
@@ -231,6 +233,9 @@ impl Perihelion {
         // Issue #173: initialize keeper reward to 0. Admin must call set_keeper_reward
         // to enable keeper incentives for cancel_expired_intent.
         storage.set(&DataKey::KeeperReward, &0i128);
+        // Initialize dispatch keeper reward to 0. Admin must call set_dispatch_keeper_reward
+        // to enable keeper incentives for dispatch_confirmation.
+        storage.set(&DataKey::DispatchKeeperReward, &0i128);
         storage.extend_ttl(17_280, 1_209_600);
 
         // Issue #16/#18: emit an event so deployment tooling and off-chain
@@ -632,6 +637,35 @@ impl Perihelion {
         Ok(())
     }
 
+    /// Set the keeper reward for `dispatch_confirmation`. Admin-only.
+    ///
+    /// When non-zero, any caller of `dispatch_confirmation` (the permissionless
+    /// third-party dispatch path) receives this amount of stroops from the
+    /// contract's native-token balance after the FillConfirmed message is
+    /// dispatched. This incentivises keepers to push stalled confirmations
+    /// through so the source-chain escrow is notified and the solver's capital
+    /// is recovered, without requiring the solver itself to remain funded after
+    /// it has already paid out on Stellar.
+    ///
+    /// Independent of `KeeperReward` (which covers `cancel_expired_intent`) so
+    /// each incentive can be tuned to the cost of the corresponding LayerZero
+    /// message. Setting to 0 disables the incentive (default). Paid from the
+    /// same contract native-token reserve funded by admin pre-deposit.
+    ///
+    /// Emits `dispatch_keeper_reward_set(new_reward)` event.
+    pub fn set_dispatch_keeper_reward(env: Env, reward: i128) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        if reward < 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DispatchKeeperReward, &reward);
+        env.events()
+            .publish((events::dispatch_keeper_reward_set(&env),), (reward,));
+        Ok(())
+    }
+
     /// Set the per-intent maximum amount (value cap). Admin-only.
     /// Rejects any intent with min_dest_amount > max_amount. Set to 0 to disable.
     /// Issue #286: This cap is applied to the destination asset amount on Stellar
@@ -973,6 +1007,40 @@ impl Perihelion {
         let fill_latency = env.ledger().sequence().saturating_sub(rec.fill_ledger);
         Self::update_solver_reputation(&env, &solver, fill_latency)?;
 
+        // Pay the dispatch keeper reward to the caller.  This mirrors the
+        // cancel_expired_intent keeper reward (issue #173): it compensates any
+        // third-party keeper who covered the LayerZero fee to push a stalled
+        // FillConfirmed through, making the permissionless dispatch path
+        // economically self-sustaining rather than relying on altruism.
+        // The reward is paid after the dispatch is finalized so a failure here
+        // does not roll back the confirmation.
+        let dispatch_reward: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DispatchKeeperReward)
+            .unwrap_or(0);
+        if dispatch_reward > 0 {
+            if let Some(native_token) = env.storage().instance().get(&DataKey::NativeToken) {
+                token::TokenClient::new(&env, &native_token).transfer(
+                    &env.current_contract_address(),
+                    &caller,
+                    &dispatch_reward,
+                );
+                env.events().publish(
+                    (events::keeper_reward_paid(&env), intent_hash.clone()),
+                    (caller.clone(), dispatch_reward),
+                );
+            } else {
+                // native_token not yet configured: skip the reward and emit a
+                // skipped event so the gap is observable off-chain, matching
+                // the cancel_expired_intent behaviour.
+                env.events().publish(
+                    (events::keeper_reward_skipped(&env), intent_hash.clone()),
+                    (caller.clone(), dispatch_reward),
+                );
+            }
+        }
+
         env.events()
             .publish((events::confirmation_sent(&env), intent_hash), (solver,));
         Ok(())
@@ -1275,6 +1343,44 @@ impl Perihelion {
             .map(|r| r.status)
     }
 
+    /// Batch view: return the subset of `intent_hashes` that are currently in
+    /// `Filled` status — i.e. `deliver_intent` has been called but
+    /// `dispatch_confirmation` has not yet been called.
+    ///
+    /// This is the **first-class monitoring query for the filled-but-undispatched
+    /// risk** described in the solver runbook. Operators and keepers call this
+    /// periodically (or on every new confirmed fill event) to discover intents
+    /// that need a keeper dispatch, then call `dispatch_confirmation` for each.
+    ///
+    /// # Why a batch view rather than on-chain iteration
+    /// Soroban persistent storage is not enumerable by key prefix, so the
+    /// contract cannot return *all* undispatched intents without an external
+    /// index. Instead, this view accepts the list of hashes the caller already
+    /// knows about (from the mempool event stream or a local database) and
+    /// filters it down to those needing dispatch. This keeps the contract simple
+    /// and resource-bounded while giving operators exactly the tool they need.
+    ///
+    /// # Input limit
+    /// The `intent_hashes` vector is processed in-contract; very large inputs
+    /// will exhaust the instruction budget. Callers should batch in chunks of
+    /// at most 50 hashes per invocation.
+    pub fn list_undispatched_intents(
+        env: Env,
+        intent_hashes: soroban_sdk::Vec<BytesN<32>>,
+    ) -> soroban_sdk::Vec<BytesN<32>> {
+        let p = env.storage().persistent();
+        let mut out = soroban_sdk::Vec::new(&env);
+        for h in intent_hashes.iter() {
+            // Filled = Settled marker present AND ConfirmationSent marker absent.
+            if p.has(&DataKey::Settled(h.clone()))
+                && !p.has(&DataKey::ConfirmationSent(h.clone()))
+            {
+                out.push_back(h);
+            }
+        }
+        out
+    }
+
     /// Quote the LayerZero native fee required to dispatch an outbound message
     /// to `dst_eid` (the source-chain EVM escrow). Solvers and keepers MUST
     /// call this before `fill_intent` / `cancel_expired_intent` and pass the
@@ -1355,6 +1461,18 @@ impl Perihelion {
         env.storage()
             .instance()
             .get(&DataKey::KeeperReward)
+            .unwrap_or(0)
+    }
+
+    /// Current dispatch keeper reward in stroops, paid to callers of `dispatch_confirmation`.
+    /// Zero means the dispatch incentive is disabled (default); set via
+    /// `set_dispatch_keeper_reward`. A non-zero value incentivises third-party
+    /// keepers to push stalled FillConfirmed messages through, recovering solver
+    /// capital when the original solver is unable to complete the dispatch.
+    pub fn dispatch_keeper_reward(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DispatchKeeperReward)
             .unwrap_or(0)
     }
 

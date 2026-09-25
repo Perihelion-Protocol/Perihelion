@@ -48,6 +48,12 @@ pub enum DataKey {
     /// Keeper reward in stroops (Stellar's smallest unit) paid to callers of
     /// `cancel_expired_intent`. Incentivizes timely refund processing (issue #173).
     KeeperReward,
+    /// Keeper reward in stroops paid to callers of `dispatch_confirmation`.
+    /// Incentivizes third-party dispatch of stalled FillConfirmed messages,
+    /// closing the window where a solver has paid out on Stellar but the
+    /// source-chain escrow has not yet been notified. Independent of
+    /// `KeeperReward` so the two incentives can be tuned separately.
+    DispatchKeeperReward,
     /// Configurable maximum TTL for TTL extensions (issue #340).
     /// If unset, defaults to MAX_TTL_DEFAULT. Settable by admin.
     MaxTtl,
