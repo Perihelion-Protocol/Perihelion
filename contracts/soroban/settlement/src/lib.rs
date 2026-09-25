@@ -306,6 +306,11 @@ impl Perihelion {
             return Err(PerihelionError::EndpointChangeExpired);
         }
 
+        let admin = Self::require_admin(&env)?;
+        if admin == proposed_endpoint {
+            return Err(PerihelionError::AdminEndpointCollision);
+        }
+
         let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
         env.storage()
             .instance()
