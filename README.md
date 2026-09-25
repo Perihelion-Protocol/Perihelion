@@ -467,3 +467,6 @@ blockchain universe._
 
 <!-- handsoff-issue-685 -->
 - #685: soroban: two warnings in `lib.rs` will fail the `clippy -D warnings` CI gate once the crate compiles
+
+<!-- handsoff-issue-684 -->
+- #684: soroban: `addr.to_string().to_string()` calls a method that does not exist on `soroban_sdk::String`
