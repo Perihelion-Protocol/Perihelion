@@ -429,3 +429,17 @@ bodies. The shortest, most efficient path between Stellar and the rest of the
 blockchain universe._
 
 </div>
+
+## Handsoff notes
+
+<!-- handsoff-issue-696 -->
+- #696: evm: the rolling-window circuit breaker sets `rollingWindowTriggered` and then reverts, discarding it
+
+<!-- handsoff-issue-697 -->
+- #697: evm: `resetRollingWindowCap` does not clear the accumulated bucket, so the cap re-trips immediately
+
+<!-- handsoff-issue-698 -->
+- #698: evm: `lock` truncates `minDestAmount` from `uint256` to `uint128` without checking, weakening the under-delivery guard
+
+<!-- handsoff-issue-699 -->
+- #699: evm: `lock` truncates `deadline` to `uint64` without checking, which can open the refund window early
