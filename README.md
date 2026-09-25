@@ -476,3 +476,6 @@ blockchain universe._
 
 <!-- handsoff-issue-694 -->
 - #694: solver: ten tests fail against the `{records}` mempool envelope, disabling the verification-cache suite
+
+<!-- handsoff-issue-691 -->
+- #691: sdk: two `buildIntent` V_min warning tests fail because the warning now requires `sourceDecimals`
