@@ -1108,3 +1108,67 @@ test("issue #727: reservation is held after successful fill until next tick refr
     "intentB should be skipped due to insufficient inventory (reservation still held)",
   );
 });
+
+// ─── Issue 726: hash mismatch handling and metrics ────────────────────────────
+
+test("issue #726: hash mismatch is logged once and recorded in metrics, not repeated per tick", async () => {
+  const intent = buildTestIntent();
+  const wrongHash = ("0x" + "33".repeat(32)) as Hex;
+
+  const record: IntentRecord = {
+    intent,
+    signature: "0xdeadbeef" as Hex,
+    hash: wrongHash,
+    status: "pending",
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+
+  const warnings: string[] = [];
+  const skips: string[] = [];
+  const mockLogger: Logger = {
+    info: () => {},
+    warn: (msg) => warnings.push(msg),
+    error: () => {},
+  };
+
+  const mockMetrics: import("../src/metrics.js").Metrics = {
+    recordFillAttempt: () => {},
+    recordFillWon: () => {},
+    recordFillLost: () => {},
+    recordSkip: (reason) => skips.push(reason),
+    recordFee: () => {},
+    recordFees: () => {},
+    snapshot: () => ({} as any),
+  };
+
+  const mockExecutor: Executor = {
+    fill: async () => {
+      throw new Error("fill should not be called for hash mismatch");
+    },
+  };
+
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records: [record], nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, mockMetrics);
+
+  await solver.tick();
+  const firstTickWarnings = warnings.filter((w) => w.includes("hash mismatch")).length;
+  const firstTickSkips = skips.filter((s) => s.includes("hash mismatch")).length;
+
+  assert.equal(firstTickWarnings, 1, "should emit one warning for hash mismatch on first tick");
+  assert.equal(firstTickSkips, 1, "should record one skip metric for hash mismatch");
+
+  warnings.length = 0;
+  skips.length = 0;
+
+  await solver.tick();
+  const secondTickWarnings = warnings.filter((w) => w.includes("hash mismatch")).length;
+  const secondTickSkips = skips.filter((s) => s.includes("hash mismatch")).length;
+
+  assert.equal(secondTickWarnings, 0, "should not emit new warnings on second tick");
+  assert.equal(secondTickSkips, 0, "should not record new skip metrics on second tick");
+});
