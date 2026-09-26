@@ -30,6 +30,12 @@ versioned independently.
 
 ### Fixed
 
+- The Soroban settlement contract's inbound-nonce storage no longer grows
+  without bound: a per-eid low-water mark (`InboundNonceFloor`) plus the new
+  permissionless `prune_nonce_words(eid)` entrypoint reclaims the rent of
+  fully-consumed nonce-bitmap words, emitting `nonce_words_pruned`. Nonces
+  below the floor are rejected without a bitmap lookup, so pruning cannot
+  re-open a replay (#718).
 - The Soroban settlement crate compiles again: over-long `symbol_short!`
   event topics and test-only compile errors that had been hidden behind the
   `messages.rs` parse error are fixed (#678, #679).

@@ -89,6 +89,7 @@ mod events {
         confirmation_sent,
         cancelled_inbound,
         cancel_ignored,
+        nonce_words_pruned,
     );
 }
 
@@ -135,6 +136,7 @@ mod events {
 // | `cancelled`                    | ("cancelled", intent_hash)             | (src_eid: u32, deadline: u64)
 // | `cancelled_inbound`            | ("cancelled_inbound", intent_hash)     | (src_eid: u32)
 // | `cancel_ignored`               | ("cancel_ignored", intent_hash)        | (status: u32)
+// | `nonce_words_pruned`           | ("nonce_words_pruned",)                | (eid: u32, old_floor: u64, new_floor: u64)
 
 /// Default TTL ceiling for extensions (issue #340). Mirrors the representative
 /// network `max_entry_ttl`; operator must set_max_ttl if network value differs.
@@ -142,6 +144,13 @@ mod events {
 pub const MAX_TTL_DEFAULT: u32 = 3_110_400;
 // Re-export for backwards compatibility and convenience.
 pub const MAX_TTL: u32 = MAX_TTL_DEFAULT;
+
+/// Cap on how many fully-consumed `InboundNonceWord` entries
+/// `prune_nonce_words` may delete in one call (issue #718). 256 words × 64
+/// nonces = up to 16,384 nonces reclaimed per invocation, bounding the scan
+/// so the entrypoint stays within Soroban CPU/instruction limits regardless
+/// of how far the floor has fallen behind. Repeat calls advance further.
+pub const MAX_PRUNE_WORDS_PER_CALL: u32 = 256;
 /// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
 /// absorb late confirmations and the refund window.
 const GRACE_LEDGERS: u32 = 120_960;
@@ -789,6 +798,94 @@ impl Perihelion {
             .instance()
             .get(&DataKey::MaxTtl)
             .unwrap_or(MAX_TTL_DEFAULT)
+    }
+
+    /// Reclaim the rent of fully-consumed inbound-nonce bitmap words (issue
+    /// #718). Permissionless: anyone may pay to shrink the contract's storage
+    /// footprint, so no keeper is on the critical path.
+    ///
+    /// Scans `DataKey::InboundNonceWord(eid, w)` for `w` in
+    /// `[floor_word .. floor_word + MAX_PRUNE_WORDS_PER_CALL)` where
+    /// `floor_word = get_inbound_nonce_floor(eid) / 64`. A word is deleted
+    /// only when all 64 of its bits are set — i.e. every nonce it covers has
+    /// been consumed — and it lies strictly below the next not-yet-consumed
+    /// word, so no in-flight (unconsumed) nonce is ever straddled by the
+    /// advance. (Word 0 is complete when bits 1..=63 are set: nonce 0 is
+    /// invalid and rejected before any bitmap lookup.) The floor is then
+    /// raised to the first word that is missing or not fully consumed; every
+    /// nonce below it is rejected by the floor check in `accept_nonce`, so
+    /// deleting the words beneath it cannot re-open a replay.
+    ///
+    /// Work per call is capped by `MAX_PRUNE_WORDS_PER_CALL` (256 words = up
+    /// to 16,384 nonces) to bound CPU and keep the invocation inside Soroban
+    /// resource limits; repeat calls advance further.
+    ///
+    /// Emits `nonce_words_pruned(eid, old_floor, new_floor)` (issue #718).
+    /// No-op (and no event) when nothing below the floor can be reclaimed.
+    pub fn prune_nonce_words(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::require_not_paused(&env)?;
+
+        let instance = env.storage().instance();
+        let floor: u64 = instance
+            .get(&DataKey::InboundNonceFloor(eid))
+            .unwrap_or(0);
+        let old_floor = floor;
+
+        // Word containing the current floor. Words strictly below it were
+        // already pruned by earlier calls.
+        let mut word = floor / 64;
+
+        // Scan forward over contiguous fully-consumed words.
+        let ps = env.storage().persistent();
+        let mut scanned: u32 = 0;
+        while scanned < MAX_PRUNE_WORDS_PER_CALL {
+            // Word 0 special case: nonce 0 is invalid (LayerZero nonces start
+            // at 1) and is rejected by `accept_nonce` before any bitmap
+            // lookup, so bit 0 of word 0 can never be set. Word 0 is complete
+            // when its other 63 bits are.
+            let complete_mask: u64 = if word == 0 { u64::MAX - 1 } else { u64::MAX };
+            let word_key = DataKey::InboundNonceWord(eid, word);
+            let w: u64 = match ps.get(&word_key) {
+                Some(w) => w,
+                // Missing word: either never used or already pruned. In either
+                // case nothing more can be reclaimed contiguously — stop.
+                None => break,
+            };
+            if w != complete_mask {
+                // Not every nonce this word covers has been consumed; the
+                // window may still deliver stragglers. Stop before it.
+                break;
+            }
+            // Fully consumed and strictly below the not-yet-consumed frontier:
+            // delete it and move the floor past it.
+            ps.remove(&word_key);
+            word += 1;
+            scanned += 1;
+        }
+
+        // Floor moves to the first nonce of the first word that did NOT get
+        // pruned (or stays put if none were). Note: when the scan stopped on a
+        // partially-consumed word W, the new floor is W's first nonce, i.e.
+        // every nonce of W remains > floor and keeps its bitmap lookup.
+        let new_floor = word * 64;
+        if new_floor > old_floor {
+            instance.set(&DataKey::InboundNonceFloor(eid), &new_floor);
+            env.events().publish(
+                (events::nonce_words_pruned(&env),),
+                (eid, old_floor, new_floor),
+            );
+        }
+        Ok(())
+    }
+
+    /// Get the per-eid inbound-nonce low-water mark (issue #718): every nonce
+    /// below this value has been consumed and rejected by the floor check in
+    /// `accept_nonce`; its bitmap word, if any, has been pruned.
+    pub fn get_inbound_nonce_floor(env: Env, eid: u32) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InboundNonceFloor(eid))
+            .unwrap_or(0)
     }
 
     // --- LayerZero inbound -----------------------------------------------------
@@ -1484,20 +1581,22 @@ impl Perihelion {
 
     /// Accept a nonce exactly once, regardless of delivery order. Uses an
     /// unbounded per-`(eid, word_index)` bitmap that mirrors the EVM
-    /// `_inboundNonceBitmap[srcEid][wordIndex]` layout (issue #285).
+    /// `_inboundNonceBitmap[srcEid][wordIndex]` layout (issue #285), plus a
+    /// per-eid low-water mark that bounds its storage footprint (issue #718).
     ///
     /// A nonce `n` is tracked at:
     ///   word_index = n / 64
     ///   bit_index  = n % 64
     ///
     /// Each storage word covers 64 consecutive nonces. Words are created lazily
-    /// on first use and **never discarded**, so messages from any in-flight
-    /// delivery window (no matter how large the gap between nonces) are always
-    /// accepted exactly once. This makes the two implementations semantically
-    /// equivalent: no "window advance" can silently drop in-flight messages.
+    /// on first use and discarded by `prune_nonce_words` once every nonce they
+    /// cover is provably consumed, so messages from any in-flight delivery
+    /// window are always accepted exactly once while storage stays bounded.
     ///
-    /// Storage cost is one persistent entry per 64 nonces, proportional to
-    /// actual traffic.
+    /// Storage cost is one persistent entry per 64 nonces **above the pruned
+    /// floor** only: a nonce `n < InboundNonceFloor(eid)` is rejected outright
+    /// by the floor comparison below — its bitmap word cannot re-open it, so
+    /// that word need not exist (issue #718).
     ///
     /// This is the **LayerZero transport nonce** guard — distinct from the
     /// `Intent.nonce` 256-bit random field in the EIP-712 payload (collision
@@ -1506,6 +1605,19 @@ impl Perihelion {
     /// `docs/TECHNICAL-ARCHITECTURE.md`.
     fn accept_nonce(env: &Env, eid: u32, nonce: u64) -> Result<(), PerihelionError> {
         if nonce == 0 {
+            return Err(PerihelionError::StaleNonce);
+        }
+
+        // Low-water mark (issue #718): every nonce below the floor was fully
+        // consumed and its bitmap word (if any) pruned, so it is rejected by
+        // this comparison alone — no bitmap lookup, and no way for a pruned
+        // word to re-open it to replay.
+        let floor: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InboundNonceFloor(eid))
+            .unwrap_or(0);
+        if nonce < floor {
             return Err(PerihelionError::StaleNonce);
         }
 

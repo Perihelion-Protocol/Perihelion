@@ -108,6 +108,14 @@ pub enum DataKey {
     /// nonces it covered. TTL is extended to MAX_TTL on every write; see
     /// `accept_nonce` in lib.rs.
     InboundNonceWord(u32, u64),
+    /// Per-eid nonce low-water mark (issue #718): every nonce `n <`
+    /// `InboundNonceFloor(eid)` is fully consumed (its bit was set), so the
+    /// bitmap word covering it may be removed and `n` itself is rejected by the
+    /// floor check in `accept_nonce` — no bitmap lookup needed. Removing a
+    /// pruned word therefore cannot re-open any covered nonce to replay.
+    /// Raised only by `prune_nonce_words`, which deletes a word only after
+    /// verifying all 64 of its bits are set.
+    InboundNonceFloor(u32),
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
     /// **Deprecated** — superseded by `InboundNonceWord(eid, word_index)` (issue #285).
     /// Kept to avoid breaking any archived storage entries; never written by
