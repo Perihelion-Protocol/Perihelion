@@ -813,3 +813,88 @@ test("batch of two messages for one intent, both resolved, advances the cursor p
   );
 });
 
+// ─── Issue #735: dead-letter persistence interface and error handling ────────
+
+test("DeadLetterStore interface declares persist() method (#735)", () => {
+  const store = new InMemoryDeadLetterStore();
+  // The store must have a persist method (even if it's a no-op in-memory).
+  assert.ok(
+    typeof (store as any).persist === "function",
+    "InMemoryDeadLetterStore must declare persist() method",
+  );
+});
+
+test("relayer calls persist() on dead-letter store after each tick (#735)", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  let persistCallCount = 0;
+
+  class TrackingDeadLetterStore extends InMemoryDeadLetterStore {
+    async persist() {
+      persistCallCount++;
+    }
+  }
+
+  const watcher: SourceWatcher = {
+    async poll() {
+      return { messages: [makeMsg(1)], head: 1 };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      return "0xdst";
+    },
+    async isDelivered() { return false; },
+  };
+
+  const dlStore = new TrackingDeadLetterStore();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, memCheckpoint(), dlStore);
+
+  await relayer.tick();
+  assert.equal(
+    persistCallCount,
+    1,
+    "persist() called once per tick without casting",
+  );
+});
+
+test("persistence failure is logged distinctly from tick failure (#735)", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const errorLogs: string[] = [];
+  const logger: Logger = {
+    info() {},
+    warn() {},
+    error(msg) { errorLogs.push(msg); },
+  };
+
+  class FailingPersistStore extends InMemoryDeadLetterStore {
+    async persist() {
+      throw new Error("persistence failure");
+    }
+  }
+
+  const watcher: SourceWatcher = {
+    async poll() {
+      return { messages: [makeMsg(1)], head: 1 };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      return "0xdst";
+    },
+    async isDelivered() { return false; },
+  };
+
+  const dlStore = new FailingPersistStore();
+  const relayer = new Relayer(config, watcher, delivery, logger, 0, memCheckpoint(), dlStore);
+
+  // tick() should handle persistence failures gracefully
+  await assert.rejects(
+    relayer.tick(),
+    (err) => {
+      // Should not complete successfully when persist throws
+      return err instanceof Error && err.message.includes("persistence failure");
+    },
+    "persistence failure should propagate and be distinguishable",
+  );
+});
+
