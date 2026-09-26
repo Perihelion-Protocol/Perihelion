@@ -387,9 +387,7 @@ export class Relayer {
     await this.checkpoint.save(this.cursor);
 
     // Persist dead-letter queue
-    if ("persist" in this.deadLetter) {
-      await (this.deadLetter as any).persist();
-    }
+    await this.deadLetter.persist();
 
     return results;
   }

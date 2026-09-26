@@ -60,6 +60,8 @@ export interface DeadLetterStore {
   discard(key: MessageKey): boolean;
   /** True if the given key is already dead-lettered. */
   has(key: MessageKey): boolean;
+  /** Persist the dead-letter queue to durable storage. */
+  persist(): Promise<void>;
 }
 
 /** In-memory dead-letter store (survives the retry cycle; lost on restart). */
@@ -97,5 +99,9 @@ export class InMemoryDeadLetterStore implements DeadLetterStore {
 
   has(key: MessageKey): boolean {
     return this.entries.has(messageKeyString(key));
+  }
+
+  async persist(): Promise<void> {
+    // No-op: in-memory store has nothing to persist.
   }
 }
