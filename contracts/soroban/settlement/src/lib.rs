@@ -82,6 +82,7 @@ mod events {
         keeper_reward_paid,
         keeper_reward_skipped,
         max_intent_amount_set,
+        max_ttl_set,
         rolling_window_cap_set,
         rolling_window_cap_triggered,
         rolling_window_cap_reset,
@@ -127,6 +128,7 @@ mod events {
 // | `keeper_reward_paid`           | ("keeper_reward_paid", intent_hash)    | (caller: Address, reward: i128)
 // | `keeper_reward_skipped`        | ("keeper_reward_skipped", intent_hash) | (caller: Address, reward: i128)
 // | `max_intent_amount_set`        | ("max_intent_amount_set",)             | (max_amount: i128)
+// | `max_ttl_set`                  | ("max_ttl_set",)                       | (old: u32, new: u32)
 // | `rolling_window_cap_set`       | ("rolling_window_cap_set",)            | (duration: u64, cap: i128)
 // | `rolling_window_cap_triggered` | ("rolling_window_cap_triggered",)      | (window_start: u64, accumulated: i128)
 // | `rolling_window_cap_reset`     | ("rolling_window_cap_reset",)          | ()
@@ -781,14 +783,30 @@ impl Perihelion {
     /// Set the maximum TTL for storage entry extensions (issue #340). Admin-only.
     /// Must be called if the network's max_entry_ttl differs from MAX_TTL_DEFAULT.
     /// All TTL extensions are clamped to this value; setting it too low can cause
-    /// archival failures if the network value is higher. Setting it to 0 disables
-    /// this check (not recommended). Typical value: 3110400 for mainnet/testnet.
+    /// archival failures if the network value is higher.
+    ///
+    /// The accepted range is `[MIN_MAX_TTL, MAX_TTL_CEILING]` (issue #719).
+    /// Values below the contract's own `MAX_TTL` extension target would let its
+    /// longest-lived markers expire early, and values above the protocol's
+    /// `max_entry_ttl` ceiling are silently ineffective, so both are rejected
+    /// instead of stored (which also rejects 0). Typical value: 3110400 for
+    /// mainnet/testnet.
+    ///
+    /// Emits `max_ttl_set(old, new)` so off-chain monitors can alert on a change
+    /// to this replay-safety-relevant clamp without polling storage (issue #719).
     pub fn set_max_ttl(env: Env, max_ttl: u32) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
-        if max_ttl == 0 {
+        if max_ttl < MIN_MAX_TTL || max_ttl > MAX_TTL_CEILING {
             return Err(PerihelionError::InvalidAmount);
         }
+        let old: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxTtl)
+            .unwrap_or(MAX_TTL_DEFAULT);
         env.storage().instance().set(&DataKey::MaxTtl, &max_ttl);
+        env.events()
+            .publish((events::max_ttl_set(&env),), (old, max_ttl));
         Ok(())
     }
 
