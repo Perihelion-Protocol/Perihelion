@@ -1061,3 +1061,50 @@ test("fill records fee outlay breakdown when executor returns fees", async () =>
     stellarFeeStroops: 10_000n,
   });
 });
+
+// ─── Issue 727: in-flight inventory reservation after successful fill ─────────
+
+test("issue #727: reservation is held after successful fill until next tick refresh", async () => {
+  const intentA = buildTestIntent();
+  const intentB = buildIntent({ ...intentA, nonce: "999999" });
+  const recordA = buildTestRecord(intentA);
+  const recordB = buildTestRecord(intentB);
+
+  const inventory: InventoryProvider = { availableBalance: async () => 990000n };
+
+  let fillASettled = false;
+  const mockExecutor: Executor = {
+    fill: async (signed) => {
+      if (signed.intent.nonce === intentA.nonce) {
+        fillASettled = true;
+      }
+      return { settlementTx: "0xfilled" };
+    },
+  };
+
+  const skips: string[] = [];
+  const mockMetrics: import("../src/metrics.js").Metrics = {
+    recordFillAttempt: () => {},
+    recordFillWon: () => {},
+    recordFillLost: () => {},
+    recordSkip: (reason) => skips.push(reason),
+    recordFee: () => {},
+    recordFees: () => {},
+    snapshot: () => ({} as any),
+  };
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => ({ records: [], nextCursor: undefined }) })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, mockMetrics, inventory, async () => true, testPricingDeps);
+  const consider = (solver as unknown as { consider(record: IntentRecord): Promise<void> }).consider.bind(solver);
+
+  await consider(recordA);
+  assert.ok(fillASettled, "intentA should have been filled");
+
+  await consider(recordB);
+  assert.ok(
+    skips.some((s) => s.includes("insufficient")),
+    "intentB should be skipped due to insufficient inventory (reservation still held)",
+  );
+});
