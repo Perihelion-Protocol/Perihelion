@@ -1049,3 +1049,116 @@ test("handles edge case with confirmations: 0", async () => {
   );
 });
 
+// ─── Issue #737: Attempts map memory leak prevention tests ──────────────────
+
+test("keeps attempts map bounded when messages leave polling range", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const retry: RetryPolicy = { maxAttempts: 10, baseBackoffMs: 0 };
+  let tick = 0;
+
+  const watcher: SourceWatcher = {
+    async poll(fromBlock) {
+      tick++;
+      if (tick === 1) {
+        return {
+          messages: [
+            makeMsg(1, { nonce: 1 }),
+            makeMsg(2, { nonce: 2 }),
+            makeMsg(3, { nonce: 3 }),
+          ],
+          head: 3,
+        };
+      } else if (tick === 2) {
+        return {
+          messages: [
+            makeMsg(2, { nonce: 2 }),
+            makeMsg(3, { nonce: 3 }),
+          ],
+          head: 4,
+        };
+      } else if (tick === 3) {
+        return {
+          messages: [
+            makeMsg(3, { nonce: 3 }),
+          ],
+          head: 5,
+        };
+      }
+      return { messages: [], head: 10 };
+    },
+  };
+
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      throw new Error("delivery fails");
+    },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint, new InMemoryDeadLetterStore(), retry);
+
+  await relayer.tick(); // blocks 1, 2, 3 fail
+  const metricsAfterTick1 = relayer.metrics.failed;
+
+  await relayer.tick(); // block 1 left polling range, 2, 3 fail again
+  const metricsAfterTick2 = relayer.metrics.failed;
+
+  await relayer.tick(); // block 2 left polling range, 3 fails again
+  const metricsAfterTick3 = relayer.metrics.failed;
+
+  assert.ok(metricsAfterTick3 > metricsAfterTick2, "failures continue to be tracked");
+  assert.ok(metricsAfterTick2 > metricsAfterTick1, "failures are incremented");
+});
+
+test("message re-polled after prolonged absence receives fresh retry budget", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  const retry: RetryPolicy = { maxAttempts: 2, baseBackoffMs: 0 };
+  let tick = 0;
+
+  const watcher: SourceWatcher = {
+    async poll() {
+      tick++;
+      if (tick === 1) {
+        return {
+          messages: [makeMsg(10, { nonce: 99 })],
+          head: 10,
+        };
+      } else if (tick === 2 || tick === 3 || tick === 4) {
+        return { messages: [], head: 10 };
+      } else if (tick === 5) {
+        return {
+          messages: [makeMsg(100, { nonce: 99 })],
+          head: 100,
+        };
+      }
+      return { messages: [], head: 200 };
+    },
+  };
+
+  let deliverCalls = 0;
+  const delivery: DestinationDelivery = {
+    async deliver() {
+      deliverCalls++;
+      throw new Error("permanent failure");
+    },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint, new InMemoryDeadLetterStore(), retry);
+
+  await relayer.tick(); // attempt 1 for nonce 99
+  assert.equal(deliverCalls, 1);
+
+  await relayer.tick(); // attempt 2 for nonce 99 (should be dead-lettered)
+  assert.equal(deliverCalls, 2);
+  assert.equal(relayer.metrics.deadLettered, 1, "message dead-lettered after 2 attempts");
+
+  await relayer.tick(); // nonce 99 gone from polling
+  await relayer.tick(); // still gone
+  await relayer.tick(); // nonce 99 reappears but was already dead-lettered
+
+  assert.equal(relayer.metrics.deadLettered, 1, "dead-lettered message not retried even after re-appearing");
+});
+
