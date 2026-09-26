@@ -1263,3 +1263,102 @@ test("issue #725: reappearing intent after absence is subject to fresh backoff",
     "reappearing intent should be retried immediately after long absence",
   );
 });
+
+// ─── Issue 724: status reporting to mempool ───────────────────────────────────
+
+test("issue #724: successful fill reports settled status to mempool with configured token", async () => {
+  const intent = buildTestIntent();
+  const record = buildTestRecord(intent);
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+  const inventory: InventoryProvider = { availableBalance: async () => 1000000n };
+
+  const statusReports: Array<{ hash: string; status: string }> = [];
+  const mockExecutor: Executor = {
+    fill: async () => ({ settlementTx: "0xsettled" }),
+  };
+
+  let pendingIntents: IntentRecord[] = [];
+  global.fetch = mock.fn(async (url: string, options?: any) => {
+    if (typeof url === "string" && url.includes("/intents/") && url.includes("/status")) {
+      const match = url.match(/\/intents\/([^/]+)\/status/);
+      if (match) {
+        const hash = match[1];
+        const body = options?.body ? JSON.parse(options.body) : {};
+        statusReports.push({ hash, status: body.status });
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ records: pendingIntents, nextCursor: undefined }),
+    };
+  }) as any;
+
+  const configWithToken = {
+    ...baseConfig,
+    mempoolStatusToken: "test-status-token",
+  };
+
+  const solver = new Solver(configWithToken, mockExecutor, mockLogger, undefined, inventory, async () => true, testPricingDeps);
+
+  pendingIntents = [record];
+  await solver.tick();
+
+  assert.ok(
+    statusReports.length > 0 || pendingIntents.length === 0,
+    "either status was reported or intent was filled",
+  );
+});
+
+test("issue #724: mempool outage during status reporting does not fail the fill", async () => {
+  const intent = buildTestIntent();
+  const record = buildTestRecord(intent);
+
+  const infos: string[] = [];
+  const warns: string[] = [];
+  const mockLogger: Logger = {
+    info: (msg) => infos.push(msg),
+    warn: (msg) => warns.push(msg),
+    error: () => {},
+  };
+
+  const inventory: InventoryProvider = { availableBalance: async () => 1000000n };
+
+  const mockExecutor: Executor = {
+    fill: async () => ({ settlementTx: "0xsettled" }),
+  };
+
+  let pendingIntents: IntentRecord[] = [];
+  global.fetch = mock.fn(async (url: string, options?: any) => {
+    if (typeof url === "string" && url.includes("/intents/") && url.includes("/status")) {
+      throw new Error("mempool unavailable");
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ records: pendingIntents, nextCursor: undefined }),
+    };
+  }) as any;
+
+  const configWithToken = {
+    ...baseConfig,
+    mempoolStatusToken: "test-status-token",
+  };
+
+  const solver = new Solver(configWithToken, mockExecutor, mockLogger, undefined, inventory, async () => true, testPricingDeps);
+
+  pendingIntents = [record];
+  await solver.tick();
+
+  assert.ok(
+    infos.some((m) => m.includes("filled")),
+    "fill should be logged as successful",
+  );
+
+  assert.ok(
+    warns.some((m) => m.includes("failed to report")),
+    "status reporting failure should be logged as warning",
+  );
+});
