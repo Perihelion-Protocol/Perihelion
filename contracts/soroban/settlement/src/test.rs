@@ -11,7 +11,7 @@ use serde::Deserialize;
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
     testutils::{Address as _, Events, Ledger as _},
-    token, Address, BytesN, Env, Symbol, TryFromVal,
+    token, Address, Bytes, BytesN, Env, Symbol, TryFromVal,
 };
 
 // --- Mock LayerZero endpoint --------------------------------------------------
@@ -2390,4 +2390,157 @@ fn test_quote_lz_fee_empty_vs_correct_size() {
     // Using correct quote should succeed
     s.client
         .fill_intent(&solver, &solver_evm, &h, &250_000, &correct_quote);
+}
+
+
+// ---------------------------------------------------------------------------
+// Issue #722: the raw-bytes inbound path
+// ---------------------------------------------------------------------------
+
+/// The raw-bytes entrypoint decodes the wire format with the same codec the
+/// differential-fuzz harness exercises and registers the intent through the same
+/// handler as the typed entrypoint.
+#[test]
+fn lz_receive_bytes_registers_intent_from_raw_wire_bytes() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 200);
+
+    let fi = FillInstruction {
+        intent_hash: h.clone(),
+        src_eid: s.src_eid,
+        recipient: recipient.clone(),
+        dest_asset: s.asset.clone(),
+        min_dest_amount: 100_000,
+        deadline: 5_000,
+        preferred_solver: None,
+        reservation_window: 0,
+    };
+    // Test-only mirror of the EVM encoder; emits the 227-byte layout with the
+    // trailing reservation_window the decoder now accepts.
+    let payload = crate::messages::encode_fill_instruction(&s.env, &fi);
+
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 7,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+
+    s.client.lz_receive_bytes(&origin, &guid, &payload);
+
+    let rec = s
+        .client
+        .get_intent(&h)
+        .expect("raw inbound bytes must register the intent");
+    assert_eq!(rec.recipient, recipient);
+    assert_eq!(rec.dest_asset, s.asset);
+    assert_eq!(rec.src_eid, s.src_eid);
+    assert_eq!(rec.min_dest_amount, 100_000);
+}
+
+/// Malformed raw bytes are rejected at the boundary rather than accepted.
+#[test]
+fn lz_receive_bytes_rejects_malformed_payload() {
+    let s = setup();
+
+    let mut truncated = Bytes::new(&s.env);
+    truncated.push_back(PROTOCOL_VERSION);
+    truncated.push_back(MSG_FILL_INSTRUCTION);
+    for _ in 0..10 {
+        truncated.push_back(0);
+    }
+
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 8,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+
+    let result = s.client.try_lz_receive_bytes(&origin, &guid, &truncated);
+    assert!(result.is_err(), "a truncated payload must be rejected");
+}
+
+/// The raw-bytes entrypoint enforces the same peer check as the typed one.
+#[test]
+fn lz_receive_bytes_rejects_untrusted_peer() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 201);
+
+    let fi = FillInstruction {
+        intent_hash: h,
+        src_eid: s.src_eid,
+        recipient,
+        dest_asset: s.asset.clone(),
+        min_dest_amount: 100_000,
+        deadline: 5_000,
+        preferred_solver: None,
+        reservation_window: 0,
+    };
+    let payload = crate::messages::encode_fill_instruction(&s.env, &fi);
+
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: BytesN::from_array(&s.env, &[0x11; 32]),
+        nonce: 9,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+
+    let result = s.client.try_lz_receive_bytes(&origin, &guid, &payload);
+    assert!(result.is_err(), "a non-peer sender must be rejected");
+}
+
+/// The raw-bytes entrypoint consumes transport nonces exactly once, so a
+/// replayed payload cannot re-register an intent.
+#[test]
+fn lz_receive_bytes_rejects_replayed_nonce() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let nonce = 10u64;
+
+    let first = FillInstruction {
+        intent_hash: hash(&s.env, 202),
+        src_eid: s.src_eid,
+        recipient: recipient.clone(),
+        dest_asset: s.asset.clone(),
+        min_dest_amount: 100_000,
+        deadline: 5_000,
+        preferred_solver: None,
+        reservation_window: 0,
+    };
+    let second = FillInstruction {
+        intent_hash: hash(&s.env, 203),
+        src_eid: s.src_eid,
+        recipient,
+        dest_asset: s.asset.clone(),
+        min_dest_amount: 100_000,
+        deadline: 5_000,
+        preferred_solver: None,
+        reservation_window: 0,
+    };
+
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+
+    s.client.lz_receive_bytes(
+        &origin,
+        &guid,
+        &crate::messages::encode_fill_instruction(&s.env, &first),
+    );
+
+    let replayed = s.client.try_lz_receive_bytes(
+        &origin,
+        &guid,
+        &crate::messages::encode_fill_instruction(&s.env, &second),
+    );
+    assert!(
+        replayed.is_err(),
+        "re-delivery of nonce {nonce} must be rejected as StaleNonce"
+    );
 }

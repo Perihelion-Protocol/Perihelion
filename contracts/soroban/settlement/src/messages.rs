@@ -8,20 +8,25 @@
 //! chain. All payloads use the fixed big-endian binary layout from the
 //! architecture spec §3.3 so they decode identically in Solidity and Rust.
 //!
-//! ## Why the inbound decoders below are `#[allow(dead_code)]`
+//! ## Where the inbound decoders run
 //!
-//! `Perihelion::lz_receive` (`lib.rs`) takes an already-typed `LzMessage`
-//! argument, not raw `Bytes` — Soroban's native contract-call ABI marshals
-//! the argument, so the settlement contract itself never parses the
-//! EVM-encoded wire bytes directly. `decode_message`/`decode_fill_instruction`/
-//! `decode_cancel_intent` define and pin the inbound half of the wire format
-//! (mirroring the outbound `encode_*` functions, which *are* used by
-//! `lz_receive`'s dispatch of `FillConfirmed`/`CancelIntent`) for whatever
-//! adapter eventually bridges raw LayerZero calldata to a typed contract
-//! call — endpoint.rs is presently a mock (see docs/differential-fuzzing.md).
-//! Until then, their only callers are `fuzz.rs`'s specification-derived and
-//! round-trip tests, which is real, load-bearing usage the plain (non-test)
-//! `cdylib` build target can't see.
+//! The inbound half of the wire format is implemented by
+//! `decode_message`/`decode_fill_instruction`/`decode_cancel_intent` and their
+//! `read_field` helper. They are `pub` and are called by
+//! `Perihelion::lz_receive_bytes` (`lib.rs`), the raw-`Bytes` entrypoint:
+//! `lz_receive` remains the typed entrypoint for an endpoint that marshals a
+//! `LzMessage` argument through the Soroban ABI, while `lz_receive_bytes`
+//! accepts the unmodified LayerZero `message` bytes, decodes them here, and
+//! hands the result to the same pause gate, nonce guard and handlers. Both
+//! entrypoints authenticate the endpoint and the registered peer before any
+//! bytes are parsed.
+//!
+//! Because a production entrypoint calls them, these decoders are no longer
+//! dead code — they are compiled into the release `cdylib`, and the
+//! differential fuzzer (`fuzz.rs`) exercises the very functions that parse
+//! attacker-controlled inbound bytes. `endpoint.rs` is still a mock, so the
+//! LayerZero adapter that will deliver those bytes does not exist yet; see
+//! `docs/differential-fuzzing.md` for the verified scope.
 
 use soroban_sdk::{Address, Bytes, BytesN, Env};
 
@@ -52,7 +57,10 @@ use crate::types::{
 /// values the wire-vector README's canonical table specifies, for
 /// specification-derived (not just implementation-derived) test coverage.
 ///
-/// See the module doc-comment for why this is only reachable from tests.
+/// Only the test and fuzz modules build `Address` values this way; the live
+/// inbound path decodes the 56-byte strkey text field with
+/// [`decode_strkey_address`] instead, so this helper stays `#[allow(dead_code)]`
+/// for non-test builds.
 #[allow(dead_code)]
 pub(crate) fn address_from_contract_id(env: &Env, id: [u8; 32]) -> Address {
     let strkey = crate::strkey::contract_strkey(&id);
@@ -137,8 +145,6 @@ pub fn encode_cancel_intent(env: &Env, intent_hash: &BytesN<32>, reason: u8) -> 
 }
 
 /// Read a fixed-size big-endian field out of `message` at `offset`.
-/// See the module doc-comment for why this is only reachable from tests.
-#[allow(dead_code)]
 fn read_field<const N: usize>(
     message: &Bytes,
     offset: u32,
@@ -156,8 +162,10 @@ fn read_field<const N: usize>(
 /// Decode an inbound message payload. Returns the message type discriminant and
 /// parsed message, or an error if the payload is malformed.
 /// Validates version and routes to the appropriate decoder.
-/// See the module doc-comment for why this is only reachable from tests.
-#[allow(dead_code)]
+///
+/// Called by `Perihelion::lz_receive_bytes` on every raw inbound message, and by
+/// the differential-fuzz harness, so the fuzzed codec and the live codec are the
+/// same code (issue #722).
 pub fn decode_message(
     env: &Env,
     message: &Bytes,
@@ -183,10 +191,10 @@ pub fn decode_message(
         }
         MSG_CANCEL_INTENT => {
             let ci = decode_cancel_intent(env, message)?;
-            // Return a dummy FillInstruction with the intent_hash from cancel for union type compat.
-            // Use the zero-account strkey as a placeholder — decode_message is not called on the
-            // hot path (lib.rs routes FillInstruction and CancelIntent separately); this dummy
-            // exists only for API symmetry.
+            // Return a dummy FillInstruction carrying the cancel's intent_hash so the
+            // decoder keeps one return shape. The zero-account strkey is a
+            // placeholder: callers that handle CancelIntent read the third element
+            // and ignore this one.
             let zero_addr = Address::from_str(
                 env,
                 "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
@@ -207,8 +215,9 @@ pub fn decode_message(
     }
 }
 
-/// Decode a `FillInstruction` payload (227 bytes):
-/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32) | reservation_window(8)`.
+/// Decode a `FillInstruction` payload (219 bytes, or 227 when the trailing
+/// `reservation_window` is present):
+/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32) [| reservation_window(8)]`.
 ///
 /// # Address decoding
 ///
@@ -228,16 +237,20 @@ pub fn decode_message(
 /// (tracked as a follow-up to #271). The trailing `reservation_window` field is
 /// explicit on the wire and is decoded as a big-endian `u64`.
 ///
-/// See the module doc-comment for why this is only reachable from tests.
-#[allow(dead_code)]
 fn decode_fill_instruction(
     env: &Env,
     message: &Bytes,
 ) -> Result<FillInstruction, crate::PerihelionError> {
     use crate::PerihelionError;
 
-    // Validate length: 2 (header) + 217 (payload) = 219
-    if message.len() != FILL_INSTRUCTION_LENGTH {
+    // Accept the documented 219-byte layout (which ends after `preferred_solver`)
+    // and the 227-byte layout that appends the explicit 8-byte
+    // `reservation_window`. Intermediate widths stay rejected: the negative
+    // vectors pin one-byte-short (218) and one-byte-long (220) payloads as
+    // malformed.
+    if message.len() != FILL_INSTRUCTION_LENGTH
+        && message.len() != FILL_INSTRUCTION_LENGTH + 8
+    {
         return Err(PerihelionError::MalformedPayload);
     }
 
@@ -307,7 +320,13 @@ fn decode_fill_instruction(
         min_dest_amount,
         deadline,
         preferred_solver,
-        reservation_window: u64::from_be_bytes(read_field::<8>(message, 219)?),
+        reservation_window: if message.len() > FILL_INSTRUCTION_LENGTH {
+            u64::from_be_bytes(read_field::<8>(message, FILL_INSTRUCTION_LENGTH)?)
+        } else {
+            // Legacy 219-byte layout: the field is absent on the wire and means
+            // "no reservation window".
+            0
+        },
     })
 }
 
@@ -387,8 +406,6 @@ pub(crate) fn encode_fill_instruction(env: &Env, fi: &FillInstruction) -> Bytes 
 
 /// Decode a `CancelIntent` payload (35 bytes):
 /// `version(1) | type(1) | intent_hash(32) | reason(1)`.
-/// See the module doc-comment for why this is only reachable from tests.
-#[allow(dead_code)]
 fn decode_cancel_intent(
     env: &Env,
     message: &Bytes,
