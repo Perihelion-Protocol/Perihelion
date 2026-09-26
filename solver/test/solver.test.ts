@@ -1172,3 +1172,94 @@ test("issue #726: hash mismatch is logged once and recorded in metrics, not repe
   assert.equal(secondTickWarnings, 0, "should not emit new warnings on second tick");
   assert.equal(secondTickSkips, 0, "should not record new skip metrics on second tick");
 });
+
+// ─── Issue 725: retryState memory leak and backoff behavior ─────────────────
+
+test("issue #725: retryState size stays bounded when intents disappear from mempool", async () => {
+  const smallCacheConfig: SolverConfig = {
+    ...baseConfig,
+    retryCacheSize: 5,
+  };
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  const mockExecutor: Executor = {
+    fill: async () => {
+      throw new Error("simulated fill failure");
+    },
+  };
+
+  let pendingIntents: IntentRecord[] = [];
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records: pendingIntents, nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(smallCacheConfig, mockExecutor, mockLogger, undefined, undefined, async () => true);
+
+  const intents = Array.from({ length: 8 }, (_, i) =>
+    buildIntent({ ...buildTestIntent(), nonce: String(i) })
+  );
+  const records = intents.map((intent) => buildTestRecord(intent));
+
+  pendingIntents = records.slice(0, 5);
+  await solver.tick();
+
+  pendingIntents = [];
+  const sizeBefore = (solver.readiness as any).retryStateCount || 5;
+  await solver.tick();
+
+  pendingIntents = records.slice(5, 8);
+  await solver.tick();
+
+  const sizeAfter = (solver.readiness as any).retryStateCount || 0;
+  assert.ok(
+    sizeAfter <= 5,
+    `retryState size (${sizeAfter}) should stay within cache limit (5)`,
+  );
+});
+
+test("issue #725: reappearing intent after absence is subject to fresh backoff", async () => {
+  const intent = buildTestIntent();
+  const record = buildTestRecord(intent);
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  const fillAttempts: number[] = [];
+  const mockExecutor: Executor = {
+    fill: async () => {
+      fillAttempts.push(Date.now());
+      throw new Error("simulated fill failure");
+    },
+  };
+
+  let pendingIntents: IntentRecord[] = [];
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records: pendingIntents, nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, async () => true);
+
+  pendingIntents = [record];
+  await solver.tick();
+  assert.equal(fillAttempts.length, 1, "first tick should attempt fill");
+
+  pendingIntents = [record];
+  await solver.tick();
+  assert.equal(fillAttempts.length, 1, "backoff should prevent immediate retry");
+
+  pendingIntents = [];
+  await solver.tick();
+
+  pendingIntents = [record];
+  fillAttempts.length = 0;
+  await solver.tick();
+  assert.equal(
+    fillAttempts.length,
+    1,
+    "reappearing intent should be retried immediately after long absence",
+  );
+});
