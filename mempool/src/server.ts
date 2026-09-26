@@ -88,6 +88,9 @@ export class MempoolServer {
   private readRateLimit: number;
   private sweepTimer?: ReturnType<typeof setInterval>;
   private statusToken?: string;
+  private isReady = false;
+  private submissionStats = { accepted: 0, rejected: 0 };
+  private rateLimitRejections = 0;
 
   constructor(opts: MempoolServerOptions) {
     if (opts.chainId === undefined || opts.chainId === null || Number.isNaN(opts.chainId)) {
@@ -128,8 +131,19 @@ export class MempoolServer {
     const read = this.rateLimit("read", this.readRateLimit);
     const write = this.rateLimit("write", this.writeRateLimit);
 
-    this.app.get("/healthz", read, (req: Request, res: Response) => {
+    this.app.get("/healthz", (req: Request, res: Response) => {
       res.status(200).json({ status: "ok" });
+    });
+    this.app.get("/readyz", (req: Request, res: Response) => {
+      if (!this.isReady) {
+        res.status(503).json({ status: "not ready", reason: "sweep timer not started" });
+        return;
+      }
+      res.status(200).json({ status: "ready" });
+    });
+    this.app.get("/metrics", (req: Request, res: Response) => {
+      res.setHeader("Content-Type", "text/plain; version=0.0.4");
+      res.status(200).send(this.getPrometheusMetrics());
     });
     this.app.get("/info", read, this.handleInfo.bind(this));
     this.app.post("/intents", write, this.handleSubmitIntent.bind(this));
@@ -205,6 +219,7 @@ export class MempoolServer {
         (t) => now - t < this.rateLimitWindowMs,
       );
       if (hits.length >= limit) {
+        this.rateLimitRejections++;
         res.status(429).json({ error: "Too many requests" });
         return;
       }
@@ -225,15 +240,18 @@ export class MempoolServer {
   private handleSubmitIntent(req: Request, res: Response): void {
     const body = req.body as Partial<SignedIntent> | undefined;
     if (!body || typeof body !== "object") {
+      this.submissionStats.rejected++;
       res.status(400).json({ error: "Missing request body" });
       return;
     }
     const { intent, signature } = body;
     if (!intent || typeof intent !== "object") {
+      this.submissionStats.rejected++;
       res.status(400).json({ error: "Missing intent" });
       return;
     }
     if (typeof signature !== "string" || !SIGNATURE_RE.test(signature)) {
+      this.submissionStats.rejected++;
       res.status(400).json({ error: "Invalid signature" });
       return;
     }
@@ -241,14 +259,17 @@ export class MempoolServer {
     try {
       parsed = parseIntent(intent);
     } catch (err) {
+      this.submissionStats.rejected++;
       res.status(400).json({ error: `Invalid intent: ${(err as Error).message}` });
       return;
     }
     if (isExpired(parsed)) {
+      this.submissionStats.rejected++;
       res.status(400).json({ error: "Intent has expired" });
       return;
     }
     if (!verifyIntent(parsed, signature as Hex, this.domain)) {
+      this.submissionStats.rejected++;
       res.status(400).json({ error: "Signature verification failed" });
       return;
     }
@@ -258,9 +279,10 @@ export class MempoolServer {
       intent: parsed,
       signature: signature as Hex,
       status: "pending",
-      receivedAt: Date.now(),
+      createdAt: Math.floor(Date.now() / 1000),
     };
-    this.store.set(record);
+    this.store.set(hash, record);
+    this.submissionStats.accepted++;
     res.status(201).json({ hash });
   }
 
@@ -348,18 +370,59 @@ export class MempoolServer {
     res.status(200).json(updated);
   }
 
+  private getPrometheusMetrics(): string {
+    const records = this.store.all();
+    const recordsByStatus = {
+      pending: records.filter((r) => r.status === "pending").length,
+      settled: records.filter((r) => r.status === "settled").length,
+      refunded: records.filter((r) => r.status === "refunded").length,
+      expired: records.filter((r) => r.status === "expired").length,
+    };
+
+    const lines: string[] = [
+      "# HELP mempool_store_size Total number of records in the store",
+      "# TYPE mempool_store_size gauge",
+      `mempool_store_size ${records.length}`,
+      "# HELP mempool_store_pending_intents Number of pending intents",
+      "# TYPE mempool_store_pending_intents gauge",
+      `mempool_store_pending_intents ${recordsByStatus.pending}`,
+      "# HELP mempool_store_settled_intents Number of settled intents",
+      "# TYPE mempool_store_settled_intents gauge",
+      `mempool_store_settled_intents ${recordsByStatus.settled}`,
+      "# HELP mempool_store_refunded_intents Number of refunded intents",
+      "# TYPE mempool_store_refunded_intents gauge",
+      `mempool_store_refunded_intents ${recordsByStatus.refunded}`,
+      "# HELP mempool_store_expired_intents Number of expired intents",
+      "# TYPE mempool_store_expired_intents gauge",
+      `mempool_store_expired_intents ${recordsByStatus.expired}`,
+      "# HELP mempool_submissions_accepted Total number of accepted submissions",
+      "# TYPE mempool_submissions_accepted counter",
+      `mempool_submissions_accepted ${this.submissionStats.accepted}`,
+      "# HELP mempool_submissions_rejected Total number of rejected submissions",
+      "# TYPE mempool_submissions_rejected counter",
+      `mempool_submissions_rejected ${this.submissionStats.rejected}`,
+      "# HELP mempool_rate_limit_rejections Total number of rate-limit rejections",
+      "# TYPE mempool_rate_limit_rejections counter",
+      `mempool_rate_limit_rejections ${this.rateLimitRejections}`,
+    ];
+
+    return lines.join("\n") + "\n";
+  }
+
   async start(): Promise<void> {
     if (this.server) return;
     this.sweepTimer = setInterval(() => {
-      this.store.sweepExpired();
+      this.store.evictExpired();
     }, SWEEP_INTERVAL_MS);
     if (typeof this.sweepTimer.unref === "function") this.sweepTimer.unref();
+    this.isReady = true;
     await new Promise<void>((resolve) => {
       this.server = this.app.listen(this.port, this.host, () => resolve());
     });
   }
 
   async stop(): Promise<void> {
+    this.isReady = false;
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer);
       this.sweepTimer = undefined;
