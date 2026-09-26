@@ -167,7 +167,7 @@ pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 /// to complete. Solvers cannot deliver into a window too short for the confirmation
 /// to land before the deadline. Mirrors EVM's MIN_CONFIRMATION_GRACE (issue #293).
 /// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
-pub const MAX_DISPATCH_WINDOW: u64 = 1_800;
+pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
 
 /// Minimum delay for peer changes (issue #165). Brings Soroban peer-management
 /// under comparable delay/governance as the EVM side (PerihelionTimelock.MIN_DELAY).
@@ -390,14 +390,17 @@ impl Perihelion {
 
     /// Propose a new peer (EVM escrow address) for a source endpoint id (issue #165).
     /// Admin-only. Initiates a delayed peer change; the change becomes effective
-    /// only after the minimum delay has elapsed and the admin calls `confirm_peer`.
+    /// only after the specified delay has elapsed and the admin calls `confirm_peer`.
     ///
-    /// This brings Soroban peer-management under the same governance/delay model as
-    /// the EVM side (PerihelionTimelock), preventing instant unauthorized peer
-    /// rotation if the admin key is compromised. The delay gives users a window to
-    /// detect and react to a suspicious peer change (e.g., via monitoring alerts).
+    /// The `delay` parameter must be between `MIN_PEER_CHANGE_DELAY` and
+    /// `MAX_PEER_CHANGE_DELAY`. This brings Soroban peer-management under the same
+    /// governance/delay model as the EVM side (PerihelionTimelock), preventing instant
+    /// unauthorized peer rotation if the admin key is compromised.
     ///
     /// Emits `peer_change_proposed(eid, old_peer, new_peer, ready_at)` (issue #165).
+    ///
+    /// # Errors
+    /// - `InvalidDelay` if delay < MIN_PEER_CHANGE_DELAY or delay > MAX_PEER_CHANGE_DELAY
     ///
     /// # Peer symmetry (issue #15)
     /// The same peer address is used for **both** inbound validation
@@ -405,11 +408,19 @@ impl Perihelion {
     /// outbound dispatch (`dispatch` looks up `Peer(dst_eid)` where
     /// `dst_eid == rec.src_eid`). This is the intended design: the trusted
     /// counterparty for a given endpoint id is symmetric.
-    pub fn propose_peer(env: Env, eid: u32, new_peer: BytesN<32>) -> Result<(), PerihelionError> {
+    pub fn propose_peer(env: Env, eid: u32, new_peer: BytesN<32>, delay: u64) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
+        if delay < MIN_PEER_CHANGE_DELAY || delay > MAX_PEER_CHANGE_DELAY {
+            return Err(PerihelionError::InvalidDelay);
+        }
+
+        if env.storage().instance().has(&DataKey::PendingPeer(eid)) {
+            return Err(PerihelionError::PendingPeerChangeExists);
+        }
+
         let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
         let now = env.ledger().timestamp();
-        let ready_at = now + MIN_PEER_CHANGE_DELAY;
+        let ready_at = now + delay;
 
         env.storage()
             .instance()
@@ -417,6 +428,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::PendingPeerTime(eid), &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingPeerDelay(eid), &delay);
         env.events().publish(
             (events::peer_change_proposed(&env),),
             (eid, old_peer, new_peer, ready_at),
@@ -425,8 +439,8 @@ impl Perihelion {
     }
 
     /// Confirm and apply a pending peer change (issue #165). Admin-only.
-    /// Must be called after the minimum delay (`MIN_PEER_CHANGE_DELAY`) has elapsed
-    /// since `propose_peer` was called and within the grace period (`PEER_CHANGE_GRACE`).
+    /// Must be called after the specified delay has elapsed since `propose_peer`
+    /// was called and within the grace period (`PEER_CHANGE_GRACE`).
     /// Atomically sets the new peer address and clears the pending state.
     ///
     /// Emits `peer_set(eid, old, new)` when the change is applied (issue #16).
@@ -434,7 +448,7 @@ impl Perihelion {
     ///
     /// # Errors
     /// - `NotPendingPeerChange` if no peer change is pending for this eid
-    /// - `PeerChangeNotReady` if the minimum delay has not yet elapsed
+    /// - `PeerChangeNotReady` if the specified delay has not yet elapsed
     /// - `PeerChangeExpired` if the grace period has elapsed since the proposal
     pub fn confirm_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
@@ -451,18 +465,27 @@ impl Perihelion {
             .get(&DataKey::PendingPeerTime(eid))
             .ok_or(PerihelionError::NotPendingPeerChange)?;
 
+        let delay: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPeerDelay(eid))
+            .ok_or(PerihelionError::NotPendingPeerChange)?;
+
         let now = env.ledger().timestamp();
-        if now < proposed_at + MIN_PEER_CHANGE_DELAY {
+        if now < proposed_at + delay {
             return Err(PerihelionError::PeerChangeNotReady);
         }
 
-        if now > proposed_at + MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE {
+        if now > proposed_at + delay + PEER_CHANGE_GRACE {
             env.events()
                 .publish((events::peer_change_expired(&env),), (eid,));
             env.storage().instance().remove(&DataKey::PendingPeer(eid));
             env.storage()
                 .instance()
                 .remove(&DataKey::PendingPeerTime(eid));
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingPeerDelay(eid));
             return Err(PerihelionError::PeerChangeExpired);
         }
 
@@ -474,6 +497,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .remove(&DataKey::PendingPeerTime(eid));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeerDelay(eid));
 
         env.events()
             .publish((events::PEER_SET,), (eid, old_peer, proposed_peer));
@@ -492,6 +518,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .remove(&DataKey::PendingPeerTime(eid));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeerDelay(eid));
 
         env.events()
             .publish((events::peer_change_cancelled(&env),), (eid,));
@@ -512,13 +541,12 @@ impl Perihelion {
     ) -> Result<Option<(BytesN<32>, u64, u64, u64)>, PerihelionError> {
         let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
         let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
+        let delay: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerDelay(eid));
 
-        Ok(match (peer, time) {
-            (Some(p), Some(t)) => {
-                let ready_at = t.saturating_add(MIN_PEER_CHANGE_DELAY);
-                let expires_at = t
-                    .saturating_add(MIN_PEER_CHANGE_DELAY)
-                    .saturating_add(PEER_CHANGE_GRACE);
+        Ok(match (peer, time, delay) {
+            (Some(p), Some(t), Some(d)) => {
+                let ready_at = t.saturating_add(d);
+                let expires_at = t.saturating_add(d).saturating_add(PEER_CHANGE_GRACE);
                 Some((p, t, ready_at, expires_at))
             }
             _ => None,
@@ -835,10 +863,7 @@ impl Perihelion {
             return Err(PerihelionError::AlreadyFilled);
         }
         let now = env.ledger().timestamp();
-        if now >= rec.deadline {
-            return Err(PerihelionError::IntentExpired);
-        }
-        if now + MAX_DISPATCH_WINDOW > rec.deadline {
+        if now.saturating_add(MIN_DISPATCH_WINDOW) > rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
