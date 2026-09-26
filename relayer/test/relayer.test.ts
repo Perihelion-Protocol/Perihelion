@@ -813,3 +813,239 @@ test("batch of two messages for one intent, both resolved, advances the cursor p
   );
 });
 
+// ─── Issue #736: detectReorg tests ──────────────────────────────────────────
+
+test("detects single-block reorg and rolls back cursor correctly", async () => {
+  const config = { ...baseConfig(), confirmations: 2 };
+  let pollCount = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      pollCount++;
+      if (pollCount === 1) {
+        return {
+          messages: [],
+          head: 10,
+          headHash: "0xHASH10",
+          parentHash: "0xHASH9",
+          blockHeaders: [
+            { number: 9, hash: "0xHASH9", parentHash: "0xHASH8" },
+            { number: 10, hash: "0xHASH10", parentHash: "0xHASH9" },
+          ],
+        };
+      }
+      return {
+        messages: [],
+        head: 10,
+        headHash: "0xHASH10_NEW",
+        parentHash: "0xHASH9_NEW",
+      };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+
+  await relayer.tick();
+  const firstCursor = relayer.readiness.cursor;
+
+  await relayer.tick();
+  const secondCursor = relayer.readiness.cursor;
+
+  assert.ok(secondCursor < firstCursor, "cursor rolled back after single-block reorg");
+});
+
+test("detects reorg at exactly confirmation depth threshold", async () => {
+  const config = { ...baseConfig(), confirmations: 3 };
+  let pollCount = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      pollCount++;
+      if (pollCount === 1) {
+        return {
+          messages: [],
+          head: 10,
+          headHash: "0xA",
+          parentHash: "0xB",
+          blockHeaders: [
+            { number: 7, hash: "0x7", parentHash: "0x6" },
+            { number: 8, hash: "0x8", parentHash: "0x7" },
+            { number: 9, hash: "0x9", parentHash: "0x8" },
+            { number: 10, hash: "0xA", parentHash: "0x9" },
+          ],
+        };
+      }
+      return {
+        messages: [],
+        head: 11,
+        headHash: "0xB",
+        parentHash: "0x9_NEW",
+        blockHeaders: [
+          { number: 11, hash: "0xB", parentHash: "0x9_NEW" },
+        ],
+      };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+
+  await relayer.tick();
+  const firstCursor = relayer.readiness.cursor;
+
+  await relayer.tick();
+  const secondCursor = relayer.readiness.cursor;
+
+  assert.ok(secondCursor <= firstCursor, "reorg at confirmation threshold rolls back cursor");
+});
+
+test("detects reorg exceeding confirmation limit and emits DEEP_REORG", async () => {
+  const config = { ...baseConfig(), confirmations: 1 };
+  const errorLogs: string[] = [];
+  const logger: Logger = {
+    info() {},
+    warn() {},
+    error(msg) { errorLogs.push(msg); },
+  };
+
+  let pollCount = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      pollCount++;
+      if (pollCount === 1) {
+        return {
+          messages: [],
+          head: 5,
+          headHash: "0xHEAD1",
+          parentHash: "0xPARENT1",
+          blockHeaders: [
+            { number: 3, hash: "0x3", parentHash: "0x2" },
+            { number: 4, hash: "0x4", parentHash: "0x3" },
+            { number: 5, hash: "0xHEAD1", parentHash: "0x4" },
+          ],
+        };
+      }
+      return {
+        messages: [],
+        head: 5,
+        headHash: "0xHEAD2",
+        parentHash: "0xFORK",
+      };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, logger, 0, checkpoint);
+
+  await relayer.tick();
+  await relayer.tick();
+
+  assert.ok(
+    errorLogs.some((m) => m.includes("DEEP_REORG")),
+    "DEEP_REORG alert emitted when reorg exceeds confirmations",
+  );
+});
+
+test("detects head-replacement reorg with unchanged parent linkage", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  let pollCount = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      pollCount++;
+      if (pollCount === 1) {
+        return {
+          messages: [],
+          head: 10,
+          headHash: "0xHASH10_OLD",
+          parentHash: "0xHASH9",
+          blockHeaders: [
+            { number: 9, hash: "0xHASH9", parentHash: "0xHASH8" },
+            { number: 10, hash: "0xHASH10_OLD", parentHash: "0xHASH9" },
+          ],
+        };
+      }
+      return {
+        messages: [],
+        head: 10,
+        headHash: "0xHASH10_NEW",
+        parentHash: "0xHASH9",
+      };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+
+  await relayer.tick();
+  const firstCursor = relayer.readiness.cursor;
+
+  await relayer.tick();
+  const secondCursor = relayer.readiness.cursor;
+
+  assert.equal(
+    secondCursor,
+    firstCursor,
+    "head-replacement with same parent linkage detected as no-reorg, cursor unchanged",
+  );
+});
+
+test("handles edge case with confirmations: 0", async () => {
+  const config = { ...baseConfig(), confirmations: 0 };
+  let pollCount = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      pollCount++;
+      if (pollCount === 1) {
+        return {
+          messages: [makeMsg(5)],
+          head: 5,
+          headHash: "0xA",
+          parentHash: "0xB",
+          blockHeaders: [
+            { number: 5, hash: "0xA", parentHash: "0xB" },
+          ],
+        };
+      }
+      return {
+        messages: [],
+        head: 5,
+        headHash: "0xC",
+        parentHash: "0xD",
+      };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+
+  await relayer.tick();
+  const firstCursor = relayer.readiness.cursor;
+
+  await relayer.tick();
+  const secondCursor = relayer.readiness.cursor;
+
+  assert.ok(
+    secondCursor <= firstCursor,
+    "with confirmations: 0, even finality reorg causes rollback",
+  );
+});
+
