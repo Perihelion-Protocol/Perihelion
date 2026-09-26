@@ -72,7 +72,7 @@ fn setup() -> Setup {
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
-    client.propose_peer(&src_eid, &peer);
+    client.propose_peer(&src_eid, &peer, MIN_PEER_CHANGE_DELAY);
     env.ledger().with_mut(|li| {
         li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
     });
@@ -336,6 +336,15 @@ fn paused_set_topic() {
     let s = setup();
     s.client.set_paused(&true);
     assert_event_shape(&s.env, "paused_set", 1);
+}
+
+// --- Documented as `max_ttl_set` (issue #719) ---------------------------------
+
+#[test]
+fn max_ttl_set_topic() {
+    let s = setup();
+    s.client.set_max_ttl(&(MIN_MAX_TTL + 1));
+    assert_event_shape(&s.env, "max_ttl_set", 1);
 }
 
 #[test]

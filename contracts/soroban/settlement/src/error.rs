@@ -69,6 +69,10 @@ pub enum PerihelionError {
     /// #500). Placed here rather than the 13x authorization band, which is
     /// fully allocated.
     EndpointChangeExpired = 151,
+    /// Peer change delay outside the valid range (issue #715).
+    InvalidDelay = 152,
+    /// A peer change is already pending for this eid, must cancel first (issue #715).
+    PendingPeerChangeExists = 153,
 
     // --- Messaging ---
     /// Payload failed structural validation.
