@@ -337,6 +337,95 @@ If you expect solver reputation tracking (Phase 3+):
 - Ensure `dispatch_confirmation` is called after `deliver_intent`
 - Wait for confirmation message to settle (LayerZero transport delay)
 
+### Filled-but-undispatched: the split-entrypoint stall
+
+**What it is.** `deliver_intent` and `dispatch_confirmation` are separate
+entrypoints by design (Issue #12) — delivery is the atomic, irreversible step;
+dispatch can be retried independently. The downside is that they can come apart:
+
+1. The solver calls `deliver_intent`: the user receives the destination asset on
+   Stellar, and the contract writes the `Settled` marker setting intent status
+   to `Filled`.
+2. The solver then fails to call `dispatch_confirmation` — out of XLM, a fee
+   under-quote, a node crash, or a misconfiguration.
+3. The intent sits in `Filled` state indefinitely. The source-chain escrow still
+   holds the user's locked funds with `released == false`; it does not know the
+   fill happened. `cancel_expired_intent` refuses to act because the `Settled`
+   marker is present. No other solver can step in.
+4. After `deadline + confirmationGrace`, the escrow's `cancelExpired` path
+   returns the user's source funds — user receives both the destination asset on
+   Stellar *and* a full refund — while the solver absorbs the entire loss.
+
+**How to detect it.** The `status()` view distinguishes `Filled` (delivered,
+undispatched) from `ConfirmationSent`. Use the `list_undispatched_intents`
+contract view to batch-query your known intent hashes and filter for the ones
+currently stuck in `Filled`:
+
+```typescript
+// Example using the Perihelion SDK / contract client
+const allHashes = await mempool.getAllKnownHashes();
+// Chunk to ≤50 hashes per call (instruction budget).
+const chunks = chunk(allHashes, 50);
+for (const batch of chunks) {
+  const stuck = await settlementClient.list_undispatched_intents(batch);
+  for (const hash of stuck) {
+    logger.error({ hash }, "STUCK: intent filled but confirmation not dispatched");
+    alerts.fire("dispatch_confirmation_stalled", { hash });
+  }
+}
+```
+
+Set up a cron or event-driven monitor that runs this query every few minutes
+(or on every confirmed `filled` event). Alert on any intent that has been in
+`Filled` state for more than 5 minutes; the clock is ticking toward `cancelExpired`
+on the source chain.
+
+**How to recover.** `dispatch_confirmation` is permissionless — any account can
+call it, not just the original solver. That is the designed recovery path:
+
+```typescript
+// Any keeper (including your own solver) can push a stalled confirmation.
+const lzFee = await settlementClient.quote_fill_confirmed_fee(srcEid);
+// Add a small buffer for fee fluctuation (~10%).
+await settlementClient.dispatch_confirmation(
+  callerAddress,
+  intentHash,
+  BigInt(Math.ceil(Number(lzFee) * 1.1)),
+);
+```
+
+**Keeper incentive.** The contract admin can configure `dispatch_keeper_reward`
+(independently of `keeper_reward` for cancellations) via
+`set_dispatch_keeper_reward`. When non-zero, any caller of
+`dispatch_confirmation` receives that many stroops from the contract's native
+token balance, compensating the LayerZero fee and making it economically
+rational for a third-party keeper service to push stalled confirmations through.
+
+Check the current reward and whether it covers your expected `lz_fee`:
+
+```typescript
+const reward = await settlementClient.dispatch_keeper_reward();
+const fee    = await settlementClient.quote_fill_confirmed_fee(srcEid);
+if (reward >= fee) {
+  // Profitable for any keeper; rely on external keepers as backstop.
+} else {
+  // Self-serve only: your solver must ensure it remains funded.
+  logger.warn("dispatch_keeper_reward does not cover lz_fee — no external incentive");
+}
+```
+
+**Checklist for preventing this state:**
+1. Always call `dispatch_confirmation` immediately after `deliver_intent` in
+   your fill loop. Use `quote_fill_confirmed_fee` to size the fee; never pass
+   0 when targeting mainnet.
+2. Keep `PERIHELION_STELLAR_NATIVE_FEE_FLOOR` set to cover both `deliver_intent`
+   *and* `dispatch_confirmation` (see [Native balance](#native-balance)).
+   The worst position is running out of XLM between the two calls.
+3. Monitor `list_undispatched_intents` on a short interval. Treat any alert as
+   critical — you are racing the source chain's `cancelExpired` grace period.
+4. Keep a funded fallback account that can call `dispatch_confirmation` as a
+   keeper, independent of your main solver keypair.
+
 ## Performance Tips
 
 1. **Pre-fetch quotes** — Batch asset pricing to reduce latency
