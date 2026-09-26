@@ -278,6 +278,196 @@ test("terminal statuses are final: updateStatus cannot move a settled intent bac
   assert.equal(record.status, "settled");
 });
 
+// ─── Issue #738: Rate-limiter memory leak tests ────────────────────────────
+
+test("rate limiting tracking remains bounded even with many distinct IPs (#738)", async () => {
+  const serverWithShortWindow = new MempoolServer({
+    port: 3989,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    rateLimitWindowMs: 100,
+    writeRateLimit: 2,
+  });
+  await serverWithShortWindow.start();
+
+  try {
+    const baseUrl = `http://localhost:3989`;
+    const intent = sampleIntent();
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+
+    const submitted: Promise<Response>[] = [];
+    for (let i = 0; i < 50; i++) {
+      submitted.push(
+        fetch(`${baseUrl}/intents`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ intent: { ...intent, sourceAmount: String(i) }, signature }),
+        }),
+      );
+    }
+
+    const results = await Promise.all(submitted);
+    const rateLimited = results.filter((r) => r.status === 429).length;
+
+    assert.ok(rateLimited > 0, "some requests should have been rate-limited");
+    assert.ok(rateLimited < results.length, "not all requests should be rate-limited");
+
+    await new Promise((r) => setTimeout(r, 150));
+
+    const postWindowIntent = sampleIntent();
+    const postWindowSig = await sign(postWindowIntent, perihelionDomain(CHAIN_ID, ESCROW));
+    const afterWindow = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ intent: postWindowIntent, signature: postWindowSig }),
+    });
+    assert.ok(
+      afterWindow.status !== 429,
+      "requests should succeed after rate-limit window expires",
+    );
+  } finally {
+    await serverWithShortWindow.stop();
+  }
+});
+
+test("abusive client remains throttled for entire window (#738)", async () => {
+  const serverWithShortWindow = new MempoolServer({
+    port: 3990,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    rateLimitWindowMs: 200,
+    writeRateLimit: 1,
+  });
+  await serverWithShortWindow.start();
+
+  try {
+    const baseUrl = `http://localhost:3990`;
+    const intent1 = sampleIntent();
+    const sig1 = await sign(intent1, perihelionDomain(CHAIN_ID, ESCROW));
+
+    const res1 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ intent: intent1, signature: sig1 }),
+    });
+    assert.equal(res1.status, 200, "first request should succeed");
+
+    const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
+    const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
+    const res2 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ intent: intent2, signature: sig2 }),
+    });
+    assert.equal(res2.status, 429, "second request should be rate-limited");
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const intent3 = { ...sampleIntent(), sourceAmount: "200000000" };
+    const sig3 = await sign(intent3, perihelionDomain(CHAIN_ID, ESCROW));
+    const res3 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ intent: intent3, signature: sig3 }),
+    });
+    assert.equal(res3.status, 429, "third request within window should still be rate-limited");
+  } finally {
+    await serverWithShortWindow.stop();
+  }
+});
+
+// ─── Issue #739: Proxy trust configuration tests ──────────────────────────
+
+test("rate limiting keys on req.ip and ignores X-Forwarded-For without trustProxy (#739)", async () => {
+  const serverNoDtrustProxy = new MempoolServer({
+    port: 3991,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    rateLimitWindowMs: 1000,
+    writeRateLimit: 1,
+  });
+  await serverNoDtrustProxy.start();
+
+  try {
+    const baseUrl = `http://localhost:3991`;
+    const intent1 = sampleIntent();
+    const sig1 = await sign(intent1, perihelionDomain(CHAIN_ID, ESCROW));
+
+    const res1 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Forwarded-For": "203.0.113.1",
+      },
+      body: JSON.stringify({ intent: intent1, signature: sig1 }),
+    });
+    assert.equal(res1.status, 200, "first request should succeed");
+
+    const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
+    const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
+    const res2 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Forwarded-For": "203.0.113.2",
+      },
+      body: JSON.stringify({ intent: intent2, signature: sig2 }),
+    });
+    assert.equal(
+      res2.status,
+      429,
+      "second request from same socket (different X-Forwarded-For ignored) should be rate-limited",
+    );
+  } finally {
+    await serverNoDtrustProxy.stop();
+  }
+});
+
+test("multiple forged X-Forwarded-For entries do not bypass rate limiting (#739)", async () => {
+  const serverNoTrustProxy = new MempoolServer({
+    port: 3992,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    rateLimitWindowMs: 1000,
+    writeRateLimit: 1,
+  });
+  await serverNoTrustProxy.start();
+
+  try {
+    const baseUrl = `http://localhost:3992`;
+    const intent1 = sampleIntent();
+    const sig1 = await sign(intent1, perihelionDomain(CHAIN_ID, ESCROW));
+
+    const res1 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Forwarded-For": "203.0.113.1, 203.0.113.2, 203.0.113.3",
+      },
+      body: JSON.stringify({ intent: intent1, signature: sig1 }),
+    });
+    assert.equal(res1.status, 200, "first request should succeed");
+
+    const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
+    const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
+    const res2 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Forwarded-For": "203.0.113.10, 203.0.113.20, 203.0.113.30",
+      },
+      body: JSON.stringify({ intent: intent2, signature: sig2 }),
+    });
+    assert.equal(
+      res2.status,
+      429,
+      "second request with forged multi-entry X-Forwarded-For should still be rate-limited",
+    );
+  } finally {
+    await serverNoTrustProxy.stop();
+  }
+});
+
 // ─── Issue 321: authenticated PATCH /intents/:hash/status ──────────────────
 
 test("PATCH /intents/:hash/status rejects requests without the configured token", async () => {
