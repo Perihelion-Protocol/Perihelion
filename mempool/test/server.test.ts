@@ -423,6 +423,51 @@ test("rate limiting keys on req.ip and ignores X-Forwarded-For without trustProx
   }
 });
 
+test("multiple forged X-Forwarded-For entries do not bypass rate limiting (#739)", async () => {
+  const serverNoTrustProxy = new MempoolServer({
+    port: 3992,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    rateLimitWindowMs: 1000,
+    writeRateLimit: 1,
+  });
+  await serverNoTrustProxy.start();
+
+  try {
+    const baseUrl = `http://localhost:3992`;
+    const intent1 = sampleIntent();
+    const sig1 = await sign(intent1, perihelionDomain(CHAIN_ID, ESCROW));
+
+    const res1 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Forwarded-For": "203.0.113.1, 203.0.113.2, 203.0.113.3",
+      },
+      body: JSON.stringify({ intent: intent1, signature: sig1 }),
+    });
+    assert.equal(res1.status, 200, "first request should succeed");
+
+    const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
+    const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
+    const res2 = await fetch(`${baseUrl}/intents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Forwarded-For": "203.0.113.10, 203.0.113.20, 203.0.113.30",
+      },
+      body: JSON.stringify({ intent: intent2, signature: sig2 }),
+    });
+    assert.equal(
+      res2.status,
+      429,
+      "second request with forged multi-entry X-Forwarded-For should still be rate-limited",
+    );
+  } finally {
+    await serverNoTrustProxy.stop();
+  }
+});
+
 // ─── Issue 321: authenticated PATCH /intents/:hash/status ──────────────────
 
 test("PATCH /intents/:hash/status rejects requests without the configured token", async () => {
