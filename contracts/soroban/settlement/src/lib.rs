@@ -5,8 +5,8 @@
 //!
 //! The Stellar-side endpoint of the Perihelion intent bridge. It:
 //!
-//! 1. registers locked intents relayed from the source chain (`lz_receive` of a
-//!    FillInstruction),
+//! 1. registers locked intents relayed from the source chain (`lz_receive` or
+//!    `lz_receive_bytes` of a FillInstruction),
 //! 2. lets a solver deliver the destination asset from its own inventory and be
 //!    repaid on the source chain (`fill_intent`), and
 //! 3. lets anyone unwind an expired intent and refund the user
@@ -35,7 +35,7 @@ pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
 
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env};
 
 use messages::{encode_cancel_intent, encode_fill_confirmed};
 
@@ -942,47 +942,62 @@ impl Perihelion {
 
     // --- LayerZero inbound -----------------------------------------------------
 
-    /// LayerZero receive hook. Callable only by the configured endpoint, and only
-    /// for messages from the registered peer on `origin.src_eid`. Replay-guarded
-    /// by a lazy-nonce high-water mark. Dispatches on the message variant.
+    /// LayerZero receive hook for an already-typed message. Callable only by the
+    /// configured endpoint, and only for messages from the registered peer on
+    /// `origin.src_eid`. Replay-guarded by a lazy-nonce high-water mark.
+    /// Dispatches on the message variant.
+    ///
+    /// This is the typed half of the inbound boundary. When the endpoint hands
+    /// the contract the raw LayerZero `message` bytes instead of an ABI-marshalled
+    /// `LzMessage`, use [`Self::lz_receive_bytes`], which decodes those bytes with
+    /// the same codec the differential-fuzz harness exercises and then dispatches
+    /// through the same `apply_inbound` path.
     pub fn lz_receive(
         env: Env,
         origin: Origin,
         _guid: BytesN<32>,
         message: LzMessage,
     ) -> Result<(), PerihelionError> {
-        // Only the endpoint may deliver messages.
-        Self::require_endpoint(&env)?.require_auth();
+        Self::authorize_inbound(&env, &origin)?;
+        Self::apply_inbound(&env, &origin, message)
+    }
 
-        // The sender must be our registered peer for this source endpoint id.
-        let expected: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Peer(origin.src_eid))
-            .ok_or(PerihelionError::UntrustedPeer)?;
-        if expected != origin.sender {
-            return Err(PerihelionError::UntrustedPeer);
-        }
+    /// LayerZero receive hook for the raw wire bytes of a `FillInstruction` or
+    /// `CancelIntent` payload (#722).
+    ///
+    /// The endpoint — or the adapter contract that stands in for it — calls this
+    /// with the unmodified `message` field from the LayerZero packet. The call is
+    /// authenticated against the configured endpoint and the registered peer
+    /// **before** any bytes are parsed, then the payload is decoded by the same
+    /// `messages::decode_message` the differential-fuzz harness fuzzes, and
+    /// finally dispatched through the identical pause gate, nonce guard and
+    /// handlers as the typed entrypoint.
+    ///
+    /// This puts the fuzzed decoder on a callable production path: it now parses
+    /// attacker-controlled inbound bytes rather than existing only as a
+    /// specification artefact. Malformed payloads are rejected with
+    /// `MalformedPayload`; `UntrustedPeer` and `StaleNonce` behave exactly as they
+    /// do on the typed path.
+    pub fn lz_receive_bytes(
+        env: Env,
+        origin: Origin,
+        _guid: BytesN<32>,
+        message: Bytes,
+    ) -> Result<(), PerihelionError> {
+        Self::authorize_inbound(&env, &origin)?;
 
-        // Lazy-nonce replay guard (unordered delivery).
-        // NOTE: Pause checks are intentionally placed before nonce consumption.
-        // If paused, the message is rejected without advancing the nonce, so it
-        // can be re-delivered once unpaused. This is critical for correctness:
-        // a rejected message must remain re-deliverable.
-        match message {
-            LzMessage::FillInstruction(fi) => {
-                // FillInstruction registers new intents, so it's blocked by pause.
-                Self::require_eid_not_paused(&env, origin.src_eid)?;
-                Self::accept_nonce(&env, origin.src_eid, origin.nonce)?;
-                Self::on_fill_instruction(&env, origin.src_eid, fi)
-            }
-            LzMessage::Cancel(ci) => {
-                // CancelIntent is an exit path — it unwinds existing intents and
-                // remains available even during pause to prevent fund stranding.
-                Self::accept_nonce(&env, origin.src_eid, origin.nonce)?;
-                Self::on_cancel_inbound(&env, ci)
-            }
-        }
+        let (msg_type, fill_instruction, cancel_instruction) =
+            messages::decode_message(&env, &message)?;
+        let parsed = if msg_type == MSG_FILL_INSTRUCTION {
+            LzMessage::FillInstruction(fill_instruction)
+        } else {
+            // `decode_message` only ever returns MSG_FILL_INSTRUCTION or
+            // MSG_CANCEL_INTENT; any other discriminant is already
+            // MalformedPayload by the time we get here.
+            LzMessage::Cancel(cancel_instruction.ok_or(PerihelionError::MalformedPayload)?)
+        };
+
+        Self::apply_inbound(&env, &origin, parsed)
     }
 
     // --- Solver fill -----------------------------------------------------------
@@ -1674,6 +1689,55 @@ impl Perihelion {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(PerihelionError::NotInitialized)
+    }
+
+    /// Authenticate an inbound message: the caller must be the configured
+    /// endpoint and the sender must be the registered peer for the origin eid.
+    ///
+    /// Shared by the typed and raw-bytes receive entrypoints so neither can drift
+    /// from the other's trust boundary (issue #722).
+    fn authorize_inbound(env: &Env, origin: &Origin) -> Result<(), PerihelionError> {
+        // Only the endpoint may deliver messages.
+        Self::require_endpoint(env)?.require_auth();
+
+        // The sender must be our registered peer for this source endpoint id.
+        let expected: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Peer(origin.src_eid))
+            .ok_or(PerihelionError::UntrustedPeer)?;
+        if expected != origin.sender {
+            return Err(PerihelionError::UntrustedPeer);
+        }
+        Ok(())
+    }
+
+    /// Apply an authenticated inbound message: pause gate, nonce guard, handler.
+    ///
+    /// Lazy-nonce replay guard (unordered delivery).
+    /// NOTE: Pause checks are intentionally placed before nonce consumption.
+    /// If paused, the message is rejected without advancing the nonce, so it
+    /// can be re-delivered once unpaused. This is critical for correctness:
+    /// a rejected message must remain re-deliverable.
+    fn apply_inbound(
+        env: &Env,
+        origin: &Origin,
+        message: LzMessage,
+    ) -> Result<(), PerihelionError> {
+        match message {
+            LzMessage::FillInstruction(fi) => {
+                // FillInstruction registers new intents, so it's blocked by pause.
+                Self::require_eid_not_paused(env, origin.src_eid)?;
+                Self::accept_nonce(env, origin.src_eid, origin.nonce)?;
+                Self::on_fill_instruction(env, origin.src_eid, fi)
+            }
+            LzMessage::Cancel(ci) => {
+                // CancelIntent is an exit path — it unwinds existing intents and
+                // remains available even during pause to prevent fund stranding.
+                Self::accept_nonce(env, origin.src_eid, origin.nonce)?;
+                Self::on_cancel_inbound(env, ci)
+            }
+        }
     }
 
     fn require_endpoint(env: &Env) -> Result<Address, PerihelionError> {

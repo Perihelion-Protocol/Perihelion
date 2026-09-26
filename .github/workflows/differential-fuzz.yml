@@ -143,6 +143,29 @@ jobs:
           name: soroban-fuzz-corpus
           path: contracts/shared/wire-vectors/fuzz-corpus/
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.81.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            contracts/soroban/target/
+          key: ${{ runner.os }}-cargo-cross-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      # Runs the raw-bytes entrypoint itself, so the cross-validation job
+      # exercises the decoder on its live path and not only through unit-level
+      # calls (#722).
+      - name: Cross-validate the live raw-bytes inbound path
+        working-directory: contracts/soroban/settlement
+        run: cargo test lz_receive_bytes -- --test-threads=1 --nocapture
+
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:

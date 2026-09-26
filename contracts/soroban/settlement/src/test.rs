@@ -11,7 +11,7 @@ use serde::Deserialize;
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
     testutils::{Address as _, Events, Ledger as _},
-    token, Address, BytesN, Env, Symbol, TryFromVal,
+    token, Address, Bytes, BytesN, Env, Symbol, TryFromVal,
 };
 
 // --- Mock LayerZero endpoint --------------------------------------------------
