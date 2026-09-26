@@ -90,6 +90,7 @@ mod events {
         confirmation_sent,
         cancelled_inbound,
         cancel_ignored,
+        nonce_words_pruned,
     );
 }
 
@@ -137,6 +138,7 @@ mod events {
 // | `cancelled`                    | ("cancelled", intent_hash)             | (src_eid: u32, deadline: u64)
 // | `cancelled_inbound`            | ("cancelled_inbound", intent_hash)     | (src_eid: u32)
 // | `cancel_ignored`               | ("cancel_ignored", intent_hash)        | (status: u32)
+// | `nonce_words_pruned`           | ("nonce_words_pruned",)                | (eid: u32, old_floor: u64, new_floor: u64)
 
 /// Default TTL ceiling for extensions (issue #340). Mirrors the representative
 /// network `max_entry_ttl`; operator must set_max_ttl if network value differs.
@@ -145,18 +147,12 @@ pub const MAX_TTL_DEFAULT: u32 = 3_110_400;
 // Re-export for backwards compatibility and convenience.
 pub const MAX_TTL: u32 = MAX_TTL_DEFAULT;
 
-/// Lower bound accepted by `set_max_ttl` (issue #719). The contract extends its
-/// longest-lived entries — the `Settled`/`Cancelled` idempotency markers,
-/// `ConfirmationSent` records and nonce-bitmap words — to `MAX_TTL`, so a clamp
-/// below that target would let them expire before the protocol's replay-safety
-/// argument assumes. Values under this bound are rejected rather than stored.
-pub const MIN_MAX_TTL: u32 = MAX_TTL_DEFAULT;
-
-/// Upper bound accepted by `set_max_ttl` (issue #719). A clamp above the
-/// network's real `max_entry_ttl` is silently ineffective, so values above the
-/// protocol ceiling for `max_entry_ttl` (~1 year at ~5 s/ledger) are rejected
-/// instead of being stored as an apparently valid but inert configuration.
-pub const MAX_TTL_CEILING: u32 = 6_312_000;
+/// Cap on how many fully-consumed `InboundNonceWord` entries
+/// `prune_nonce_words` may delete in one call (issue #718). 256 words × 64
+/// nonces = up to 16,384 nonces reclaimed per invocation, bounding the scan
+/// so the entrypoint stays within Soroban CPU/instruction limits regardless
+/// of how far the floor has fallen behind. Repeat calls advance further.
+pub const MAX_PRUNE_WORDS_PER_CALL: u32 = 256;
 /// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
 /// absorb late confirmations and the refund window.
 const GRACE_LEDGERS: u32 = 120_960;
@@ -182,7 +178,7 @@ pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 /// to complete. Solvers cannot deliver into a window too short for the confirmation
 /// to land before the deadline. Mirrors EVM's MIN_CONFIRMATION_GRACE (issue #293).
 /// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
-pub const MAX_DISPATCH_WINDOW: u64 = 1_800;
+pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
 
 /// Minimum delay for peer changes (issue #165). Brings Soroban peer-management
 /// under comparable delay/governance as the EVM side (PerihelionTimelock.MIN_DELAY).
@@ -405,14 +401,17 @@ impl Perihelion {
 
     /// Propose a new peer (EVM escrow address) for a source endpoint id (issue #165).
     /// Admin-only. Initiates a delayed peer change; the change becomes effective
-    /// only after the minimum delay has elapsed and the admin calls `confirm_peer`.
+    /// only after the specified delay has elapsed and the admin calls `confirm_peer`.
     ///
-    /// This brings Soroban peer-management under the same governance/delay model as
-    /// the EVM side (PerihelionTimelock), preventing instant unauthorized peer
-    /// rotation if the admin key is compromised. The delay gives users a window to
-    /// detect and react to a suspicious peer change (e.g., via monitoring alerts).
+    /// The `delay` parameter must be between `MIN_PEER_CHANGE_DELAY` and
+    /// `MAX_PEER_CHANGE_DELAY`. This brings Soroban peer-management under the same
+    /// governance/delay model as the EVM side (PerihelionTimelock), preventing instant
+    /// unauthorized peer rotation if the admin key is compromised.
     ///
     /// Emits `peer_change_proposed(eid, old_peer, new_peer, ready_at)` (issue #165).
+    ///
+    /// # Errors
+    /// - `InvalidDelay` if delay < MIN_PEER_CHANGE_DELAY or delay > MAX_PEER_CHANGE_DELAY
     ///
     /// # Peer symmetry (issue #15)
     /// The same peer address is used for **both** inbound validation
@@ -420,11 +419,19 @@ impl Perihelion {
     /// outbound dispatch (`dispatch` looks up `Peer(dst_eid)` where
     /// `dst_eid == rec.src_eid`). This is the intended design: the trusted
     /// counterparty for a given endpoint id is symmetric.
-    pub fn propose_peer(env: Env, eid: u32, new_peer: BytesN<32>) -> Result<(), PerihelionError> {
+    pub fn propose_peer(env: Env, eid: u32, new_peer: BytesN<32>, delay: u64) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
+        if delay < MIN_PEER_CHANGE_DELAY || delay > MAX_PEER_CHANGE_DELAY {
+            return Err(PerihelionError::InvalidDelay);
+        }
+
+        if env.storage().instance().has(&DataKey::PendingPeer(eid)) {
+            return Err(PerihelionError::PendingPeerChangeExists);
+        }
+
         let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
         let now = env.ledger().timestamp();
-        let ready_at = now + MIN_PEER_CHANGE_DELAY;
+        let ready_at = now + delay;
 
         env.storage()
             .instance()
@@ -432,6 +439,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::PendingPeerTime(eid), &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingPeerDelay(eid), &delay);
         env.events().publish(
             (events::peer_change_proposed(&env),),
             (eid, old_peer, new_peer, ready_at),
@@ -440,8 +450,8 @@ impl Perihelion {
     }
 
     /// Confirm and apply a pending peer change (issue #165). Admin-only.
-    /// Must be called after the minimum delay (`MIN_PEER_CHANGE_DELAY`) has elapsed
-    /// since `propose_peer` was called and within the grace period (`PEER_CHANGE_GRACE`).
+    /// Must be called after the specified delay has elapsed since `propose_peer`
+    /// was called and within the grace period (`PEER_CHANGE_GRACE`).
     /// Atomically sets the new peer address and clears the pending state.
     ///
     /// Emits `peer_set(eid, old, new)` when the change is applied (issue #16).
@@ -449,7 +459,7 @@ impl Perihelion {
     ///
     /// # Errors
     /// - `NotPendingPeerChange` if no peer change is pending for this eid
-    /// - `PeerChangeNotReady` if the minimum delay has not yet elapsed
+    /// - `PeerChangeNotReady` if the specified delay has not yet elapsed
     /// - `PeerChangeExpired` if the grace period has elapsed since the proposal
     pub fn confirm_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
@@ -466,18 +476,27 @@ impl Perihelion {
             .get(&DataKey::PendingPeerTime(eid))
             .ok_or(PerihelionError::NotPendingPeerChange)?;
 
+        let delay: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPeerDelay(eid))
+            .ok_or(PerihelionError::NotPendingPeerChange)?;
+
         let now = env.ledger().timestamp();
-        if now < proposed_at + MIN_PEER_CHANGE_DELAY {
+        if now < proposed_at + delay {
             return Err(PerihelionError::PeerChangeNotReady);
         }
 
-        if now > proposed_at + MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE {
+        if now > proposed_at + delay + PEER_CHANGE_GRACE {
             env.events()
                 .publish((events::peer_change_expired(&env),), (eid,));
             env.storage().instance().remove(&DataKey::PendingPeer(eid));
             env.storage()
                 .instance()
                 .remove(&DataKey::PendingPeerTime(eid));
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingPeerDelay(eid));
             return Err(PerihelionError::PeerChangeExpired);
         }
 
@@ -489,6 +508,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .remove(&DataKey::PendingPeerTime(eid));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeerDelay(eid));
 
         env.events()
             .publish((events::PEER_SET,), (eid, old_peer, proposed_peer));
@@ -507,6 +529,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .remove(&DataKey::PendingPeerTime(eid));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeerDelay(eid));
 
         env.events()
             .publish((events::peer_change_cancelled(&env),), (eid,));
@@ -527,13 +552,12 @@ impl Perihelion {
     ) -> Result<Option<(BytesN<32>, u64, u64, u64)>, PerihelionError> {
         let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
         let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
+        let delay: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerDelay(eid));
 
-        Ok(match (peer, time) {
-            (Some(p), Some(t)) => {
-                let ready_at = t.saturating_add(MIN_PEER_CHANGE_DELAY);
-                let expires_at = t
-                    .saturating_add(MIN_PEER_CHANGE_DELAY)
-                    .saturating_add(PEER_CHANGE_GRACE);
+        Ok(match (peer, time, delay) {
+            (Some(p), Some(t), Some(d)) => {
+                let ready_at = t.saturating_add(d);
+                let expires_at = t.saturating_add(d).saturating_add(PEER_CHANGE_GRACE);
                 Some((p, t, ready_at, expires_at))
             }
             _ => None,
@@ -794,6 +818,94 @@ impl Perihelion {
             .unwrap_or(MAX_TTL_DEFAULT)
     }
 
+    /// Reclaim the rent of fully-consumed inbound-nonce bitmap words (issue
+    /// #718). Permissionless: anyone may pay to shrink the contract's storage
+    /// footprint, so no keeper is on the critical path.
+    ///
+    /// Scans `DataKey::InboundNonceWord(eid, w)` for `w` in
+    /// `[floor_word .. floor_word + MAX_PRUNE_WORDS_PER_CALL)` where
+    /// `floor_word = get_inbound_nonce_floor(eid) / 64`. A word is deleted
+    /// only when all 64 of its bits are set — i.e. every nonce it covers has
+    /// been consumed — and it lies strictly below the next not-yet-consumed
+    /// word, so no in-flight (unconsumed) nonce is ever straddled by the
+    /// advance. (Word 0 is complete when bits 1..=63 are set: nonce 0 is
+    /// invalid and rejected before any bitmap lookup.) The floor is then
+    /// raised to the first word that is missing or not fully consumed; every
+    /// nonce below it is rejected by the floor check in `accept_nonce`, so
+    /// deleting the words beneath it cannot re-open a replay.
+    ///
+    /// Work per call is capped by `MAX_PRUNE_WORDS_PER_CALL` (256 words = up
+    /// to 16,384 nonces) to bound CPU and keep the invocation inside Soroban
+    /// resource limits; repeat calls advance further.
+    ///
+    /// Emits `nonce_words_pruned(eid, old_floor, new_floor)` (issue #718).
+    /// No-op (and no event) when nothing below the floor can be reclaimed.
+    pub fn prune_nonce_words(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::require_not_paused(&env)?;
+
+        let instance = env.storage().instance();
+        let floor: u64 = instance
+            .get(&DataKey::InboundNonceFloor(eid))
+            .unwrap_or(0);
+        let old_floor = floor;
+
+        // Word containing the current floor. Words strictly below it were
+        // already pruned by earlier calls.
+        let mut word = floor / 64;
+
+        // Scan forward over contiguous fully-consumed words.
+        let ps = env.storage().persistent();
+        let mut scanned: u32 = 0;
+        while scanned < MAX_PRUNE_WORDS_PER_CALL {
+            // Word 0 special case: nonce 0 is invalid (LayerZero nonces start
+            // at 1) and is rejected by `accept_nonce` before any bitmap
+            // lookup, so bit 0 of word 0 can never be set. Word 0 is complete
+            // when its other 63 bits are.
+            let complete_mask: u64 = if word == 0 { u64::MAX - 1 } else { u64::MAX };
+            let word_key = DataKey::InboundNonceWord(eid, word);
+            let w: u64 = match ps.get(&word_key) {
+                Some(w) => w,
+                // Missing word: either never used or already pruned. In either
+                // case nothing more can be reclaimed contiguously — stop.
+                None => break,
+            };
+            if w != complete_mask {
+                // Not every nonce this word covers has been consumed; the
+                // window may still deliver stragglers. Stop before it.
+                break;
+            }
+            // Fully consumed and strictly below the not-yet-consumed frontier:
+            // delete it and move the floor past it.
+            ps.remove(&word_key);
+            word += 1;
+            scanned += 1;
+        }
+
+        // Floor moves to the first nonce of the first word that did NOT get
+        // pruned (or stays put if none were). Note: when the scan stopped on a
+        // partially-consumed word W, the new floor is W's first nonce, i.e.
+        // every nonce of W remains > floor and keeps its bitmap lookup.
+        let new_floor = word * 64;
+        if new_floor > old_floor {
+            instance.set(&DataKey::InboundNonceFloor(eid), &new_floor);
+            env.events().publish(
+                (events::nonce_words_pruned(&env),),
+                (eid, old_floor, new_floor),
+            );
+        }
+        Ok(())
+    }
+
+    /// Get the per-eid inbound-nonce low-water mark (issue #718): every nonce
+    /// below this value has been consumed and rejected by the floor check in
+    /// `accept_nonce`; its bitmap word, if any, has been pruned.
+    pub fn get_inbound_nonce_floor(env: Env, eid: u32) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InboundNonceFloor(eid))
+            .unwrap_or(0)
+    }
+
     // --- LayerZero inbound -----------------------------------------------------
 
     /// LayerZero receive hook. Callable only by the configured endpoint, and only
@@ -866,10 +978,7 @@ impl Perihelion {
             return Err(PerihelionError::AlreadyFilled);
         }
         let now = env.ledger().timestamp();
-        if now >= rec.deadline {
-            return Err(PerihelionError::IntentExpired);
-        }
-        if now + MAX_DISPATCH_WINDOW > rec.deadline {
+        if now.saturating_add(MIN_DISPATCH_WINDOW) > rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
@@ -1175,9 +1284,9 @@ impl Perihelion {
 
         Self::send_cancel(&env, &caller, &rec, types::CANCEL_REASON_EXPIRED, lz_fee)?;
 
-        // Issue #173: pay keeper reward if configured. The reward is paid from
-        // contract reserves after the cancellation is finalized, so failures to
-        // pay do not roll back the cancellation.
+        // Pay the configured keeper reward after cancellation bookkeeping. Soroban
+        // invocations are atomic: if this transfer fails because the reserve is
+        // underfunded, the cancellation is rolled back too.
         let keeper_reward: i128 = env
             .storage()
             .instance()
@@ -1490,20 +1599,22 @@ impl Perihelion {
 
     /// Accept a nonce exactly once, regardless of delivery order. Uses an
     /// unbounded per-`(eid, word_index)` bitmap that mirrors the EVM
-    /// `_inboundNonceBitmap[srcEid][wordIndex]` layout (issue #285).
+    /// `_inboundNonceBitmap[srcEid][wordIndex]` layout (issue #285), plus a
+    /// per-eid low-water mark that bounds its storage footprint (issue #718).
     ///
     /// A nonce `n` is tracked at:
     ///   word_index = n / 64
     ///   bit_index  = n % 64
     ///
     /// Each storage word covers 64 consecutive nonces. Words are created lazily
-    /// on first use and **never discarded**, so messages from any in-flight
-    /// delivery window (no matter how large the gap between nonces) are always
-    /// accepted exactly once. This makes the two implementations semantically
-    /// equivalent: no "window advance" can silently drop in-flight messages.
+    /// on first use and discarded by `prune_nonce_words` once every nonce they
+    /// cover is provably consumed, so messages from any in-flight delivery
+    /// window are always accepted exactly once while storage stays bounded.
     ///
-    /// Storage cost is one persistent entry per 64 nonces, proportional to
-    /// actual traffic.
+    /// Storage cost is one persistent entry per 64 nonces **above the pruned
+    /// floor** only: a nonce `n < InboundNonceFloor(eid)` is rejected outright
+    /// by the floor comparison below — its bitmap word cannot re-open it, so
+    /// that word need not exist (issue #718).
     ///
     /// This is the **LayerZero transport nonce** guard — distinct from the
     /// `Intent.nonce` 256-bit random field in the EIP-712 payload (collision
@@ -1512,6 +1623,19 @@ impl Perihelion {
     /// `docs/TECHNICAL-ARCHITECTURE.md`.
     fn accept_nonce(env: &Env, eid: u32, nonce: u64) -> Result<(), PerihelionError> {
         if nonce == 0 {
+            return Err(PerihelionError::StaleNonce);
+        }
+
+        // Low-water mark (issue #718): every nonce below the floor was fully
+        // consumed and its bitmap word (if any) pruned, so it is rejected by
+        // this comparison alone — no bitmap lookup, and no way for a pruned
+        // word to re-open it to replay.
+        let floor: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InboundNonceFloor(eid))
+            .unwrap_or(0);
+        if nonce < floor {
             return Err(PerihelionError::StaleNonce);
         }
 

@@ -189,7 +189,7 @@ fn setup() -> Setup {
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
     // Peer governance (issue #165): propose, advance time, confirm
-    client.propose_peer(&src_eid, &peer);
+    client.propose_peer(&src_eid, &peer, MIN_PEER_CHANGE_DELAY);
     env.ledger().with_mut(|li| {
         li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
     });
@@ -701,6 +701,218 @@ fn nonce_zero_always_rejected() {
     register_intent(&s, &hash(&s.env, 0xF0), &recipient, 1, 5_000, 0, None);
 }
 
+// --- Issue #718: nonce-word pruning (bounded storage footprint) ---------------
+
+/// Attempt to deliver an intent for `nonce` via lz_receive without panicking.
+/// The intent hash is derived from the nonce (unique per nonce). Used to assert
+/// accept/reject decisions around the pruned floor.
+fn try_deliver_nonce(
+    s: &Setup,
+    eid: u32,
+    nonce: u64,
+    deadline: u64,
+) -> Result<(), PerihelionError> {
+    let mut hb = [0u8; 32];
+    hb[24..32].copy_from_slice(&nonce.to_be_bytes());
+    let h = BytesN::from_array(&s.env, &hb);
+    let fi = FillInstruction {
+        intent_hash: h,
+        src_eid: eid,
+        recipient: Address::generate(&s.env),
+        dest_asset: s.asset.clone(),
+        min_dest_amount: 1,
+        deadline,
+        preferred_solver: None,
+        reservation_window: 0,
+    };
+    let origin = Origin {
+        src_eid: eid,
+        sender: s.peer.clone(),
+        nonce,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    let res = s
+        .client
+        .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+    // A contract revert surfaces as Err(Ok(PerihelionError)) on the outer
+    // layer (same shape the other try_* assertions in this file rely on).
+    match res {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(e.unwrap()),
+    }
+}
+
+/// Consume `nonce` through the public lz_receive entrypoint (panics on error).
+fn deliver_nonce(s: &Setup, eid: u32, nonce: u64, deadline: u64) {
+    try_deliver_nonce(s, eid, nonce, deadline).expect("nonce must be accepted");
+}
+
+fn nonce_pruned_event_count(env: &Env) -> usize {
+    let expected = Symbol::new(env, "nonce_words_pruned");
+    env.events()
+        .all()
+        .iter()
+        .filter(|(_, topics, _)| {
+            topics
+                .iter()
+                .any(|t| Symbol::try_from_val(env, &t).map(|s| s == expected).unwrap_or(false))
+        })
+        .count()
+}
+
+/// AC1 (issue #718): consuming several thousand nonces and pruning reclaims
+/// every fully-consumed word — the entry count falls — while every consumed
+/// nonce, including ones whose word was removed, is still rejected as stale.
+#[test]
+fn prune_reclaims_words_and_keeps_replay_protection() {
+    let s = setup();
+    let eid = s.src_eid;
+    let deadline = 5_000;
+
+    // Consume nonces 1..=3,200: words 0..=49 fully consumed. Word 0 is
+    // complete with only nonces 1..=63 (nonce 0 is invalid), words 1..=49
+    // need all 64 bits (nonce 3,199 is word 49's last). Nonce 3,200 opens
+    // word 50, leaving it partially consumed.
+    const LAST_NONCE: u64 = 3_200;
+    for n in 1u64..=LAST_NONCE {
+        deliver_nonce(&s, eid, n, deadline);
+    }
+    assert_eq!(s.client.get_inbound_nonce_floor(&eid), 0);
+
+    // Prune repeatedly until the floor stops advancing (work per call is
+    // capped by MAX_PRUNE_WORDS_PER_CALL; repeat calls advance further).
+    let mut rounds = 0u32;
+    loop {
+        let before = s.client.get_inbound_nonce_floor(&eid);
+        s.client.prune_nonce_words(&eid);
+        let after = s.client.get_inbound_nonce_floor(&eid);
+        if after == before {
+            break;
+        }
+        rounds += 1;
+        assert!(rounds <= 10, "pruning failed to converge");
+    }
+
+    // The floor now sits at the first nonce NOT covered by a reclaimed word:
+    // words 0..=49 were pruned (their rent recovered), only word 50 remains —
+    // steady-state storage no longer grows with total message volume.
+    let expected_floor = LAST_NONCE;
+    assert_eq!(
+        s.client.get_inbound_nonce_floor(&eid),
+        expected_floor,
+        "floor must advance past every fully-consumed word"
+    );
+
+    // Every consumed nonce below the floor — including ones whose bitmap word
+    // was deleted — is still rejected as stale, by the floor check alone.
+    for n in [1u64, 63, 64, 1000, 3199] {
+        let err = try_deliver_nonce(&s, eid, n, deadline)
+            .expect_err("replay of a consumed nonce must be rejected");
+        assert_eq!(err, PerihelionError::StaleNonce);
+    }
+}
+
+/// AC2 (issue #718): a partially-consumed word blocks the floor. Only fully
+/// consumed words are reclaimed; the incomplete word's nonces stay
+/// bitmap-tracked and fresh nonces from it are still accepted.
+#[test]
+fn prune_stops_at_partially_consumed_word() {
+    let s = setup();
+    let eid = s.src_eid;
+    let deadline = 5_000;
+
+    // Fully consume word 0 (nonces 1..=63), then only nonce 100 of word 1.
+    for n in 1u64..=63 {
+        deliver_nonce(&s, eid, n, deadline);
+    }
+    deliver_nonce(&s, eid, 100, deadline);
+
+    s.client.prune_nonce_words(&eid);
+
+    // Word 0 reclaimed: floor = first nonce of word 1.
+    assert_eq!(s.client.get_inbound_nonce_floor(&eid), 64);
+
+    // A late-arriving nonce below the floor (word pruned) is rejected...
+    let err = try_deliver_nonce(&s, eid, 5, deadline)
+        .expect_err("nonce below the floor must be rejected");
+    assert_eq!(err, PerihelionError::StaleNonce);
+
+    // ...while a fresh nonce from the partially-consumed word is accepted.
+    deliver_nonce(&s, eid, 99, deadline);
+}
+
+/// AC3 (issue #718): a gap in consumption blocks the floor at the gap. Words
+/// before the gap are reclaimed; once stragglers fill the gap word, the next
+/// prune reclaims it too and late replays stay rejected.
+#[test]
+fn prune_blocked_by_gap_until_stragglers_arrive() {
+    let s = setup();
+    let eid = s.src_eid;
+    let deadline = 5_000;
+
+    // Word 0 fully consumed (nonces 1..=63 suffice: nonce 0 is invalid).
+    // Word 1: only nonce 70 so far. Word 2+: empty.
+    for n in 1u64..=63 {
+        deliver_nonce(&s, eid, n, deadline);
+    }
+    deliver_nonce(&s, eid, 70, deadline);
+
+    s.client.prune_nonce_words(&eid);
+    assert_eq!(s.client.get_inbound_nonce_floor(&eid), 64);
+
+    // Stragglers of word 1 arrive (out of order; 70 was already consumed).
+    // Once all 64 bits are set the next prune reclaims the word and advances
+    // the floor past it.
+    for n in 64u64..=127 {
+        if n != 70 {
+            deliver_nonce(&s, eid, n, deadline);
+        }
+    }
+    s.client.prune_nonce_words(&eid);
+    assert_eq!(s.client.get_inbound_nonce_floor(&eid), 128);
+
+    // A late replay of anything from the pruned words stays rejected.
+    for n in [1u64, 63, 64, 70, 127] {
+        let err = try_deliver_nonce(&s, eid, n, deadline)
+            .expect_err("replay of a consumed nonce must be rejected");
+        assert_eq!(err, PerihelionError::StaleNonce);
+    }
+}
+
+/// Permissionless: pruning requires no admin, and a floor advance emits
+/// `nonce_words_pruned(eid, old_floor, new_floor)`.
+#[test]
+fn prune_is_permissionless_and_emits_event() {
+    let s = setup();
+    let eid = s.src_eid;
+    let deadline = 5_000;
+
+    for n in 1u64..=64 {
+        deliver_nonce(&s, eid, n, deadline);
+    }
+    assert_eq!(nonce_pruned_event_count(&s.env), 0);
+
+    // Any account may call it; no admin auth is involved.
+    s.client.prune_nonce_words(&eid);
+
+    assert_eq!(s.client.get_inbound_nonce_floor(&eid), 64);
+    assert_eq!(nonce_pruned_event_count(&s.env), 1);
+}
+
+/// Pruning when there is nothing fully consumed is a no-op: no floor change,
+/// no event.
+#[test]
+fn prune_noop_when_nothing_to_reclaim() {
+    let s = setup();
+    let other_eid = 40404u32;
+
+    s.client.prune_nonce_words(&other_eid);
+
+    assert_eq!(s.client.get_inbound_nonce_floor(&other_eid), 0);
+    assert_eq!(nonce_pruned_event_count(&s.env), 0);
+}
+
 #[test]
 fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
     let s = setup();
@@ -717,7 +929,7 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
     // the body-declared eid is itself a trusted peer.
     let attacker_eid = 99999u32;
     let attacker_peer = BytesN::from_array(&s.env, &[0xAA; 32]);
-    s.client.propose_peer(&attacker_eid, &attacker_peer);
+    s.client.propose_peer(&attacker_eid, &attacker_peer, MIN_PEER_CHANGE_DELAY);
     s.env.ledger().with_mut(|li| {
         li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
     });
@@ -881,7 +1093,7 @@ fn set_endpoint_emits_event() {
 fn peer_governance_propose_emits_event() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer);
+    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
     let events = s.env.events().all();
     assert!(!events.is_empty(), "expected peer_change_proposed event");
 }
@@ -890,7 +1102,7 @@ fn peer_governance_propose_emits_event() {
 fn peer_governance_confirm_requires_delay() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer);
+    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
 
     // Should fail if called before the delay
     assert!(s.client.try_confirm_peer(&s.src_eid).is_err());
@@ -906,7 +1118,7 @@ fn peer_governance_confirm_requires_delay() {
 fn peer_governance_cancel_clears_pending() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer);
+    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
 
     // Cancel the pending peer change
     assert!(s.client.try_cancel_pending_peer(&s.src_eid).is_ok());
@@ -929,7 +1141,7 @@ fn peer_governance_get_pending_peer() {
     assert!(pending.unwrap().unwrap().is_none());
 
     // After propose, should return the pending peer
-    s.client.propose_peer(&s.src_eid, &new_peer);
+    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
     let pending = s.client.try_get_pending_peer(&s.src_eid);
     assert!(pending.is_ok());
     let (peer, _proposed_at, _ready_at, _expires_at) = pending.unwrap().unwrap().unwrap();
@@ -1232,7 +1444,7 @@ fn peer_set_event_shape() {
     let new_peer: BytesN<32> = BytesN::from_array(&s.env, &[0xFF; 32]);
 
     // Propose the new peer
-    s.client.propose_peer(&s.src_eid, &new_peer);
+    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
 
     // Advance time past the minimum delay
     s.env.ledger().with_mut(|li| {
@@ -2205,7 +2417,7 @@ fn cancel_succeeds_without_native_token_configured() {
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
-    client.propose_peer(&src_eid, &peer);
+    client.propose_peer(&src_eid, &peer, MIN_PEER_CHANGE_DELAY);
     env.ledger().with_mut(|li| {
         li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
     });
