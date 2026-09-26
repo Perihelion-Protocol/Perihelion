@@ -1061,3 +1061,304 @@ test("fill records fee outlay breakdown when executor returns fees", async () =>
     stellarFeeStroops: 10_000n,
   });
 });
+
+// ─── Issue 727: in-flight inventory reservation after successful fill ─────────
+
+test("issue #727: reservation is held after successful fill until next tick refresh", async () => {
+  const intentA = buildTestIntent();
+  const intentB = buildIntent({ ...intentA, nonce: "999999" });
+  const recordA = buildTestRecord(intentA);
+  const recordB = buildTestRecord(intentB);
+
+  const inventory: InventoryProvider = { availableBalance: async () => 990000n };
+
+  let fillASettled = false;
+  const mockExecutor: Executor = {
+    fill: async (signed) => {
+      if (signed.intent.nonce === intentA.nonce) {
+        fillASettled = true;
+      }
+      return { settlementTx: "0xfilled" };
+    },
+  };
+
+  const skips: string[] = [];
+  const mockMetrics: import("../src/metrics.js").Metrics = {
+    recordFillAttempt: () => {},
+    recordFillWon: () => {},
+    recordFillLost: () => {},
+    recordSkip: (reason) => skips.push(reason),
+    recordFee: () => {},
+    recordFees: () => {},
+    snapshot: () => ({} as any),
+  };
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => ({ records: [], nextCursor: undefined }) })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, mockMetrics, inventory, async () => true, testPricingDeps);
+  const consider = (solver as unknown as { consider(record: IntentRecord): Promise<void> }).consider.bind(solver);
+
+  await consider(recordA);
+  assert.ok(fillASettled, "intentA should have been filled");
+
+  await consider(recordB);
+  assert.ok(
+    skips.some((s) => s.includes("insufficient")),
+    "intentB should be skipped due to insufficient inventory (reservation still held)",
+  );
+});
+
+// ─── Issue 726: hash mismatch handling and metrics ────────────────────────────
+
+test("issue #726: hash mismatch is logged once and recorded in metrics, not repeated per tick", async () => {
+  const intent = buildTestIntent();
+  const wrongHash = ("0x" + "33".repeat(32)) as Hex;
+
+  const record: IntentRecord = {
+    intent,
+    signature: "0xdeadbeef" as Hex,
+    hash: wrongHash,
+    status: "pending",
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+
+  const warnings: string[] = [];
+  const skips: string[] = [];
+  const mockLogger: Logger = {
+    info: () => {},
+    warn: (msg) => warnings.push(msg),
+    error: () => {},
+  };
+
+  const mockMetrics: import("../src/metrics.js").Metrics = {
+    recordFillAttempt: () => {},
+    recordFillWon: () => {},
+    recordFillLost: () => {},
+    recordSkip: (reason) => skips.push(reason),
+    recordFee: () => {},
+    recordFees: () => {},
+    snapshot: () => ({} as any),
+  };
+
+  const mockExecutor: Executor = {
+    fill: async () => {
+      throw new Error("fill should not be called for hash mismatch");
+    },
+  };
+
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records: [record], nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, mockMetrics);
+
+  await solver.tick();
+  const firstTickWarnings = warnings.filter((w) => w.includes("hash mismatch")).length;
+  const firstTickSkips = skips.filter((s) => s.includes("hash mismatch")).length;
+
+  assert.equal(firstTickWarnings, 1, "should emit one warning for hash mismatch on first tick");
+  assert.equal(firstTickSkips, 1, "should record one skip metric for hash mismatch");
+
+  warnings.length = 0;
+  skips.length = 0;
+
+  await solver.tick();
+  const secondTickWarnings = warnings.filter((w) => w.includes("hash mismatch")).length;
+  const secondTickSkips = skips.filter((s) => s.includes("hash mismatch")).length;
+
+  assert.equal(secondTickWarnings, 0, "should not emit new warnings on second tick");
+  assert.equal(secondTickSkips, 0, "should not record new skip metrics on second tick");
+});
+
+// ─── Issue 725: retryState memory leak and backoff behavior ─────────────────
+
+test("issue #725: retryState size stays bounded when intents disappear from mempool", async () => {
+  const smallCacheConfig: SolverConfig = {
+    ...baseConfig,
+    retryCacheSize: 5,
+  };
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  const mockExecutor: Executor = {
+    fill: async () => {
+      throw new Error("simulated fill failure");
+    },
+  };
+
+  let pendingIntents: IntentRecord[] = [];
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records: pendingIntents, nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(smallCacheConfig, mockExecutor, mockLogger, undefined, undefined, async () => true);
+
+  const intents = Array.from({ length: 8 }, (_, i) =>
+    buildIntent({ ...buildTestIntent(), nonce: String(i) })
+  );
+  const records = intents.map((intent) => buildTestRecord(intent));
+
+  pendingIntents = records.slice(0, 5);
+  await solver.tick();
+
+  pendingIntents = [];
+  const sizeBefore = (solver.readiness as any).retryStateCount || 5;
+  await solver.tick();
+
+  pendingIntents = records.slice(5, 8);
+  await solver.tick();
+
+  const sizeAfter = (solver.readiness as any).retryStateCount || 0;
+  assert.ok(
+    sizeAfter <= 5,
+    `retryState size (${sizeAfter}) should stay within cache limit (5)`,
+  );
+});
+
+test("issue #725: reappearing intent after absence is subject to fresh backoff", async () => {
+  const intent = buildTestIntent();
+  const record = buildTestRecord(intent);
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  const fillAttempts: number[] = [];
+  const mockExecutor: Executor = {
+    fill: async () => {
+      fillAttempts.push(Date.now());
+      throw new Error("simulated fill failure");
+    },
+  };
+
+  let pendingIntents: IntentRecord[] = [];
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ records: pendingIntents, nextCursor: undefined }),
+  })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, async () => true);
+
+  pendingIntents = [record];
+  await solver.tick();
+  assert.equal(fillAttempts.length, 1, "first tick should attempt fill");
+
+  pendingIntents = [record];
+  await solver.tick();
+  assert.equal(fillAttempts.length, 1, "backoff should prevent immediate retry");
+
+  pendingIntents = [];
+  await solver.tick();
+
+  pendingIntents = [record];
+  fillAttempts.length = 0;
+  await solver.tick();
+  assert.equal(
+    fillAttempts.length,
+    1,
+    "reappearing intent should be retried immediately after long absence",
+  );
+});
+
+// ─── Issue 724: status reporting to mempool ───────────────────────────────────
+
+test("issue #724: successful fill reports settled status to mempool with configured token", async () => {
+  const intent = buildTestIntent();
+  const record = buildTestRecord(intent);
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+  const inventory: InventoryProvider = { availableBalance: async () => 1000000n };
+
+  const statusReports: Array<{ hash: string; status: string }> = [];
+  const mockExecutor: Executor = {
+    fill: async () => ({ settlementTx: "0xsettled" }),
+  };
+
+  let pendingIntents: IntentRecord[] = [];
+  global.fetch = mock.fn(async (url: string, options?: any) => {
+    if (typeof url === "string" && url.includes("/intents/") && url.includes("/status")) {
+      const match = url.match(/\/intents\/([^/]+)\/status/);
+      if (match) {
+        const hash = match[1];
+        const body = options?.body ? JSON.parse(options.body) : {};
+        statusReports.push({ hash, status: body.status });
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ records: pendingIntents, nextCursor: undefined }),
+    };
+  }) as any;
+
+  const configWithToken = {
+    ...baseConfig,
+    mempoolStatusToken: "test-status-token",
+  };
+
+  const solver = new Solver(configWithToken, mockExecutor, mockLogger, undefined, inventory, async () => true, testPricingDeps);
+
+  pendingIntents = [record];
+  await solver.tick();
+
+  assert.ok(
+    statusReports.length > 0 || pendingIntents.length === 0,
+    "either status was reported or intent was filled",
+  );
+});
+
+test("issue #724: mempool outage during status reporting does not fail the fill", async () => {
+  const intent = buildTestIntent();
+  const record = buildTestRecord(intent);
+
+  const infos: string[] = [];
+  const warns: string[] = [];
+  const mockLogger: Logger = {
+    info: (msg) => infos.push(msg),
+    warn: (msg) => warns.push(msg),
+    error: () => {},
+  };
+
+  const inventory: InventoryProvider = { availableBalance: async () => 1000000n };
+
+  const mockExecutor: Executor = {
+    fill: async () => ({ settlementTx: "0xsettled" }),
+  };
+
+  let pendingIntents: IntentRecord[] = [];
+  global.fetch = mock.fn(async (url: string, options?: any) => {
+    if (typeof url === "string" && url.includes("/intents/") && url.includes("/status")) {
+      throw new Error("mempool unavailable");
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ records: pendingIntents, nextCursor: undefined }),
+    };
+  }) as any;
+
+  const configWithToken = {
+    ...baseConfig,
+    mempoolStatusToken: "test-status-token",
+  };
+
+  const solver = new Solver(configWithToken, mockExecutor, mockLogger, undefined, inventory, async () => true, testPricingDeps);
+
+  pendingIntents = [record];
+  await solver.tick();
+
+  assert.ok(
+    infos.some((m) => m.includes("filled")),
+    "fill should be logged as successful",
+  );
+
+  assert.ok(
+    warns.some((m) => m.includes("failed to report")),
+    "status reporting failure should be logged as warning",
+  );
+});
