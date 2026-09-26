@@ -28,7 +28,7 @@ including cross-layer synonyms (e.g., "release" vs. "settle") used throughout th
 | Component | Status | Current state | Target |
 |-----------|--------|-----------------|---------|
 | **Soroban LayerZero Endpoint** | Interface + Mock | `contracts/soroban/settlement/src/endpoint.rs` defines `LzEndpoint` as a swappable abstraction; a mock implements it locally | Real endpoint or thin adapter once Soroban LayerZero stack is GA |
-| **Inbound FillInstruction Codec** | Pending | Typed stub; deserialization deferred | Full implementation after cross-chain message format is finalized (#2) |
+| **Inbound FillInstruction Codec** | Implemented and reachable | `messages.rs` decodes FillInstruction/CancelIntent from raw wire bytes and `Perihelion::lz_receive_bytes` puts that decoder on a callable path alongside the typed `lz_receive` (see §3.3.2) | LayerZero adapter contract that delivers raw bytes; field-level fixes tracked separately (#271) |
 | **Relayer Watcher & Delivery** | Stubs | Message watcher and delivery in `relayer/` are stubbed for local testing | Production relayer implementations in active development |
 | **Solver Executor** | Unimplemented | Not yet implemented in `solver/` | Required for Phase 1 (#5) |
 | **Value Caps & Circuit Breaker** | Pending | No per-intent maxima or rolling-window caps yet | Per-intent and window-based limits, timelock-governed (#145) |
@@ -1071,6 +1071,38 @@ When introducing version `N+1`:
       have switched to `N+1` and the pending-nonce queue has drained.
 - [ ] Update this section and the conformance-vector README to reflect the new
       current version and retired version.
+
+### 3.3.2 Where raw-bytes decoding lives (issue #722)
+
+The contract exposes **two** inbound entrypoints that share one trust boundary and
+one dispatch path:
+
+| Entrypoint | Argument | When to use it |
+|------------|----------|----------------|
+| `lz_receive` | `message: LzMessage` | The endpoint (or adapter) already decoded the payload and marshals a typed `LzMessage` through the Soroban ABI. |
+| `lz_receive_bytes` | `message: Bytes` | The endpoint hands over the unmodified LayerZero `message` bytes. The contract decodes them itself. |
+
+Both entrypoints run the same sequence:
+
+1. **Authenticate** — `authorize_inbound` requires the configured endpoint's
+   authorization and that `origin.sender` equals `Peer(origin.src_eid)`. No byte
+   is parsed before this passes, so malformed payloads from anyone but the
+   registered peer are rejected as `UntrustedPeer` rather than as a decode error.
+2. **Decode (raw path only)** — `messages::decode_message` validates the version
+   byte and message type, then routes to `decode_fill_instruction` /
+   `decode_cancel_intent`. This is the same function the differential-fuzz
+   harness (`fuzz.rs`) calls, so the fuzzed codec *is* the live codec.
+3. **Dispatch** — `apply_inbound` applies the pause gate (FillInstruction is
+   blocked while paused; CancelIntent stays available as an exit path), consumes
+   the transport nonce exactly once, and calls `on_fill_instruction` /
+   `on_cancel_inbound`.
+
+The decoders are `pub` and compiled into the release `cdylib`; they are no longer
+`#[allow(dead_code)]` helpers reachable only from tests. `endpoint.rs` is still a
+mock, so the adapter that will actually deliver raw bytes — and the DVN
+verification in front of it — remains unimplemented (§3.2); the differential-fuzz
+harness verifies **codec parity against the specification**, not parity against a
+live endpoint.
 
 ### 3.4 Nonce management — LayerZero vs. Perihelion
 

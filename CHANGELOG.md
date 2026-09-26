@@ -12,6 +12,17 @@ versioned independently.
 
 ## [Unreleased]
 
+### Added
+
+- **Soroban settlement:** `lz_receive_bytes` accepts the raw LayerZero `message`
+  bytes, decodes them with the same codec the differential-fuzz harness
+  exercises, and dispatches through the same endpoint/peer checks, pause gate,
+  nonce guard and handlers as the typed `lz_receive`. The inbound decoders are now
+  `pub` and compiled into the release contract instead of being
+  `#[allow(dead_code)]` test-only helpers, and `decode_fill_instruction` accepts
+  both the documented 219-byte layout and the 227-byte layout with a trailing
+  `reservation_window` (#722).
+
 ### Changed
 
 - **Breaking (Soroban events):** every settlement-contract event topic is now

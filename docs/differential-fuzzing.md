@@ -107,6 +107,14 @@ proptest! {
 }
 ```
 
+The decoders this harness fuzzes are also compiled into the deployed contract:
+`Perihelion::lz_receive_bytes` parses raw inbound bytes with `decode_message`, so
+the codec under test is the one that handles attacker-controlled input on the live
+path (#722). The verification claim below is still scoped to **codec parity
+against the specification** — the LayerZero adapter that will deliver those bytes
+to `lz_receive_bytes` is a mock, so nothing on the live network exercises the path
+yet.
+
 **Corpus export**: Adversarial cases are written to `fuzz-corpus/*.hex`:
 
 ```rust

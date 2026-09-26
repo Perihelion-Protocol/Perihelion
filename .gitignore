@@ -55,8 +55,6 @@ TTL-ARCHIVAL-TESTING.md
 .DS_Store
 Thumbs.db
 .idea/
-.vscode/*
-!.vscode/extensions.json
 *.log
 *.swp
 *.swo
@@ -65,3 +63,7 @@ Thumbs.db
 *.orig
 *.bak
 *.tmp
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
