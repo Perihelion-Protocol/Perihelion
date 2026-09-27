@@ -15,6 +15,12 @@ concurrency:
   group: changelog-check-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege: this job only reads PR metadata and labels.
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
 jobs:
   check:
     name: CHANGELOG.md updated

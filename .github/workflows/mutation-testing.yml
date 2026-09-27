@@ -36,6 +36,10 @@ concurrency:
   group: mutation-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default; jobs only check out, build, and run mutation tools.
+permissions:
+  contents: read
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Soroban / Rust: cargo-mutants
 # ─────────────────────────────────────────────────────────────────────────────
@@ -47,15 +51,15 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' && (inputs.stack == 'soroban' || inputs.stack == 'all')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable (pinned)
         with:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.2.3
         with:
           path: |
             ~/.cargo/registry
@@ -91,7 +95,7 @@ jobs:
 
       - name: Upload cargo-mutants report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: soroban-mutants-report
           path: |
@@ -118,10 +122,10 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' && (inputs.stack == 'ts' || inputs.stack == 'all')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -167,7 +171,7 @@ jobs:
 
       - name: Upload Stryker reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: stryker-mutation-report
           path: |
@@ -204,10 +208,10 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' && (inputs.stack == 'evm' || inputs.stack == 'all')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09  # v1.6.0
         with:
           version: ${{ env.FOUNDRY_VERSION }}
 
@@ -216,9 +220,11 @@ jobs:
         run: forge install foundry-rs/forge-std@${{ env.FORGE_STD_VERSION }} --no-git
 
       - name: Install Rust (required by vertigo-rs)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable (pinned)
 
       - name: Install vertigo-rs
+        # TODO(maintainer): pin to a specific crates.io version once verified;
+        # crates.io could not be reached from this environment to confirm one.
         run: cargo install vertigo-rs --locked
 
       - name: Build EVM contracts
@@ -246,7 +252,7 @@ jobs:
 
       - name: Upload EVM mutation report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: evm-mutation-report
           path: contracts/evm/mutation-report.txt
