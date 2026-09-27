@@ -13,6 +13,7 @@ services:
   # Stellar local testnet using Stellar Quickstart
   stellar:
     image: stellar/quickstart:21.2.0
+    command: --local --enable-soroban-rpc
     environment:
       STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
       SOROBAN_RPC_HOST: "0.0.0.0"
@@ -24,7 +25,7 @@ services:
     networks:
       - perihelion
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/getHealth"]
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -38,14 +39,16 @@ services:
       args:
         PACKAGE: mempool
     depends_on:
-      - anvil
-      - stellar
+      anvil:
+        condition: service_started
+      stellar:
+        condition: service_started
     environment:
       # Production mode so Express never emits stack traces on error paths.
       NODE_ENV: production
       PORT: 3000
       PERIHELION_SOURCE_CHAIN_ID: 31337
-      PERIHELION_ESCROW_ADDRESS: "0x0000000000000000000000000000000000000000"
+      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
       # Bind every interface so the relayer and solver containers can reach it.
       PERIHELION_MEMPOOL_HOST: "0.0.0.0"
     ports:
@@ -53,7 +56,7 @@ services:
     networks:
       - perihelion
     healthcheck:
-      test: ["CMD", "node", "/usr/local/lib/perihelion/healthcheck.cjs"]
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 404 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -68,11 +71,11 @@ services:
         PACKAGE: relayer
     depends_on:
       mempool:
-        condition: service_healthy
+        condition: service_started
       anvil:
         condition: service_started
       stellar:
-        condition: service_healthy
+        condition: service_started
     environment:
       NODE_ENV: development
       # EVM configuration
@@ -83,9 +86,9 @@ services:
       STELLAR_NETWORK: "Test SDF Network ; September 2015"
       PERIHELION_STELLAR_EID: 40161
       # Relayer configuration
-      PERIHELION_ESCROW_ADDRESS: "0x0000000000000000000000000000000000000000"
+      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
       PERIHELION_SETTLEMENT_CONTRACT: "CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS"
-      SIGNER_SECRET: ${SIGNER_SECRET:?set SIGNER_SECRET}
+      SIGNER_SECRET: ${SIGNER_SECRET:?set SIGNER_SECRET to a valid Stellar secret key}
       PERIHELION_CONFIRMATIONS: "1"
       PERIHELION_POLL_INTERVAL_MS: "5000"
       PERIHELION_CHECKPOINT_FILE: "/tmp/relayer-checkpoint.json"
@@ -116,20 +119,20 @@ services:
         PACKAGE: solver
     depends_on:
       mempool:
-        condition: service_healthy
+        condition: service_started
       anvil:
         condition: service_started
       stellar:
-        condition: service_healthy
+        condition: service_started
     environment:
       NODE_ENV: development
       # Mempool configuration
       PERIHELION_MEMPOOL_URL: http://mempool:3000
       # Solver identification
-      PERIHELION_SOLVER_ADDRESS: "0x0000000000000000000000000000000000000000"
+      PERIHELION_SOLVER_ADDRESS: ${PERIHELION_SOLVER_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
       # Chain configuration
       PERIHELION_SOURCE_CHAIN_ID: 31337
-      PERIHELION_ESCROW_ADDRESS: "0x0000000000000000000000000000000000000000"
+      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
       # Solver parameters
       PERIHELION_MIN_MARGIN_BPS: 10
       PERIHELION_POLL_INTERVAL_MS: "2000"

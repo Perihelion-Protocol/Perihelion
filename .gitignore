@@ -14,7 +14,6 @@ pnpm-debug.log*
 coverage/
 lcov.info
 *.lcov
-__snapshots__/
 *.snap
 test-results/
 .nyc_output/
