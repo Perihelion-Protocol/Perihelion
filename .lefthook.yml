@@ -15,8 +15,7 @@ pre-commit:
       run: |
         STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- 'contracts/soroban/**/*.rs')
         [ -z "$STAGED" ] && exit 0
-        cd contracts/soroban && cargo fmt --all &&
-        git add $STAGED
+        cd contracts/soroban && cargo fmt -- $STAGED
       skip:
         - merge
         - rebase
@@ -35,8 +34,7 @@ pre-commit:
       run: |
         STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- 'contracts/evm/**/*.sol')
         [ -z "$STAGED" ] && exit 0
-        cd contracts/evm && forge fmt &&
-        git add $STAGED
+        cd contracts/evm && forge fmt $STAGED
       skip:
         - merge
         - rebase
