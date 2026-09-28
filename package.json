@@ -23,7 +23,8 @@
     "lint": "npm run lint --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
     "fmt": "npm run fmt --workspaces --if-present",
-    "fmt:check": "npm run fmt:check --workspaces --if-present"
+    "fmt:check": "npm run fmt:check --workspaces --if-present",
+    "prepare": "lefthook install"
   },
   "engines": {
     "node": ">=20"
