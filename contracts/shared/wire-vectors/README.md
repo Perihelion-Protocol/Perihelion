@@ -16,7 +16,7 @@ and corridor conversion rule, and
 [`docs/intent-spec.md`](../../../docs/intent-spec.md#amount-field-specification)
 for the 16-byte wire-field bounds.
 
-## `fill_instruction.hex` (219 bytes)
+## `fill_instruction.hex` (227 bytes)
 
 `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)`
 
@@ -53,7 +53,7 @@ fields to recover the strkey string, then converts it to a native `Address` via
 | `deadline`         | 179         | 8             | Big-endian `u64` (Unix timestamp, seconds)       | Soroban      |
 | `preferred_solver` | 187         | 32            | EVM address left-padded to 32 bytes; all zeros = "open" | Soroban (dropped) |
 
-**Total: 219 bytes.** All integer fields are big-endian. The `recipient` and
+**Total: 227 bytes.** All integer fields are big-endian. The `recipient` and
 `dest_asset` fields contain ASCII characters — not raw key material — and are
 decoded by stripping trailing zero bytes and calling `Address::from_string_bytes`
 on the resulting string.
@@ -156,7 +156,7 @@ FillInstruction, never decodes it, so rejection is a Soroban-side concern).
 
 | File | Length | Mutation | Expected error |
 | ---- | ------ | -------- | -------------- |
-| `fill_instruction_short.hex` | 218 | Last byte removed | `MalformedPayload` (length) |
-| `fill_instruction_long.hex` | 220 | Extra `0x00` appended | `MalformedPayload` (length) |
-| `fill_instruction_bad_version.hex` | 219 | `version` changed from `0x01` to `0x02` | `MalformedPayload` (version) |
-| `fill_instruction_bad_type.hex` | 219 | `type` changed from `0x01` to `0x04` | `UnknownMessageType` / `MalformedPayload` |
+| `fill_instruction_short.hex` | 226 | Last byte removed | `MalformedPayload` (length) |
+| `fill_instruction_long.hex` | 228 | Extra `0x00` appended | `MalformedPayload` (length) |
+| `fill_instruction_bad_version.hex` | 227 | `version` changed from `0x01` to `0x02` | `MalformedPayload` (version) |
+| `fill_instruction_bad_type.hex` | 227 | `type` changed from `0x01` to `0x04` | `UnknownMessageType` / `MalformedPayload` |

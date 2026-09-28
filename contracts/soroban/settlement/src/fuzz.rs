@@ -289,6 +289,7 @@ fn fill_instruction_recipient_round_trips_with_227_byte_format() {
     payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes()));
     payload.append(&Bytes::from_array(&env, &9_999_999_999u64.to_be_bytes()));
     payload.append(&Bytes::from_array(&env, &[0u8; 32])); // preferred_solver: open
+    payload.append(&Bytes::from_array(&env, &0u64.to_be_bytes())); // reservation_window: none
 
     assert_eq!(
         payload.len(),
@@ -412,7 +413,7 @@ mod tests {
         assert!(file_path.exists(), "Corpus file should exist");
     }
 
-    /// Regression: the 218-byte FillInstruction negative vector must be rejected
+    /// Regression: the 226-byte FillInstruction negative vector must be rejected
     /// by the Soroban decoder with MalformedPayload (length check: expects 227).
     #[test]
     fn fill_instruction_short_neg_vector_is_rejected() {
@@ -422,8 +423,8 @@ mod tests {
         let bytes = decode_hex(SHORT);
         assert_eq!(
             bytes.len(),
-            218,
-            "fill_instruction_short.hex must be 218 bytes"
+            226,
+            "fill_instruction_short.hex must be 226 bytes"
         );
         let mut payload = Bytes::new(&env);
         for b in bytes {
@@ -432,19 +433,18 @@ mod tests {
         let result = crate::messages::decode_message(&env, &payload);
         assert!(
             result.is_err(),
-            "decoder must reject a 218-byte FillInstruction (expects 227)"
+            "decoder must reject a 226-byte FillInstruction (expects 227)"
         );
     }
 
-    /// Regression: the 220-byte FillInstruction negative vector must be rejected
-    /// by the Soroban decoder with MalformedPayload (length check: expects 227).
+    /// Regression: the 227-byte FillInstruction negative vector with bad version must be rejected.
     #[test]
     fn fill_instruction_bad_version_neg_vector_is_rejected() {
         const BAD_VERSION: &str =
             include_str!("../../../shared/wire-vectors/neg/fill_instruction_bad_version.hex");
         let env = Env::default();
         let bytes = decode_hex(BAD_VERSION);
-        assert_eq!(bytes.len(), 219);
+        assert_eq!(bytes.len(), 227);
         let mut payload = Bytes::new(&env);
         for b in bytes {
             payload.push_back(b);
@@ -461,7 +461,7 @@ mod tests {
             include_str!("../../../shared/wire-vectors/neg/fill_instruction_bad_type.hex");
         let env = Env::default();
         let bytes = decode_hex(BAD_TYPE);
-        assert_eq!(bytes.len(), 219);
+        assert_eq!(bytes.len(), 227);
         let mut payload = Bytes::new(&env);
         for b in bytes {
             payload.push_back(b);
@@ -480,8 +480,8 @@ mod tests {
         let bytes = decode_hex(LONG);
         assert_eq!(
             bytes.len(),
-            220,
-            "fill_instruction_long.hex must be 220 bytes"
+            228,
+            "fill_instruction_long.hex must be 228 bytes"
         );
         let mut payload = Bytes::new(&env);
         for b in bytes {
@@ -490,7 +490,7 @@ mod tests {
         let result = crate::messages::decode_message(&env, &payload);
         assert!(
             result.is_err(),
-            "decoder must reject a 220-byte FillInstruction (expects 227)"
+            "decoder must reject a 228-byte FillInstruction (expects 227)"
         );
     }
 }
