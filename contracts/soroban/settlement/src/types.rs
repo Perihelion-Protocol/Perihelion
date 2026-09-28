@@ -11,7 +11,7 @@ pub const MSG_FILL_CONFIRMED: u8 = 0x02;
 pub const MSG_CANCEL_INTENT: u8 = 0x03;
 
 /// Fixed wire length of a FillInstruction payload.
-pub const FILL_INSTRUCTION_LENGTH: u32 = 219;
+pub const FILL_INSTRUCTION_LENGTH: u32 = 227;
 
 /// Cancellation reason codes carried in a CancelIntent message.
 pub const CANCEL_REASON_EXPIRED: u8 = 0x00;
@@ -209,9 +209,10 @@ pub const RECIPIENT_TYPE_CONTRACT: u8 = 0x10; // C... contract (0x02 << 3)
 /// A registration instruction from the source chain (FillInstruction), decoded
 /// at the endpoint/adapter boundary into native Soroban types.
 ///
-/// Wire format (219 bytes):
+/// Wire format (227 bytes):
 ///   version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56)
 ///   | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
+///   | reservation_window(8)
 ///
 /// `recipient` contains the full Stellar strkey text (56 bytes), while `dest_asset`
 /// contains its canonical text form (up to 69 bytes). Both are decoded into Soroban
