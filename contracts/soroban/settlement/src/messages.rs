@@ -215,8 +215,8 @@ pub fn decode_message(
     }
 }
 
-/// Decode a `FillInstruction` payload (219 bytes, or 227 when the trailing
-/// `reservation_window` is present):
+/// Decode a `FillInstruction` payload (227 bytes, or 219 for the legacy layout
+/// without the trailing `reservation_window`):
 /// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32) [| reservation_window(8)]`.
 ///
 /// # Address decoding
@@ -243,13 +243,13 @@ fn decode_fill_instruction(
 ) -> Result<FillInstruction, crate::PerihelionError> {
     use crate::PerihelionError;
 
-    // Accept the documented 219-byte layout (which ends after `preferred_solver`)
-    // and the 227-byte layout that appends the explicit 8-byte
-    // `reservation_window`. Intermediate widths stay rejected: the negative
-    // vectors pin one-byte-short (218) and one-byte-long (220) payloads as
-    // malformed.
+    // Accept the canonical 227-byte layout (which includes the explicit
+    // `reservation_window` field) and the legacy 219-byte layout (which ends
+    // after `preferred_solver` and omits it). Intermediate widths stay rejected:
+    // the negative vectors pin one-byte-short (226) and one-byte-long (228)
+    // payloads as malformed.
     if message.len() != FILL_INSTRUCTION_LENGTH
-        && message.len() != FILL_INSTRUCTION_LENGTH + 8
+        && message.len() != FILL_INSTRUCTION_LENGTH - 8
     {
         return Err(PerihelionError::MalformedPayload);
     }
@@ -320,8 +320,9 @@ fn decode_fill_instruction(
         min_dest_amount,
         deadline,
         preferred_solver,
-        reservation_window: if message.len() > FILL_INSTRUCTION_LENGTH {
-            u64::from_be_bytes(read_field::<8>(message, FILL_INSTRUCTION_LENGTH)?)
+        reservation_window: if message.len() >= FILL_INSTRUCTION_LENGTH {
+            // Canonical 227-byte layout: read the explicit 8-byte field at offset 219.
+            u64::from_be_bytes(read_field::<8>(message, 219)?)
         } else {
             // Legacy 219-byte layout: the field is absent on the wire and means
             // "no reservation window".
