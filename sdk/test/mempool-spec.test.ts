@@ -50,9 +50,9 @@ test("MempoolIntentStatus matches the spec's IntentStatus vocabulary", () => {
   );
 });
 
-test("submitIntent: the spec documents 201 on success and no 409 for duplicates", () => {
+test("submitIntent: the spec documents 201 on success and 409 for duplicates", () => {
   assert.ok("201" in submitOp.responses);
-  assert.ok(!("409" in submitOp.responses));
+  assert.ok("409" in submitOp.responses);
 });
 
 test("reportStatus: the spec documents 400/401/404 and no 409", () => {

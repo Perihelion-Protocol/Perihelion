@@ -85,7 +85,7 @@ test("accepts an intent signed with the server's configured domain", async () =>
   const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
 
   const res = await submit(intent, signature);
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 201);
   const body = (await res.json()) as { hash: string };
   assert.match(body.hash, /^0x[0-9a-f]{64}$/);
 });
@@ -175,7 +175,7 @@ test("GET /intents paginates with nextCursor and round-trips without overlap or 
     const intent = { ...sampleIntent(), sourceAmount: String(10_000_000 + i) };
     const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
     const res = await submit(intent, signature);
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 201);
     const { hash } = (await res.json()) as { hash: string };
     submitted.push(hash);
   }
@@ -250,7 +250,7 @@ test("duplicate submission is rejected with 409 and does not reset a settled int
   const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
 
   const first = await submit(intent, signature);
-  assert.equal(first.status, 200);
+  assert.equal(first.status, 201);
   const { hash } = (await first.json()) as { hash: `0x${string}` };
 
   assert.equal(server.updateStatus(hash, "settled"), true);
@@ -468,11 +468,15 @@ test("multiple forged X-Forwarded-For entries do not bypass rate limiting (#739)
   }
 });
 
-// ─── Issue 321: authenticated PATCH /intents/:hash/status ──────────────────
+// Issue 321: authenticated PATCH /intents/:hash/status
 
 test("PATCH /intents/:hash/status rejects requests without the configured token", async () => {
   const res = await fetch(`http://localhost:${STATUS_PORT}/intents/0xdead/status`, {
     method: "PATCH",
-    headers: { "content-type
-
-/* … truncated 10822 chars — edit only what you need near the top … */
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "filled" }),
+  });
+  assert.equal(res.status, 401);
+  const body = (await res.json()) as { error: string };
+  assert.equal(body.error, "Unauthorized");
+});
