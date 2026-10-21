@@ -32,13 +32,13 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "@stryker-mutator/core": "^8.7.1",
-    "@stryker-mutator/typescript-checker": "^8.7.1",
-    "eslint": "^9.39.5",
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/typescript-checker": "^10.0.0",
+    "eslint": "^10.13.0",
     "eslint-config-prettier": "^10.1.8",
-    "lefthook": "^1.7.0",
+    "lefthook": "^2.2.2",
     "prettier": "^3.9.10",
-    "typescript": "^5.4.0",
+    "typescript": "^7.0.2",
     "typescript-eslint": "^8.71.2"
   },
   "overrides": {
