@@ -176,15 +176,15 @@ export class PerihelionClient {
   /**
    * Submit a signed intent to the mempool. Returns its hash (id).
    *
-   * **Retry policy**: Does NOT retry automatically. The mempool does not
-   * reject duplicates: resubmitting an intent with the same hash returns `201`
-   * and overwrites the stored record, resetting its status to `pending`.
+    * **Retry policy**: Does NOT retry automatically. Resubmitting an intent
+    * with the same hash returns `409 Conflict`; the server keeps the existing
+    * record unchanged, including its current status.
    *
    * The locally-computed `signed.hash` is treated as authoritative. If the
    * server echoes a different hash, {@link PerihelionHashMismatchError} is thrown.
    *
-   * @throws {@link PerihelionHttpError} on non-2xx responses (e.g. 400 validation or
-   *   signature failure, 413 oversized body, 429 rate limited).
+    * @throws {@link PerihelionHttpError} on non-2xx responses (e.g. 400 validation or
+    *   signature failure, 409 duplicate intent, 413 oversized body, 429 rate limited).
    * @throws {@link PerihelionTimeoutError} if the request exceeds `requestTimeoutMs`.
    * @throws {@link PerihelionNetworkError} on network / transport failure.
    * @throws {@link PerihelionHashMismatchError} if the server returns a different hash.

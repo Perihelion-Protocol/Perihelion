@@ -235,6 +235,9 @@ export class MempoolServer {
       );
       if (hits.length >= limit) {
         this.rateLimitRejections++;
+        // Re-write the compacted (window-filtered) array so stale timestamps
+        // don't accumulate while the key is still over budget.
+        this.rateLimitHits.set(key, hits);
         res.status(429).json({ error: "Too many requests" });
         return;
       }
@@ -242,6 +245,55 @@ export class MempoolServer {
       this.rateLimitHits.set(key, hits);
       next();
     };
+  }
+
+  /**
+   * Prune every entry in the rate-limit map whose timestamp array is entirely
+   * outside the current window. Called from the sweep timer so stale keys are
+   * reclaimed without waiting for the keyed IP to make another request.
+   * Satisfies the acceptance criterion for #964: after the window elapses with
+   * no traffic, `rateLimitHits.size` returns to zero.
+   */
+  private sweepRateLimitMap(): void {
+    const now = Date.now();
+    for (const [key, hits] of this.rateLimitHits) {
+      const live = hits.filter((t) => now - t < this.rateLimitWindowMs);
+      if (live.length === 0) {
+        this.rateLimitHits.delete(key);
+      } else {
+        this.rateLimitHits.set(key, live);
+      }
+    }
+  }
+
+  /**
+   * Exposed for testing only: returns the current number of entries in the
+   * per-IP rate-limit map. Production code should not rely on this value.
+   */
+  get rateLimitMapSize(): number {
+    return this.rateLimitHits.size;
+  }
+
+  /**
+   * Exposed for testing only: directly update the status of a stored intent,
+   * bypassing HTTP. Delegates to {@link IntentStore.updateStatus} and returns
+   * its result (`true` if the record was found and updated, `false` if it was
+   * not found or is in a terminal status). Production code should call
+   * `PATCH /intents/:hash/status` instead.
+   */
+  updateStatus(hash: Hex, status: IntentStatus): boolean {
+    return this.store.updateStatus(hash, status);
+  }
+
+  /**
+   * Exposed for testing only: trigger an immediate sweep of the rate-limit
+   * map, removing entries whose timestamp arrays are entirely outside the
+   * current window. In production this is called automatically by the sweep
+   * timer every {@link SWEEP_INTERVAL_MS}. Tests that use a short
+   * `rateLimitWindowMs` can call this directly instead of waiting 30 s.
+   */
+  sweepRateLimits(): void {
+    this.sweepRateLimitMap();
   }
 
   private handleInfo(_req: Request, res: Response): void {
@@ -299,6 +351,17 @@ export class MempoolServer {
       return;
     }
     const hash = hashIntent(parsed, this.domain);
+    const existing = this.store.get(hash);
+    if (existing) {
+      // Re-submitting the exact same signed intent is a no-op. Return the
+      // stored record (including its current status) so the caller can see
+      // whether it has already been settled, refunded, etc. We never overwrite
+      // an existing record from POST: doing so would reset terminal states such
+      // as `settled` and `refunded` back to `pending`, reinjecting the intent
+      // into every solver's order book and undoing replay protection.
+      res.status(409).json(existing);
+      return;
+    }
     const record: MempoolIntentRecord = {
       hash,
       intent: parsed,
@@ -456,6 +519,7 @@ export class MempoolServer {
     if (this.server) return;
     this.sweepTimer = setInterval(() => {
       this.store.evictExpired();
+      this.sweepRateLimitMap();
     }, SWEEP_INTERVAL_MS);
     if (typeof this.sweepTimer.unref === "function") this.sweepTimer.unref();
     this.isReady = true;

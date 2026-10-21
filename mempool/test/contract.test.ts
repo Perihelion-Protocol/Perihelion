@@ -132,9 +132,9 @@ test("POST /intents 201 response matches the documented SubmitIntentResponse sch
   );
 });
 
-test("POST /intents: a duplicate submission returns 201 and overwrites, as documented (no 409)", async () => {
+test("POST /intents: a duplicate submission returns 409 and the spec documents a 409 response (#963)", async () => {
   const responses = (spec.paths as Record<string, any>)["/intents"].post.responses;
-  assert.ok(!("409" in responses), "spec must not document a 409 the server never sends");
+  assert.ok("409" in responses, "spec must document the 409 the server now sends");
 
   // Pin every field that varies per call so both submissions hash identically.
   const fixed = { nonce: "123456789", deadline: Math.floor(Date.now() / 1000) + 600 };
@@ -142,6 +142,7 @@ test("POST /intents: a duplicate submission returns 201 and overwrites, as docum
   assert.equal(first.status, 201);
   const { hash } = (await first.json()) as { hash: string };
 
+  // Advance the record to a non-pending status to prove it is never reset.
   const patched = await fetch(`${BASE}/intents/${hash}/status`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
@@ -149,12 +150,21 @@ test("POST /intents: a duplicate submission returns 201 and overwrites, as docum
   });
   assert.equal(patched.status, 200);
 
+  // Re-posting the same signed intent must return 409 with the stored record.
   const second = await submitSignedIntent(fixed);
-  assert.equal(second.status, 201);
-  assert.equal(((await second.json()) as { hash: string }).hash, hash);
+  assert.equal(second.status, 409);
+  const secondBody = (await second.json()) as { hash: string; status: string };
+  assert.equal(secondBody.hash, hash, "409 body should contain the stored hash");
+  assert.equal(secondBody.status, "filled", "duplicate POST must not reset status");
+  assertMatchesSchema(
+    responseSchema("/intents", "post", "409"),
+    secondBody,
+    "POST /intents 409 body",
+  );
 
+  // Confirm nothing changed in the store.
   const record = (await (await fetch(`${BASE}/intents/${hash}`)).json()) as { status: string };
-  assert.equal(record.status, "pending", "a resubmission resets the stored record");
+  assert.equal(record.status, "filled", "stored record must remain unchanged after duplicate POST");
 });
 
 test("PATCH /intents/:hash/status accepts exactly the documented IntentStatus vocabulary", async () => {
@@ -209,7 +219,7 @@ test("POST /intents 400 (invalid signature) response matches the documented Erro
   );
 });
 
-test("GET /intents 200 response matches the documented IntentRecord[] schema, including submittedAt", async () => {
+test("GET /intents 200 response matches the documented IntentRecord[] schema, including createdAt", async () => {
   await submitSignedIntent();
 
   const res = await fetch(`${BASE}/intents`);
@@ -370,9 +380,13 @@ test("GET /info matches the documented MempoolInfo schema and reflects the confi
   const body = await res.json();
   assertMatchesSchema(responseSchema("/info", "get", "200"), body, "GET /info 200 body");
   assert.deepEqual(body, {
-    name: "Perihelion",
-    version: "1",
     chainId: CHAIN_ID,
     verifyingContract: ESCROW,
+    domain: {
+      name: "Perihelion",
+      version: "1",
+      chainId: CHAIN_ID,
+      verifyingContract: ESCROW,
+    },
   });
 });
