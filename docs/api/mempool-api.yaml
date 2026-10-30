@@ -77,12 +77,11 @@ info:
     `404`. No response is ever an HTML error page, and none includes a stack
     trace.
 
-    **Known gaps** (each tracked by its own issue, not yet part of this
-    contract):
-    - Duplicate submission: `POST /intents` currently overwrites the existing
-      record for a hash that has already been submitted (last write wins) and
-      returns `200`, rather than rejecting the second submission with `409`.
-      Tracked by issue #320.
+    **Resolved issues**:
+    - (resolved, #963) `POST /intents` now returns `409 Conflict` when an
+      intent with the same hash has already been submitted. The stored record
+      is never overwritten from `POST`; terminal statuses (`settled`,
+      `refunded`, `expired`) are permanent.
     - (resolved, #348/#561) Both `GET /intents/{hash}` and
       `PATCH /intents/{hash}/status` now normalise the `:hash` to lower case
       and reject a value that is not a `0x`-prefixed 32-byte hex string with
@@ -123,9 +122,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/InfoResponse'
               example:
-                name: "Perihelion Mempool"
-                version: "1.0.0"
                 chainId: 8453
+                verifyingContract: "0x0000000000000000000000000000000000000000"
                 domain:
                   name: "Perihelion"
                   version: "1"
@@ -145,12 +143,11 @@ paths:
         The server rejects the submission if the signature is invalid or any
         required field is missing (`400`).
 
-        **Duplicate submissions are not currently rejected.** If an intent
-        with the same hash has already been submitted, this call overwrites
-        the stored record (last write wins, resetting its status to
-        `pending`) and still returns `201`. A strict `409 Conflict` check is
-        tracked separately by issue #320 and is not yet part of this
-        contract.
+        If an intent with the same hash has already been submitted, this call
+        returns `409 Conflict` with the stored record (including its current
+        status) and does **not** overwrite it. This prevents re-submission from
+        resetting a terminal state (`settled`, `refunded`, `expired`) back to
+        `pending`.
       requestBody:
         required: true
         content:
@@ -175,8 +172,6 @@ paths:
         '201':
           description: |
             Intent accepted and stored; returns the canonical intent hash.
-            Also returned when overwriting a prior submission with the same
-            hash (see the duplicate-submission note above).
           content:
             application/json:
               schema:
@@ -208,6 +203,20 @@ paths:
                   summary: Request body is not valid JSON
                   value:
                     error: "Malformed JSON request body"
+        '409':
+          description: |
+            An intent with the same hash has already been submitted. The stored
+            record is returned unchanged (including its current status). The
+            caller may inspect the `status` field to determine whether the
+            intent is still `pending`, has been `filled`, or has reached a
+            terminal state (`settled`, `refunded`, or `expired`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntentRecord'
+              example:
+                hash: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+                status: "settled"
         '413':
           description: |
             The JSON request body exceeds the server's 8 KiB limit.
@@ -477,7 +486,7 @@ components:
 
     IntentRecord:
       type: object
-      required: [hash, status, intent, signature, submittedAt]
+      required: [hash, status, intent, signature, createdAt]
       properties:
         hash:
           type: string
@@ -488,9 +497,9 @@ components:
           $ref: '#/components/schemas/Intent'
         signature:
           type: string
-        submittedAt:
+        createdAt:
           type: integer
-          description: Unix timestamp at which the intent was accepted.
+          description: Unix timestamp (seconds) at which the intent was accepted.
         updatedAt:
           type: integer
           description: Unix timestamp of the most recent status change.
@@ -526,17 +535,14 @@ components:
 
     InfoResponse:
       type: object
-      required: [name, version, chainId, domain]
+      required: [chainId, verifyingContract, domain]
       properties:
-        name:
-          type: string
-          description: Human-readable server name.
-        version:
-          type: string
-          description: Server version string.
         chainId:
           type: integer
           description: EIP-155 chain id of the source chain this mempool serves.
+        verifyingContract:
+          type: string
+          description: Address of the PerihelionEscrow contract used to bind the EIP-712 domain.
         domain:
           $ref: '#/components/schemas/EIP712Domain'
 
