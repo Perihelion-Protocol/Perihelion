@@ -703,7 +703,7 @@ from the operation counts in the code above, not yet profiled.
 | `fill_intent` | ~3.5 M | 5 | 4 | ~1.0 KB | ~0.7 KB | Dominated by the SAC `transfer` cross-contract call + LZ `send`. |
 | `cancel_expired_intent` | ~2.8 M | 4 | 3 | ~0.8 KB | ~0.5 KB | Similar to fill minus the token transfer. |
 | `is_settled` (view) | ~120 K | 1 | 0 | ~0.1 KB | 0 | Read-only; no write fee. |
-| `set_endpoint` / `set_peer` (admin) | ~200 K | 1 | 1 | ~0.1 KB | ~0.1 KB | Instance write + auth. |
+| `set_endpoint` / `propose_peer` / `confirm_peer` (admin) | ~200 K | 1 | 1 | ~0.1 KB | ~0.1 KB | Instance write + auth. |
 
 **How estimated.** CPU is approximated as: base host overhead (~100 K) + payload
 decode (~10 K/32 bytes) + per cross-contract invocation (SAC transfer ~1.5–2 M;
@@ -2161,7 +2161,7 @@ On LayerZero V2, a "peer" is the remote OApp address. For the Perihelion
 single-counterparty design (one Soroban settlement contract ↔ one EVM escrow
 per source chain), the send and receive peer are always identical.
 
-**Invariant.** `set_peer(eid, addr)` must always be called with the *deployed*
+**Invariant.** `propose_peer(eid, new_peer, delay)` (followed by `confirm_peer(eid)`) must always be called with the *deployed*
 EVM escrow's 32-byte address for that `eid`. An operator who sets a peer for
 an eid they only receive from (or only send to) will get an asymmetric
 configuration that is logically incorrect, even though the two maps are one
@@ -2194,7 +2194,7 @@ stranding the filled intent with no way to repay the solver.
 **The fix.** `on_fill_instruction` now checks `Peer(fi.src_eid)` exists before
 writing the `IntentRecord`. If no peer is configured for the intent's source
 eid, registration fails with `UntrustedPeer` (error 163). The LayerZero message
-is rejected and can be replayed after the operator calls `set_peer` for the
+is rejected and can be replayed after the operator completes `propose_peer`/`confirm_peer` for the
 missing eid.
 
 **Chosen behavior (not silently accepted).** The intent is rejected at
