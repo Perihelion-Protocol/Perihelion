@@ -1,7 +1,7 @@
 services:
   # EVM local testnet using Anvil
   anvil:
-    image: ghcr.io/foundry-rs/foundry:nightly-f625e95
+    image: ghcr.io/foundry-rs/foundry:v1.3.5
     # The Foundry image entrypoint is `/bin/sh -c`, so the whole command must be
     # a single string; split words would be read as $0/$1 and dropped.
     command: ["anvil --host 0.0.0.0 --port 8545"]

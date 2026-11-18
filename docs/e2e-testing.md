@@ -94,7 +94,7 @@ TypeScript tests for profitability evaluation, slippage checks, and pricing erro
 
 The `docker-compose.yml` pins specific versions for reproducibility:
 
-- **Foundry/Anvil**: `ghcr.io/foundry-rs/foundry:nightly-f625e95`
+- **Foundry/Anvil**: `ghcr.io/foundry-rs/foundry:v1.3.5`
 - **Stellar Quickstart**: `stellar/quickstart:21.2.0`
 
 When reproducing a test failure or setting up a new environment, these versions ensure consistent behavior across machines and time.

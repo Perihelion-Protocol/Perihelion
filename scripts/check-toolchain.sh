@@ -63,6 +63,21 @@ check_foundry() {
     exit 1
   fi
 
+  # The local docker-compose Anvil image must use the same Foundry version.
+  local compose_file
+  compose_file="$(dirname "${BASH_SOURCE[0]}")/../docker-compose.yml"
+  if [ -f "$compose_file" ]; then
+    local compose_tag
+    compose_tag="$(grep -oE 'foundry-rs/foundry:[^[:space:]"@]+' "$compose_file" | head -1 | cut -d: -f2 || true)"
+    compose_tag="${compose_tag#nightly-}"
+    compose_tag="${compose_tag#v}"
+    if [ "$compose_tag" != "$pinned" ]; then
+      echo "error: docker-compose.yml Foundry image '$compose_tag' differs from pinned version $pinned" >&2
+      exit 1
+    fi
+    echo "✔ docker-compose.yml Foundry image matches FOUNDRY_VERSION"
+  fi
+
   # forge --version prints e.g. "forge 1.2.3 (abcdefg 2024-01-01T00:00:00Z)".
   local actual
   actual="$(forge --version | head -1 | awk '{print $2}')"
