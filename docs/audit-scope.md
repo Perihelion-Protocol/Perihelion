@@ -27,7 +27,7 @@ not just what an external attacker can do. In particular:
 - `PerihelionTimelock.cancel` being callable by any single owner, a
   governance-liveness gap that can suppress a legitimate recovery action (see
   [T20](./threat-model.md#t20--governance-liveness)).
-- Soroban `set_endpoint` taking effect with no delay, unlike `set_peer` (see
+- Soroban `set_endpoint` taking effect with no delay, unlike `propose_peer`/`confirm_peer` (see
   [T18](./threat-model.md#t18--instant-endpoint-rotation-on-soroban)).
 
 This is a deliberate scope decision: `docs/threat-model.md` identifies

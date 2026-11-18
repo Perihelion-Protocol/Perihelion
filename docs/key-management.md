@@ -37,7 +37,7 @@ keys for each deployment environment.
 |---|---|---|---|---|---|
 | **Timelock owners** | EVM | M-of-N multisig (hardware wallets) | Governance: `setPeer`, `setGuardian`, `setConfirmationGrace`, `setPaused`, ownership rotation | Low (≤1 tx per week typically) | Critical |
 | **Guardian** | EVM | Hot key or 1-of-N Safe | Emergency pause: `pause()` | Very low (only during incidents) | High |
-| **Soroban admin** | Stellar | Multisig account | Settlement contract config: `set_endpoint`, `set_peer`, `set_admin`, `set_paused` | Low (≤1 tx per month typically) | Critical |
+| **Soroban admin** | Stellar | Multisig account | Settlement contract config: `set_endpoint`, `propose_peer`, `confirm_peer`, `cancel_pending_peer`, `set_admin`, `set_paused` | Low (≤1 tx per month typically) | Critical |
 | **Relayer signing key** | Off-chain | Relayer operator | Signs LayerZero messages for replay guards | Medium (1+ tx per transfer) | High |
 | **Relayer RPC key** | Off-chain | Relayer operator | Authenticates RPC queries and relay submissions | Medium | Medium |
 | **Solver signing key** | Off-chain | Solver operator | Signs fill instructions on Stellar | Medium (1+ tx per fill) | High |
@@ -342,8 +342,8 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
 
 1. **Prepare the transaction:**
    ```bash
-   stellar contract invoke --id $SETTLEMENT -- set_peer \
-     --eid $EVM_EID --peer $ESCROW_ADDRESS \
+   stellar contract invoke --id $SETTLEMENT -- propose_peer \
+     --eid $EVM_EID --new_peer $ESCROW_ADDRESS --delay 86400 \
      --source-account $ADMIN_ACCOUNT \
      --simulate
    ```
@@ -362,7 +362,7 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
 ### 3.4 Monitoring
 
 **On-chain (Soroban events):**
-- Subscribe to `Perihelion::set_peer` events
+- Subscribe to `peer_change_proposed` and `peer_set` events (also `peer_change_cancelled` / `peer_change_expired`)
 - Alert on unexpected peer changes
 - Subscribe to `Perihelion::set_admin` events
 
@@ -381,7 +381,7 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
 **Emergency rotation (suspected compromise):**
 
 **Signs of compromise:**
-- Unexpected `set_peer` or `set_endpoint` invocations
+- Unexpected `propose_peer`, `confirm_peer` or `set_endpoint` invocations
 - Signer key theft or device compromise
 - Unauthorized Stellar transactions from admin account
 

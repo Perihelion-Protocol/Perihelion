@@ -20,7 +20,7 @@ and with [deployment.md](./deployment.md) for operational roles.
 | **DVN set** (LayerZero verifiers) | ≥ threshold DVNs attest the same source event honestly | A colluding DVN set attests a fake source event | **Steal** (forge a FillConfirmed or CancelIntent) | Multi-DVN with 2 required + 1 optional (≥3 distinct verifiers on common path); OApp admin can rotate set |
 | **Stellar validators** | Produce canonical ledger state with economic finality | A cartel finalizes a fraudulent Stellar ledger | **Steal** (forge a fill on Stellar that the Solver never actually funded); destroy the bridge's Stellar-side correctness | Stellar's consensus (Stellar Consensus Protocol); Perihelion inherits Stellar's finality guarantees |
 | **Admin / timelock owner set** (EVM) | Only executes governance actions the M-of-N honestly agreed to | Threshold of owners collude to rotate peer, or call `skim` to extract surplus balances | **Surplus extraction** — `skim` is bounded on-chain by `totalLocked[token]` accounting (`balanceOf(this) - totalLocked[token]`), preventing extraction of active locked deposits ([T17](#t17--governance-extractable-escrow-balance)) | M-of-N timelock with delay: any config change (including peer/guardian rotation) is public for `delay` seconds before it executes — a single owner can also unilaterally `cancel` a *legitimate recovery* action ([T20](#t20--governance-liveness)) |
-| **Admin** (Soroban) | Configures endpoint, peer, and pause correctly | Sets a malicious endpoint/peer → steals Stellar-side funds | **Steal** (redirect settlement messages) | `set_peer` requires a 1-day propose/confirm delay; **`set_endpoint` does not — it takes effect instantly** ([T18](#t18--instant-endpoint-rotation-on-soroban)). Single-key admin on Soroban (future: migrate to multisig); refund liveness (`cancel_expired_intent`) is itself pausable ([T19](#t19--refund-denial-via-pause)) |
+| **Admin** (Soroban) | Configures endpoint, peer, and pause correctly | Sets a malicious endpoint/peer → steals Stellar-side funds | **Steal** (redirect settlement messages) | peer changes (`propose_peer`/`confirm_peer`) require a propose/confirm delay of at least 1 day (`MIN_PEER_CHANGE_DELAY`); **`set_endpoint` does not — it takes effect instantly** ([T18](#t18--instant-endpoint-rotation-on-soroban)). Single-key admin on Soroban (future: migrate to multisig); refund liveness (`cancel_expired_intent`) is itself pausable ([T19](#t19--refund-denial-via-pause)) |
 | **Guardian** (EVM) | Only pauses in genuine emergencies | Pauses repeatedly, denying new locks | Censor (denial of new locks for up to 72 h per 144 h cycle; local refunds remain unpaused) | Auto-expiry (GUARDIAN_PAUSE_TTL) + cooldown; cannot unpause, move funds, or change config |
 | **Executor** (LayerZero delivery) | Delivers committed messages | Drops execution, censors delivery | Censor/delay | Permissionless: anyone can call `lzReceive` for a committed message; executor is replaceable. **Caveat:** the reference relayer is not a real executor — see [T21](#t21--reference-relayer-impersonates-the-trusted-endpoint) |
 
@@ -435,7 +435,7 @@ could:
 
 **Mitigation for this race:**
 - Peer rotation should be coordinated: both chains rotate their peer in the same
-  governance window (on EVM: propose peer + Soroban admin calls set_peer in parallel)
+  governance window (on EVM: propose peer + Soroban admin runs propose_peer/confirm_peer in parallel)
 - The window for exploitation is ≤48 hours (EVM delay); it is closed by executing
   a matching rotation on Soroban within that window
 - Document in the deployment runbook that peer rotations must be synchronized
@@ -761,7 +761,7 @@ effect.
 ### Mitigation status
 
 **Not yet mitigated.** No dedicated tracking issue exists yet for bringing
-`set_endpoint` under the same propose/confirm delay as `set_peer`; this is
+`set_endpoint` under the same propose/confirm delay as `propose_peer`/`confirm_peer`; this is
 recommended as a follow-up. The event emission itself
 ([issue #16](https://github.com/Perihelion-Protocol/Perihelion/issues/16),
 closed) already gives off-chain monitors *something* to alert on — it just

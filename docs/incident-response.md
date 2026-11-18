@@ -541,7 +541,7 @@ While the key rotation is underway in parallel:
 ### Scenario
 
 The trusted cross-chain peer address was set incorrectly on one chain. Either:
-- Soroban `set_peer` was pointed at a wrong EVM address (attacker-controlled)
+- Soroban `propose_peer`/`confirm_peer` was pointed at a wrong EVM address (attacker-controlled)
 - EVM `setPeer` was pointed at a wrong Soroban address
 - Both sides have mismatched peer addresses
 
@@ -595,9 +595,13 @@ settlement integrity.
 
 3. **Rotate the peer address immediately:**
    ```bash
-   # Soroban: admin-controlled
+   # Soroban: admin-controlled, propose/confirm with a delay
+   # (cancel a wrong pending proposal first with cancel_pending_peer --eid <EVM_EID>)
    stellar contract invoke --id <settlement-contract> \
-     -- set_peer --eid <EVM_EID> --peer <correct-bytes32>
+     -- propose_peer --eid <EVM_EID> --new_peer <correct-bytes32> --delay 86400
+   # after the delay (within the 14-day PEER_CHANGE_GRACE):
+   stellar contract invoke --id <settlement-contract> \
+     -- confirm_peer --eid <EVM_EID>
    
    # EVM: owner-controlled (requires timelock)
    # Prepare governance call
@@ -633,9 +637,11 @@ settlement integrity.
 
 1. **Correct the peer on the affected side:**
    ```bash
-   # Soroban (immediate):
+   # Soroban (propose, then confirm once the delay has elapsed):
    stellar contract invoke --id <settlement-contract> \
-     -- set_peer --eid <EVM_EID> --peer <correct-bytes32>
+     -- propose_peer --eid <EVM_EID> --new_peer <correct-bytes32> --delay 86400
+   stellar contract invoke --id <settlement-contract> \
+     -- confirm_peer --eid <EVM_EID>
    
    # EVM (requires timelock):
    # Propose and execute via governance

@@ -293,7 +293,9 @@ application-level idempotency markers.
 | `lz_receive` | endpoint | peer == sender | Register intent from FillInstruction |
 | `fill_intent` | anyone | intent exists, not settled | Record fill; transfer to recipient; dispatch FillConfirmed |
 | `cancel_expired_intent` | anyone | intent exists, deadline < now | Mark cancelled; dispatch CancelIntent |
-| `set_peer` | admin | (none) | Propose new peer (delay-governed) |
+| `propose_peer` | admin | (none) | Propose new peer (delay between `MIN_PEER_CHANGE_DELAY` and `MAX_PEER_CHANGE_DELAY`) |
+| `confirm_peer` | admin | (none) | Apply the pending peer after the delay, within `PEER_CHANGE_GRACE` |
+| `cancel_pending_peer` | admin | (none) | Discard the pending peer proposal |
 | `confirm_peer` | admin | delay elapsed | Apply pending peer |
 
 ### Safety Properties

@@ -18,7 +18,7 @@ Soroban settlement contract, and the day-to-day admin procedures.
 | ---------------- | ---------------------------------------- | --------------------------------------------------------------------- |
 | **owner** (EVM)  | `PerihelionTimelock` (M-of-N + delay)    | All config: `setPeer`, `setConfirmationGrace`, `setGuardian`, `setPaused` (unpause), two-step ownership |
 | **guardian** (EVM) | A hot key or small Safe                 | `pause()` only — instant emergency halt. Cannot unpause or reconfigure |
-| **admin** (Soroban) | A Stellar multisig account             | `set_endpoint`, `set_peer`, `set_admin`, `set_paused`                  |
+| **admin** (Soroban) | A Stellar multisig account             | `set_endpoint`, `propose_peer`, `confirm_peer`, `cancel_pending_peer`, `set_admin`, `set_paused`                  |
 | **endpoint**     | LayerZero V2 endpoint                     | Sole caller of `lzReceive` / `lz_receive`                             |
 
 The asymmetry is deliberate: the **owner is slow** (timelocked, multi-party) so
@@ -190,8 +190,13 @@ stellar contract deploy --wasm target/wasm32-unknown-unknown/release/perihelion_
 Register each side as the other's trusted peer (32-byte LayerZero addresses):
 
 ```bash
-# Soroban: trust the EVM escrow on the source EID
-stellar contract invoke --id $SETTLEMENT -- set_peer --eid $EVM_EID --peer <escrow-as-32-bytes>
+# Soroban: propose the EVM escrow as the trusted peer for the source EID.
+# --delay is in seconds, between MIN_PEER_CHANGE_DELAY (86400, 1 day) and
+# MAX_PEER_CHANGE_DELAY (2592000, 30 days).
+stellar contract invoke --id $SETTLEMENT -- propose_peer --eid $EVM_EID --new_peer <escrow-as-32-bytes> --delay 86400
+# After the delay has elapsed (and within PEER_CHANGE_GRACE, 14 days, after it), confirm:
+stellar contract invoke --id $SETTLEMENT -- confirm_peer --eid $EVM_EID
+# (cancel_pending_peer --eid $EVM_EID aborts a pending proposal.)
 
 # EVM: trust the Soroban settlement (via the timelock if ownership already moved,
 # otherwise the deployer before handover).
