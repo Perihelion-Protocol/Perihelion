@@ -284,15 +284,14 @@ Immutable contract. No upgrade.
    cd contracts/soroban
    cargo build --target wasm32-unknown-unknown --release
    
-   # Deploy new contract
+   # Deploy new contract. The contract has a constructor (issue #910), so the
+   # admin, endpoint and native token are passed at deploy time; there is no
+   # separate `initialize` call.
    stellar contract deploy --wasm target/wasm32-unknown-unknown/release/perihelion_settlement.wasm \
      --network public \
-     --source-account <deployer>
+     --source-account <deployer> \
+     -- --admin $ADMIN --endpoint $LZ_ENDPOINT --native_token $NATIVE_TOKEN
    # -> note the new $SETTLEMENT_V2 address
-   
-   # Initialize with the same admin and endpoint
-   stellar contract invoke --id $SETTLEMENT_V2 \
-     -- initialize --admin $ADMIN --endpoint $LZ_ENDPOINT
    ```
 
 2. **Deploy new EVM escrow contract:**
