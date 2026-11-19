@@ -13,30 +13,27 @@ info:
 
     ## Intent lifecycle
 
-    The full cross-chain intent lifecycle (as modeled by the SDK and the
-    on-chain contracts) has seven states:
+    The mempool assigns five statuses. Transitions between them are reported
+    by trusted services via `PATCH /intents/{hash}/status`:
 
     ```
-    pending → claimed → settling → filled → settled
-           ↘                             ↘
-            expired                       refunded
+    pending → filled → settled
+       ↘        ↘
+        expired   refunded
     ```
 
     | Status     | Meaning                                                      |
     |------------|--------------------------------------------------------------|
-    | `pending`  | Signed, in the mempool, unclaimed by any solver              |
-    | `claimed`  | A solver has locked the source-chain funds                   |
-    | `settling` | Cross-chain LayerZero message is in flight                   |
+    | `pending`  | Signed and in the mempool, not yet picked up by a solver     |
     | `filled`   | Delivered on Stellar; awaiting source-chain `Released`       |
-    | `settled`  | Source chain emitted `Released`; bridge complete             |
-    | `refunded` | Solver-initiated refund after a failed or cancelled fill     |
-    | `expired`  | Deadline passed before any solver claimed the intent         |
+    | `settled`  | Source chain emitted `Released`; bridge complete (terminal)  |
+    | `refunded` | Refunded after a failed or cancelled fill (terminal)         |
+    | `expired`  | Deadline passed before the intent was filled (terminal)      |
 
-    **This mempool's `IntentStatus` only covers five of those seven states:**
-    `pending`, `filled`, `settled`, `refunded`, `expired`. `claimed` and
-    `settling` are part of the broader on-chain/SDK lifecycle but are never
-    assigned by this reference implementation — solvers and the relayer
-    currently track those intermediate states out-of-band.
+    The SDK's broader lifecycle vocabulary (for example `claimed` and
+    `settling`) is never assigned by this mempool and is not part of this
+    contract; solvers and the relayer track those intermediate states
+    out-of-band.
 
     `filled` is an intermediate, non-terminal state: the solver has delivered
     the assets on Stellar, but the source-chain escrow has not yet released
@@ -63,31 +60,37 @@ info:
     request to page forward; `nextCursor` is absent once the last page has
     been returned. A `cursor` that no longer resolves to a record — the record
     it named was evicted by the expiry sweep or the size cap, or a status
-    change moved it out of a status-filtered result set — is rejected with
-    `400` and `code: "unresolvable_cursor"` so a client can restart
-    pagination deliberately instead of being silently sent back to page one.
+    change (or the `status`/`chainId` filter) moved it out of the result set
+    being paged — is rejected with `400` and `code: "unresolvable_cursor"` so a
+    client can restart pagination deliberately instead of being silently sent
+    back to page one. A malformed cursor (not a `0x`-prefixed 32-byte hash) is
+    rejected with `400` and `error` only.
 
     ## Error responses
 
     All error responses share the shape `{ "error": "<message>" }` and use
-    standard HTTP status codes. This holds for errors raised by the HTTP
-    framework as well as by application code: a body that is not valid JSON
-    returns `400`, a body above the 8 KiB limit returns `413` with a message
-    naming the limit, and a request to an unknown route or method returns
-    `404`. No response is ever an HTML error page, and none includes a stack
-    trace.
+    standard HTTP status codes. Some errors add a machine-readable `code`
+    (currently only `unresolvable_cursor`). This holds for errors raised by the
+    HTTP framework as well as by application code: a body that is not valid
+    JSON returns `400`, a body above the 8 KiB limit returns `413` with a
+    message naming the limit, and a request to an unknown route or method
+    returns `404`. Every route is rate limited per client IP and returns `429`
+    when its budget is exhausted. No response is ever an HTML error page, and
+    none includes a stack trace.
 
-    **Known gaps** (each tracked by its own issue, not yet part of this
-    contract):
-    - Duplicate submission: `POST /intents` currently overwrites the existing
-      record for a hash that has already been submitted (last write wins) and
-      returns `200`, rather than rejecting the second submission with `409`.
-      Tracked by issue #320.
-    - (resolved, #348/#561) Both `GET /intents/{hash}` and
-      `PATCH /intents/{hash}/status` now normalise the `:hash` to lower case
-      and reject a value that is not a `0x`-prefixed 32-byte hex string with
-      `400`, so a malformed hash is distinguishable from an unknown one on
-      every route that takes a hash.
+    **Duplicate submissions.** `POST /intents` overwrites the stored record for
+    a hash that has already been submitted (last write wins): the record's
+    status is reset to `pending` and the call returns `201` with the same hash.
+    A `409 Conflict` is not part of this contract (see #320).
+
+    **Hash normalisation.** Both `GET /intents/{hash}` and
+    `PATCH /intents/{hash}/status` normalise the `:hash` to lower case and
+    reject a value that is not a `0x`-prefixed 32-byte hex string with `400`, so
+    a malformed hash is distinguishable from an unknown one on every route that
+    takes a hash.
+
+    **Operational endpoints.** `GET /healthz`, `GET /readyz` and `GET /metrics`
+    are documented under *Operations*. They are not part of the intent API.
 
 servers:
   - url: http://localhost:3000
@@ -98,6 +101,8 @@ tags:
     description: Submit and query cross-chain bridge intents
   - name: Discovery
     description: Server metadata and EIP-712 domain discovery
+  - name: Operations
+    description: Health, readiness and metrics for operators
 
 paths:
 
@@ -123,14 +128,99 @@ paths:
               schema:
                 $ref: '#/components/schemas/InfoResponse'
               example:
-                name: "Perihelion Mempool"
-                version: "1.0.0"
                 chainId: 8453
+                verifyingContract: "0x0000000000000000000000000000000000000000"
                 domain:
                   name: "Perihelion"
                   version: "1"
                   chainId: 8453
                   verifyingContract: "0x0000000000000000000000000000000000000000"
+
+  /healthz:
+
+    get:
+      operationId: getHealthz
+      tags: [Operations]
+      summary: Liveness probe
+      description: |
+        Returns `200` while the HTTP listener is up. Not rate limited and not
+        authenticated.
+      responses:
+        '200':
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: "ok"
+
+  /readyz:
+
+    get:
+      operationId: getReadyz
+      tags: [Operations]
+      summary: Readiness probe
+      description: |
+        Returns `200` once the server has started and its expiry sweep is
+        running, and `503` otherwise. Not rate limited and not authenticated.
+      responses:
+        '200':
+          description: The server is ready to accept traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+              example:
+                status: "ready"
+        '503':
+          description: The server has not started (or has stopped).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+              example:
+                status: "not ready"
+                reason: "sweep timer not started"
+
+  /metrics:
+
+    get:
+      operationId: getMetrics
+      tags: [Operations]
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition (`text/plain; version=0.0.4`). Every value is
+        O(1) in store size. Counters end in `_total`; gauges do not.
+
+        When the operator configures a `metricsToken`
+        (`PERIHELION_METRICS_TOKEN`), this endpoint requires a matching bearer
+        token; otherwise it is open to any client that can reach the listener.
+        It is subject to the read rate limit.
+      security:
+        - {}
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Prometheus text exposition.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP mempool_store_size Total number of records in the store
+                # TYPE mempool_store_size gauge
+                mempool_store_size 0
+        '401':
+          description: A `metricsToken` is configured and the bearer token is missing or wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Unauthorized"
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /intents:
 
@@ -142,15 +232,16 @@ paths:
         Validates the EIP-712 signature over the intent, computes the canonical
         `intent_hash`, and stores the record with status `pending`.
 
-        The server rejects the submission if the signature is invalid or any
-        required field is missing (`400`).
+        The server rejects the submission with `400` if the body is missing the
+        intent, the signature is not a hex string, the intent is malformed or
+        expired, or the signature does not verify against the intent's user
+        under the server's EIP-712 domain.
 
-        **Duplicate submissions are not currently rejected.** If an intent
-        with the same hash has already been submitted, this call overwrites
-        the stored record (last write wins, resetting its status to
-        `pending`) and still returns `201`. A strict `409 Conflict` check is
-        tracked separately by issue #320 and is not yet part of this
-        contract.
+        **Duplicate submissions overwrite.** If an intent with the same hash has
+        already been submitted, this call overwrites the stored record (last
+        write wins, resetting its status to `pending`) and returns `201` with
+        the same hash. A `409 Conflict` is not part of this contract (see
+        #320).
       requestBody:
         required: true
         content:
@@ -192,18 +283,22 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               examples:
-                missingFields:
-                  summary: Missing intent or signature
+                missingIntent:
+                  summary: Missing intent
                   value:
-                    error: "Missing intent or signature"
-                invalidSignature:
-                  summary: Invalid EIP-712 signature
+                    error: "Missing intent"
+                malformedSignature:
+                  summary: Signature is not a 0x-prefixed hex string
                   value:
                     error: "Invalid signature"
+                signatureMismatch:
+                  summary: Well-formed signature that does not verify
+                  value:
+                    error: "Signature verification failed"
                 expiredDeadline:
                   summary: Deadline has already passed
                   value:
-                    error: "Intent deadline has passed"
+                    error: "Intent has expired"
                 malformedJson:
                   summary: Request body is not valid JSON
                   value:
@@ -216,7 +311,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
-                error: "Request body exceeds 8192 bytes"
+                error: "Request body exceeds the 8kb limit"
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
     get:
       operationId: listIntents
@@ -242,10 +339,22 @@ paths:
             with `400` and `code: "unresolvable_cursor"`.
           schema:
             type: string
+        - name: chainId
+          in: query
+          required: false
+          description: |
+            Only return intents whose source chain is this EIP-155 chain id.
+            Must be a positive integer; an intent for an unknown chain yields
+            an empty page, not an error.
+          schema:
+            type: integer
+            minimum: 1
         - name: limit
           in: query
           required: false
-          description: Maximum number of records to return.
+          description: |
+            Maximum number of records to return. Values outside 1–1000 are
+            rejected with `400`; they are not clamped.
           schema:
             type: integer
             minimum: 1
@@ -260,8 +369,8 @@ paths:
                 $ref: '#/components/schemas/ListIntentsResponse'
         '400':
           description: |
-            Invalid query parameters, or a cursor that no longer resolves to
-            a record.
+            Invalid query parameters (`status`, `chainId`, `limit`, `cursor`),
+            or a cursor that no longer resolves to a record.
           content:
             application/json:
               schema:
@@ -270,11 +379,18 @@ paths:
                 invalidStatus:
                   summary: Unknown status filter
                   value:
-                    error: "Invalid status"
+                    error: "Invalid status filter"
+                invalidLimit:
+                  summary: Limit outside 1–1000
+                  value:
+                    error: "Invalid limit"
                 unresolvableCursor:
                   summary: Cursor no longer resolves
                   value:
-                    error: "unresolvable_cursor"
+                    error: "Cursor no longer resolves to a record"
+                    code: "unresolvable_cursor"
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /intents/{hash}:
 
@@ -311,6 +427,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: "Intent not found"
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /intents/{hash}/status:
 
@@ -339,7 +457,7 @@ paths:
               status: "settled"
       responses:
         '200':
-          description: The updated intent record.
+          description: The intent record, after the status change.
           content:
             application/json:
               schema:
@@ -380,12 +498,26 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: "Intent not found"
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+
+  responses:
+    RateLimited:
+      description: |
+        The client exceeded its per-IP budget for this class of route (reads or
+        writes) within the rate-limit window.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Too many requests"
 
   parameters:
     IntentHash:
@@ -477,7 +609,7 @@ components:
 
     IntentRecord:
       type: object
-      required: [hash, status, intent, signature, submittedAt]
+      required: [hash, status, intent, signature, createdAt]
       properties:
         hash:
           type: string
@@ -488,12 +620,9 @@ components:
           $ref: '#/components/schemas/Intent'
         signature:
           type: string
-        submittedAt:
+        createdAt:
           type: integer
-          description: Unix timestamp at which the intent was accepted.
-        updatedAt:
-          type: integer
-          description: Unix timestamp of the most recent status change.
+          description: Unix timestamp (seconds) at which the intent was accepted.
 
     SubmitIntentResponse:
       type: object
@@ -526,19 +655,35 @@ components:
 
     InfoResponse:
       type: object
-      required: [name, version, chainId, domain]
+      required: [chainId, verifyingContract, domain]
       properties:
-        name:
-          type: string
-          description: Human-readable server name.
-        version:
-          type: string
-          description: Server version string.
         chainId:
           type: integer
           description: EIP-155 chain id of the source chain this mempool serves.
+        verifyingContract:
+          type: string
+          description: Address of the escrow contract the EIP-712 domain binds to.
         domain:
           $ref: '#/components/schemas/EIP712Domain'
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready, not ready]
+        reason:
+          type: string
+          description: Present only when `status` is `not ready`.
 
     EIP712Domain:
       type: object
@@ -567,3 +712,9 @@ components:
         error:
           type: string
           description: Human-readable error message.
+        code:
+          type: string
+          description: |
+            Machine-readable error code, present only on errors that define one
+            (currently `unresolvable_cursor`).
+          enum: [unresolvable_cursor]

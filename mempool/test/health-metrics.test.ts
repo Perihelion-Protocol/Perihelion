@@ -90,16 +90,13 @@ test("/readyz endpoint", async (t) => {
   const readyTestBase = `http://localhost:${readyTestPort}`;
   let readyServer: MempoolServer;
 
-  await t.test("returns 503 before server start", async () => {
+  await t.test("is unreachable before server start (nothing is listening yet)", async () => {
     readyServer = new MempoolServer({
       port: readyTestPort,
       chainId: CHAIN_ID,
       verifyingContract: ESCROW,
     });
-    const res = await fetch(`${readyTestBase}/readyz`);
-    assert.equal(res.status, 503);
-    const body = (await res.json()) as { status: string; reason?: string };
-    assert.equal(body.status, "not ready");
+    await assert.rejects(fetch(`${readyTestBase}/readyz`));
   });
 
   await t.test("returns 200 after server start", async () => {
@@ -111,9 +108,8 @@ test("/readyz endpoint", async (t) => {
     await readyServer.stop();
   });
 
-  await t.test("returns 503 after server stop", async () => {
-    const res = await fetch(`${readyTestBase}/readyz`);
-    assert.equal(res.status, 503);
+  await t.test("is unreachable after server stop", async () => {
+    await assert.rejects(fetch(`${readyTestBase}/readyz`));
   });
 });
 

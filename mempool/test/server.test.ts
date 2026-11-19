@@ -80,12 +80,22 @@ function submit(intent: unknown, signature: string) {
   });
 }
 
+/** Report a status transition over HTTP. The shared `server` has no statusToken, so no auth header is needed. */
+function patchStatus(target: MempoolServer, hash: string, status: string) {
+  const port = target === server ? PORT : STATUS_PORT;
+  return fetch(`http://localhost:${port}/intents/${hash}/status`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+}
+
 test("accepts an intent signed with the server's configured domain", async () => {
   const intent = sampleIntent();
   const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
 
   const res = await submit(intent, signature);
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 201);
   const body = (await res.json()) as { hash: string };
   assert.match(body.hash, /^0x[0-9a-f]{64}$/);
 });
@@ -98,7 +108,7 @@ test("rejects an intent signed under a mismatched chainId", async () => {
   const res = await submit(intent, signature);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.equal(body.error, "Invalid signature");
+  assert.equal(body.error, "Signature verification failed");
 });
 
 test("rejects an intent signed under a mismatched verifyingContract", async () => {
@@ -109,7 +119,7 @@ test("rejects an intent signed under a mismatched verifyingContract", async () =
   const res = await submit(intent, signature);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.equal(body.error, "Invalid signature");
+  assert.equal(body.error, "Signature verification failed");
 });
 
 // ─── Issue 348: path/query parameter validation on GET /intents ────────────
@@ -150,7 +160,7 @@ test("GET /intents?status=<invalid> returns 400", async () => {
   const res = await fetch(`${BASE}/intents?status=not-a-real-status`);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.match(body.error, /status must be one of/);
+  assert.match(body.error, /Invalid status filter/);
 });
 
 test("GET /intents?status=<repeated> returns 400 instead of silently comparing an array", async () => {
@@ -175,7 +185,7 @@ test("GET /intents paginates with nextCursor and round-trips without overlap or 
     const intent = { ...sampleIntent(), sourceAmount: String(10_000_000 + i) };
     const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
     const res = await submit(intent, signature);
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 201);
     const { hash } = (await res.json()) as { hash: string };
     submitted.push(hash);
   }
@@ -242,39 +252,41 @@ test("rejects an intent whose deadline has already passed", async () => {
   const res = await submit(intent, signature);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.equal(body.error, "Intent deadline has passed");
+  assert.equal(body.error, "Intent has expired");
 });
 
-test("duplicate submission is rejected with 409 and does not reset a settled intent's status", async () => {
+// Duplicate submissions are documented as last-write-wins returning 201, not a
+// 409 (see docs/api/mempool-api.yaml and the closed #320). Pinned here so the
+// behaviour cannot drift silently.
+test("duplicate submission returns 201 and overwrites the stored record, as documented", async () => {
   const intent = sampleIntent();
   const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
 
   const first = await submit(intent, signature);
-  assert.equal(first.status, 200);
+  assert.equal(first.status, 201);
   const { hash } = (await first.json()) as { hash: `0x${string}` };
 
-  assert.equal(server.updateStatus(hash, "settled"), true);
+  await patchStatus(server, hash, "filled");
 
   const dup = await submit(intent, signature);
-  assert.equal(dup.status, 409);
-  const dupBody = (await dup.json()) as { status: string };
-  assert.equal(dupBody.status, "settled");
+  assert.equal(dup.status, 201);
+  assert.equal(((await dup.json()) as { hash: string }).hash, hash);
 
-  const record = await (await fetch(`${BASE}/intents/${hash}`)).json();
-  assert.equal(record.status, "settled");
+  const record = (await (await fetch(`${BASE}/intents/${hash}`)).json()) as { status: string };
+  assert.equal(record.status, "pending", "a resubmission resets the stored record");
 });
 
-test("terminal statuses are final: updateStatus cannot move a settled intent backwards", async () => {
+test("terminal statuses are final: a settled intent cannot move backwards", async () => {
   const intent = sampleIntent();
   const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
 
   const res = await submit(intent, signature);
   const { hash } = (await res.json()) as { hash: `0x${string}` };
 
-  assert.equal(server.updateStatus(hash, "settled"), true);
-  assert.equal(server.updateStatus(hash, "pending"), false);
+  assert.equal((await patchStatus(server, hash, "settled")).status, 200);
+  assert.equal((await patchStatus(server, hash, "pending")).status, 404);
 
-  const record = await (await fetch(`${BASE}/intents/${hash}`)).json();
+  const record = (await (await fetch(`${BASE}/intents/${hash}`)).json()) as { status: string };
   assert.equal(record.status, "settled");
 });
 
@@ -350,7 +362,7 @@ test("abusive client remains throttled for entire window (#738)", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ intent: intent1, signature: sig1 }),
     });
-    assert.equal(res1.status, 200, "first request should succeed");
+    assert.equal(res1.status, 201, "first request should succeed");
 
     const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
     const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
@@ -401,7 +413,7 @@ test("rate limiting keys on req.ip and ignores X-Forwarded-For without trustProx
       },
       body: JSON.stringify({ intent: intent1, signature: sig1 }),
     });
-    assert.equal(res1.status, 200, "first request should succeed");
+    assert.equal(res1.status, 201, "first request should succeed");
 
     const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
     const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
@@ -446,7 +458,7 @@ test("multiple forged X-Forwarded-For entries do not bypass rate limiting (#739)
       },
       body: JSON.stringify({ intent: intent1, signature: sig1 }),
     });
-    assert.equal(res1.status, 200, "first request should succeed");
+    assert.equal(res1.status, 201, "first request should succeed");
 
     const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
     const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
@@ -473,6 +485,270 @@ test("multiple forged X-Forwarded-For entries do not bypass rate limiting (#739)
 test("PATCH /intents/:hash/status rejects requests without the configured token", async () => {
   const res = await fetch(`http://localhost:${STATUS_PORT}/intents/0xdead/status`, {
     method: "PATCH",
-    headers: { "content-type
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "settled" }),
+  });
+  assert.equal(res.status, 401);
+});
 
-/* … truncated 10822 chars — edit only what you need near the top … */
+test("submit -> report settled over HTTP -> waitForSettlement resolves promptly", async () => {
+  const client = new PerihelionClient({
+    mempoolUrl: `http://localhost:${STATUS_PORT}`,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    fetch,
+  });
+
+  const intent = sampleIntent();
+  const domain = perihelionDomain(CHAIN_ID, ESCROW);
+  const signature = await sign(intent, domain);
+  const hash = await client.submitIntent({ intent, signature, hash: hashIntent(intent, domain) });
+
+  await client.reportStatus(hash, "settled", STATUS_TOKEN);
+
+  const result = await client.waitForSettlement(hash, { intervalMs: 20, timeoutMs: 2_000 });
+  assert.equal(result.status, "settled");
+});
+
+// ─── Issue 473: pagination envelope tests ──────────────────────────────────
+
+test("GET /intents returns pagination envelope with records and nextCursor", async () => {
+  // Submit multiple intents
+  const intents = [];
+  for (let i = 0; i < 3; i++) {
+    const intent = { ...sampleIntent(), nonce: String(i) };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    await submit(intent, signature);
+    intents.push(intent);
+  }
+
+  const res = await fetch(`${BASE}/intents?status=pending`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: unknown[]; nextCursor?: string };
+  
+  assert.ok(Array.isArray(body.records), "response must have a records array");
+  assert.ok(body.records.length >= 3, "should contain the submitted intents");
+  assert.ok(body.nextCursor === undefined || typeof body.nextCursor === "string", "nextCursor is absent on the last page or a string");
+});
+
+test("GET /intents pagination: page smaller than result set returns nextCursor", async () => {
+  // Submit multiple intents to ensure pagination
+  const intents = [];
+  for (let i = 0; i < 5; i++) {
+    const intent = { ...sampleIntent(), nonce: String(100 + i) };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    await submit(intent, signature);
+    intents.push(intent);
+  }
+
+  const res = await fetch(`${BASE}/intents?status=pending&limit=2`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: unknown[]; nextCursor?: string };
+  
+  assert.equal(body.records.length, 2, "should return exactly 2 records");
+  assert.ok(body.nextCursor, "nextCursor should be present when more pages exist");
+});
+
+test("GET /intents pagination: following cursor returns next page", async () => {
+  // Submit intents with distinct nonces
+  for (let i = 0; i < 4; i++) {
+    const intent = { ...sampleIntent(), nonce: String(200 + i) };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    await submit(intent, signature);
+  }
+
+  // Get first page
+  const res1 = await fetch(`${BASE}/intents?status=pending&limit=2`);
+  const page1 = (await res1.json()) as { records: Array<{ hash: string }>; nextCursor?: string };
+  
+  assert.equal(page1.records.length, 2);
+  assert.ok(page1.nextCursor, "first page should have nextCursor");
+
+  // Get second page
+  const res2 = await fetch(`${BASE}/intents?status=pending&limit=2&cursor=${page1.nextCursor}`);
+  const page2 = (await res2.json()) as { records: Array<{ hash: string }>; nextCursor?: string };
+  
+  assert.ok(page2.records.length > 0, "second page should have records");
+  
+  // Verify no overlap
+  const page1Hashes = new Set(page1.records.map(r => r.hash));
+  const page2Hashes = page2.records.map(r => r.hash);
+  for (const hash of page2Hashes) {
+    assert.ok(!page1Hashes.has(hash), "pages should not overlap");
+  }
+});
+
+test("GET /intents pagination: final page returns nextCursor undefined", async () => {
+  // Submit exactly 2 intents
+  for (let i = 0; i < 2; i++) {
+    const intent = { ...sampleIntent(), nonce: String(300 + i) };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    await submit(intent, signature);
+  }
+
+  const res = await fetch(`${BASE}/intents?status=pending&limit=100`);
+  const body = (await res.json()) as { records: unknown[]; nextCursor?: string };
+  
+  assert.ok(body.records.length >= 2);
+  assert.equal(body.nextCursor, undefined, "final page should have nextCursor: undefined");
+});
+
+test("GET /intents limit parameter: values above MAX_LIST_LIMIT are rejected, not clamped", async () => {
+  // The spec documents limit as 1..1000 and out-of-range values as 400.
+  const res = await fetch(`${BASE}/intents?status=pending&limit=1001`);
+  assert.equal(res.status, 400);
+  assert.match(((await res.json()) as { error: string }).error, /limit/);
+
+  const ok = await fetch(`${BASE}/intents?status=pending&limit=1000`);
+  assert.equal(ok.status, 200);
+});
+
+test("GET /intents chainId filter: returns only matching chain intents", async () => {
+  // Submit intent for the configured chain
+  const intent8453 = { ...sampleIntent(), sourceChainId: CHAIN_ID };
+  const sig8453 = await sign(intent8453, perihelionDomain(CHAIN_ID, ESCROW));
+  await submit(intent8453, sig8453);
+
+  // Query with chainId filter
+  const res = await fetch(`${BASE}/intents?status=pending&chainId=${CHAIN_ID}`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: Array<{ intent: { sourceChainId: number } }> };
+  
+  assert.ok(body.records.length > 0, "should have at least one result");
+  for (const record of body.records) {
+    assert.equal(record.intent.sourceChainId, CHAIN_ID, "all results should match chainId filter");
+  }
+});
+
+test("GET /intents rejects bare array response format (regression test)", async () => {
+  // This test documents that the server returns an envelope, not a bare array
+  const res = await fetch(`${BASE}/intents?status=pending`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+
+  assert.ok(typeof body === "object" && body !== null, "response should be an object");
+  assert.ok("records" in body, "response must have records field");
+  assert.ok(Array.isArray(body.records), "records must be an array");
+  assert.ok(body.nextCursor === undefined || typeof body.nextCursor === "string", "nextCursor is absent on the last page or a string");
+  assert.ok(!Array.isArray(body), "response must NOT be a bare array");
+});
+
+// ─── Issue 566: strict validation of every list query parameter ────────────
+
+test("GET /intents?limit=<non-numeric> returns 400 naming the parameter", async () => {
+  const res = await fetch(`${BASE}/intents?limit=abc`);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /limit/);
+});
+
+test("GET /intents?limit=0 and negative/fractional values return 400", async () => {
+  for (const bad of ["0", "-5", "1.5", "12e3"]) {
+    const res = await fetch(`${BASE}/intents?limit=${encodeURIComponent(bad)}`);
+    assert.equal(res.status, 400, `limit=${bad} should be rejected`);
+  }
+});
+
+test("GET /intents?limit=<repeated> returns 400 rather than substituting the default", async () => {
+  const res = await fetch(`${BASE}/intents?limit=10&limit=20`);
+  assert.equal(res.status, 400);
+});
+
+test("GET /intents?chainId=<non-numeric> returns 400, not an empty 200 page", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=abc`);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /chainId/);
+});
+
+test("GET /intents?chainId=<repeated> returns 400 instead of filtering on NaN", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=1&chainId=2`);
+  assert.equal(res.status, 400);
+});
+
+test("GET /intents?chainId=<valid-but-unknown> still returns an empty 200 page", async () => {
+  const res = await fetch(`${BASE}/intents?chainId=999999`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { records: unknown[] };
+  assert.equal(body.records.length, 0);
+});
+
+test("GET /intents?cursor=<repeated> returns 400", async () => {
+  const res = await fetch(`${BASE}/intents?cursor=0xaa&cursor=0xbb`);
+  assert.equal(res.status, 400);
+});
+
+// ─── Issue 569: framework errors are JSON, never HTML, never a stack trace ──
+
+test("POST /intents with a body over the 8kb limit returns 413 JSON naming the limit", async () => {
+  const res = await fetch(`${BASE}/intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ intent: { blob: "x".repeat(9000) }, signature: "0x00" }),
+  });
+  assert.equal(res.status, 413);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /8kb/i);
+});
+
+test("POST /intents with malformed JSON returns 400 JSON, not an HTML error page", async () => {
+  const res = await fetch(`${BASE}/intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{ not valid json",
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.equal(typeof body.error, "string");
+  assert.doesNotMatch(body.error, /at .*\(.*:\d+:\d+\)/, "message must not contain a stack frame");
+});
+
+test("an unknown route returns 404 JSON in the standard error shape", async () => {
+  const res = await fetch(`${BASE}/no-such-route`);
+  assert.equal(res.status, 404);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const body = (await res.json()) as { error: string };
+  assert.equal(typeof body.error, "string");
+});
+
+// ─── Issue 564: every route is rate limited, with separate read/write budgets ─
+
+test("read and write routes enforce independent, configurable rate-limit budgets", async () => {
+  const port = 3990;
+  const limited = new MempoolServer({
+    port,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    readRateLimit: 3,
+    writeRateLimit: 1,
+    rateLimitWindowMs: 60_000,
+  });
+  await limited.start();
+  try {
+    const base = `http://localhost:${port}`;
+
+    // Reads: the 4th GET within the window is rejected.
+    for (let i = 0; i < 3; i++) {
+      assert.equal((await fetch(`${base}/info`)).status, 200, `read ${i + 1} should pass`);
+    }
+    assert.equal((await fetch(`${base}/info`)).status, 429, "read 4 should be limited");
+
+    // Writes draw on a separate budget that the read burst did not touch.
+    const first = await fetch(`${base}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.notEqual(first.status, 429, "first write should not be pre-limited by reads");
+    const second = await fetch(`${base}/intents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(second.status, 429, "second write should be limited");
+  } finally {
+    await limited.stop();
+  }
+});

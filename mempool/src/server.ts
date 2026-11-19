@@ -395,9 +395,20 @@ export class MempoolServer {
       }
       cursor = cursorParam.toLowerCase() as Hex;
       // An unknown cursor is a client error, not an empty page: the caller is
-      // paginating against a snapshot that no longer exists.
-      if (!this.store.get(cursor)) {
-        res.status(400).json({ error: "Invalid cursor" });
+      // paginating against a snapshot that no longer exists. The machine-readable
+      // `code` lets a client restart pagination deliberately (see the API spec).
+      // A cursor also stops resolving when its record leaves the filtered set
+      // (e.g. a status change moved it out of `?status=`), so check the filters too.
+      const anchor = this.store.get(cursor);
+      const outOfFilter =
+        anchor !== undefined &&
+        ((status !== undefined && anchor.status !== status) ||
+          (chainId !== undefined && anchor.intent.sourceChainId !== chainId));
+      if (!anchor || outOfFilter) {
+        res.status(400).json({
+          error: "Cursor no longer resolves to a record",
+          code: "unresolvable_cursor",
+        });
         return;
       }
     }
@@ -422,12 +433,14 @@ export class MempoolServer {
       res.status(400).json({ error: "Invalid status" });
       return;
     }
+    // `updateStatus` reports success as a boolean; the documented 200 body is
+    // the updated IntentRecord, so read it back after the write.
     const updated = this.store.updateStatus(hash, status as IntentStatus);
     if (!updated) {
       res.status(404).json({ error: "Intent not found" });
       return;
     }
-    res.status(200).json(updated);
+    res.status(200).json(this.store.get(hash));
   }
 
   /**
