@@ -356,6 +356,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error AlreadyLocked();
     error NotLocked();
     error InvalidSignature();
+    /// @dev The intent is signed by a counterfactual (not yet deployed) smart account
+    ///      with an ERC-6492 wrapper (#1054). The escrow does not deploy accounts, so
+    ///      the solver must deploy the account first (see {lock}) and then retry.
+    error UndeployedSmartAccount();
     error IntentExpired();
     error WrongChain();
     error NotEndpoint();
@@ -758,6 +762,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         intentHash = hashIntent(intent);
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
         if (cancelledIntent[intent.user][intentHash]) revert IntentCancelled();
+        // A counterfactual account (no code yet) cannot be validated on-chain without
+        // deploying it. Fail with a dedicated error so the solver knows to deploy the
+        // account from the wrapper's factory call first, instead of a generic failure.
+        if (intent.user.code.length == 0 && _isERC6492(signature)) revert UndeployedSmartAccount();
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
     }
 
@@ -1279,9 +1287,30 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: signature & token safety ----------------------------------
 
+    /// @dev ERC-6492 magic suffix: a signature wrapped for a counterfactual account is
+    ///      `abi.encode(factory, factoryCalldata, innerSig) ‖ MAGIC` (#1054).
+    bytes32 private constant ERC6492_MAGIC =
+        0x6492649264926492649264926492649264926492649264926492649264926492;
+
+    /// @dev True iff `signature` ends with the ERC-6492 magic suffix.
+    function _isERC6492(bytes calldata signature) private pure returns (bool) {
+        return signature.length >= 32
+            && keccak256(signature[signature.length - 32:])
+                == keccak256(abi.encodePacked(ERC6492_MAGIC));
+    }
+
+    /// @dev Strip the ERC-6492 wrapper and return the inner signature the account
+    ///      itself validates. Reverts on a malformed wrapper.
+    function _unwrapERC6492(bytes calldata signature) private pure returns (bytes memory inner) {
+        bytes memory body = signature[:signature.length - 32];
+        (,, inner) = abi.decode(body, (address, bytes, bytes));
+    }
+
     /// @dev Verify an intent signature. Contract accounts (Safe, ERC-4337 smart
     ///      accounts) are validated via ERC-1271 with a bounded gas stipend; EOAs use
-    ///      the 65-byte ECDSA path. Returns false rather than reverting on failure.
+    ///      the 65-byte ECDSA path. An ERC-6492-wrapped signature from a deployed account
+    ///      is unwrapped first, so the account validates only its own signature. Returns
+    ///      false rather than reverting on failure.
     function _verify(bytes32 digest, address signer, bytes calldata signature)
         private
         view
@@ -1289,10 +1318,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     {
         // ERC-1271 path for smart-contract wallets.
         if (signer.code.length > 0) {
+            bytes memory accountSig = _isERC6492(signature) ? _unwrapERC6492(signature) : signature;
             uint256 gasStipend = gasleft();
             if (gasStipend > 100_000) gasStipend = 100_000;
             (bool ok, bytes memory ret) = signer.staticcall{ gas: gasStipend }(
-                abi.encodeWithSelector(IERC1271.isValidSignature.selector, digest, signature)
+                abi.encodeWithSelector(IERC1271.isValidSignature.selector, digest, accountSig)
             );
             if (!ok || ret.length < 32) return false;
             return abi.decode(ret, (bytes4)) == IERC1271.isValidSignature.selector;
