@@ -13,6 +13,18 @@
     "cancel_expired_intent": {
       "max_cpu_instructions": 1100000,
       "max_memory_bytes": 360000
+    },
+    "pause": {
+      "max_cpu_instructions": 600000,
+      "max_memory_bytes": 200000
+    },
+    "set_guardian": {
+      "max_cpu_instructions": 600000,
+      "max_memory_bytes": 200000
+    },
+    "cancel_admin_transfer": {
+      "max_cpu_instructions": 600000,
+      "max_memory_bytes": 200000
     }
   }
 }

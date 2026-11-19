@@ -41,6 +41,16 @@ pub enum PerihelionError {
     /// Minimum endpoint-change delay has not yet elapsed (confirm_endpoint guard,
     /// issue #500).
     EndpointChangeNotReady = 139,
+    /// No pending admin hand-over exists (cancel_admin_transfer guard, issue #1073).
+    NotPendingAdminTransfer = 154,
+    /// `set_admin` nominated the current admin as the new admin (issue #1073).
+    AdminUnchanged = 155,
+    /// Guardian pause cooldown has not elapsed since the last guardian pause
+    /// (guardian `pause` guard, issue #1072).
+    GuardianCooldownActive = 156,
+    /// Guardian pause TTL has not yet expired; unpause is still admin-only and
+    /// this guards the auto-expiry path (issue #1072).
+    GuardianPauseNotExpired = 157,
 
     // --- Intent preconditions ---
     /// No registered intent for the given hash.

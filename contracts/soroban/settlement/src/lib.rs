@@ -77,8 +77,11 @@ mod events {
         peer_change_proposed,
         peer_change_cancelled,
         peer_change_expired,
+        endpoint_change_expired,
         admin_transfer_started,
         admin_transfer_completed,
+        admin_transfer_cancelled,
+        guardian_set,
         paused_set,
         paused_eid_set,
         native_token_set,
@@ -126,8 +129,11 @@ mod events {
 // | `peer_change_proposed`         | ("peer_change_proposed",)              | (eid: u32, old: Option<BytesN<32>>, new: BytesN<32>, ready_at: u64)
 // | `peer_change_cancelled`        | ("peer_change_cancelled",)             | (eid: u32)
 // | `peer_change_expired`          | ("peer_change_expired",)               | (eid: u32)
+// | `endpoint_change_expired`      | ("endpoint_change_expired",)           | ()
 // | `admin_transfer_started`       | ("admin_transfer_started",)            | (old: Address, new: Address)
 // | `admin_transfer_completed`     | ("admin_transfer_completed",)          | (old: Address, new: Address)
+// | `admin_transfer_cancelled`     | ("admin_transfer_cancelled",)          | ()
+// | `guardian_set`                 | ("guardian_set",)                      | (old: Option<Address>, new: Address)
 // | `paused_set`                   | ("paused_set",)                        | (paused: bool)
 // | `paused_eid_set`               | ("paused_eid_set",)                    | (eid: u32, paused: bool)
 // | `native_token_set`             | ("native_token_set",)                  | (native_token: Address)
@@ -230,6 +236,17 @@ pub const PEER_CHANGE_GRACE: u64 = 1_209_600; // 14 days in seconds
 /// rotation with an unworkably long delay. Mirrors EVM's MAX_DELAY.
 pub const MAX_PEER_CHANGE_DELAY: u64 = 2_592_000; // 30 days in seconds
 
+/// How long a guardian-initiated pause lasts before it auto-expires (issue
+/// #1072). Mirrors the EVM escrow's guardian pause TTL: the guardian can halt
+/// the contract instantly for incident response, but the pause lapses on its
+/// own so a compromised guardian cannot brick the contract indefinitely.
+pub const GUARDIAN_PAUSE_TTL: u64 = 86_400; // 1 day in seconds
+
+/// Minimum time between guardian-initiated pauses (issue #1072). Mirrors the
+/// EVM escrow's guardian cooldown so a compromised guardian cannot keep the
+/// contract permanently paused by re-pausing as each TTL lapses.
+pub const GUARDIAN_PAUSE_COOLDOWN: u64 = 3_600; // 1 hour in seconds
+
 #[contract]
 pub struct Perihelion;
 
@@ -326,6 +343,24 @@ impl Perihelion {
         let now = env.ledger().timestamp();
         let ready_at = now + MIN_PEER_CHANGE_DELAY;
 
+        // Issue #1071: an expired pending proposal is treated as absent. Clear
+        // it (and emit the expiry event) so a new proposal succeeds without a
+        // manual cancel once the grace window has lapsed.
+        if let Some(proposed_at) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::PendingEndpointTime)
+        {
+            if now > proposed_at + MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE {
+                env.storage().instance().remove(&DataKey::PendingEndpoint);
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::PendingEndpointTime);
+                env.events()
+                    .publish((events::endpoint_change_expired(&env),), ());
+            }
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::PendingEndpoint, &new_endpoint);
@@ -374,11 +409,15 @@ impl Perihelion {
         }
 
         if now > proposed_at + MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE {
+            // Issue #1071: perform the cleanup and return Ok so the storage
+            // writes and the expiry event are not rolled back by an Err return.
             env.storage().instance().remove(&DataKey::PendingEndpoint);
             env.storage()
                 .instance()
                 .remove(&DataKey::PendingEndpointTime);
-            return Err(PerihelionError::EndpointChangeExpired);
+            env.events()
+                .publish((events::endpoint_change_expired(&env),), ());
+            return Ok(());
         }
 
         let admin = Self::require_admin(&env)?;
@@ -471,12 +510,37 @@ impl Perihelion {
             return Err(PerihelionError::InvalidDelay);
         }
 
+        let now = env.ledger().timestamp();
+
+        // Issue #1071: an expired pending proposal is treated as absent. Clear
+        // it (and emit the expiry event) so a new proposal succeeds without a
+        // manual cancel once the grace window has lapsed.
+        if let (Some(proposed_at), Some(pending_delay)) = (
+            env.storage()
+                .instance()
+                .get::<DataKey, u64>(&DataKey::PendingPeerTime(eid)),
+            env.storage()
+                .instance()
+                .get::<DataKey, u64>(&DataKey::PendingPeerDelay(eid)),
+        ) {
+            if now > proposed_at + pending_delay + PEER_CHANGE_GRACE {
+                env.storage().instance().remove(&DataKey::PendingPeer(eid));
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::PendingPeerTime(eid));
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::PendingPeerDelay(eid));
+                env.events()
+                    .publish((events::peer_change_expired(&env),), (eid,));
+            }
+        }
+
         if env.storage().instance().has(&DataKey::PendingPeer(eid)) {
             return Err(PerihelionError::PendingPeerChangeExists);
         }
 
         let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
-        let now = env.ledger().timestamp();
         let ready_at = now + delay;
 
         env.storage()
@@ -535,6 +599,8 @@ impl Perihelion {
         }
 
         if now > proposed_at + delay + PEER_CHANGE_GRACE {
+            // Issue #1071: perform the cleanup and return Ok so the storage
+            // writes and the expiry event are not rolled back by an Err return.
             env.events()
                 .publish((events::peer_change_expired(&env),), (eid,));
             env.storage().instance().remove(&DataKey::PendingPeer(eid));
@@ -544,7 +610,7 @@ impl Perihelion {
             env.storage()
                 .instance()
                 .remove(&DataKey::PendingPeerDelay(eid));
-            return Err(PerihelionError::PeerChangeExpired);
+            return Ok(());
         }
 
         let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
@@ -623,17 +689,19 @@ impl Perihelion {
     /// prevents a fat-fingered or uncontrolled address from permanently capturing
     /// governance.
     ///
-    /// To cancel a pending handover, call `set_admin` again with the current
-    /// admin's own address (or any address the current admin controls).
-    /// Effectively this overwrites the pending nominee without completing the
-    /// handover, since the current admin remains in place until `accept_admin`
-    /// is called.
+    /// To cancel a pending handover, call `cancel_admin_transfer` (issue #1073).
     ///
     /// Emits `admin_transfer_started(old, new)` (issue #16).
+    ///
+    /// # Errors
+    /// - `AdminTransferToSelf` if `new_admin` equals the current admin
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         let current = Self::require_admin(&env)?;
         current.require_auth();
+        if new_admin == current {
+            return Err(PerihelionError::AdminTransferToSelf);
+        }
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -641,6 +709,28 @@ impl Perihelion {
             (events::admin_transfer_started(&env),),
             (current, new_admin),
         );
+        Ok(())
+    }
+
+    /// Cancel a pending admin handover (issue #1073). Admin-only.
+    ///
+    /// Clears `PendingAdmin` without completing the transfer, so a mistaken
+    /// nomination can be revoked with a distinct event that monitoring can
+    /// tell apart from a new transfer.
+    ///
+    /// Emits `admin_transfer_cancelled()`.
+    ///
+    /// # Errors
+    /// - `NotPendingAdminTransfer` if no admin transfer is pending
+    pub fn cancel_admin_transfer(env: Env) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
+        Self::require_admin(&env)?.require_auth();
+        if !env.storage().instance().has(&DataKey::PendingAdmin) {
+            return Err(PerihelionError::NotPendingAdminTransfer);
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((events::admin_transfer_cancelled(&env),), ());
         Ok(())
     }
 
@@ -674,7 +764,70 @@ impl Perihelion {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         env.storage().instance().set(&DataKey::Paused, &paused);
+        // An admin unpause clears any guardian pause expiry (issue #1072).
+        env.storage().instance().remove(&DataKey::GuardianPauseExpiry);
         env.events().publish((events::paused_set(&env),), (paused,));
+        Ok(())
+    }
+
+    /// Set the guardian address (issue #1072). Admin-only.
+    ///
+    /// The guardian is a hot key that can pause the contract instantly for
+    /// incident response, mirroring the EVM escrow's guardian. It cannot
+    /// unpause or change any configuration; those remain admin-only.
+    ///
+    /// Emits `guardian_set(old, new)`.
+    pub fn set_guardian(env: Env, new_guardian: Address) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
+        Self::require_admin(&env)?.require_auth();
+        let old: Option<Address> = env.storage().instance().get(&DataKey::Guardian);
+        env.storage()
+            .instance()
+            .set(&DataKey::Guardian, &new_guardian);
+        env.events()
+            .publish((events::guardian_set(&env),), (old, new_guardian));
+        Ok(())
+    }
+
+    /// Pause the contract as the guardian (issue #1072). Guardian-only.
+    ///
+    /// The pause auto-expires after `GUARDIAN_PAUSE_TTL` seconds, and a new
+    /// guardian pause cannot be issued until `GUARDIAN_PAUSE_COOLDOWN` seconds
+    /// have elapsed since the previous one. This mirrors the EVM escrow's
+    /// guardian semantics: instant incident response without letting a
+    /// compromised guardian brick the contract indefinitely.
+    ///
+    /// Emits `paused_set(true)`.
+    ///
+    /// # Errors
+    /// - `NotInitialized` if no guardian is configured
+    /// - `GuardianCooldown` if the cooldown has not elapsed
+    pub fn pause(env: Env) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
+        let guardian: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardian)
+            .ok_or(PerihelionError::NotInitialized)?;
+        guardian.require_auth();
+
+        let now = env.ledger().timestamp();
+        if let Some(last) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::GuardianLastPause)
+        {
+            if now < last.saturating_add(GUARDIAN_PAUSE_COOLDOWN) {
+                return Err(PerihelionError::GuardianCooldown);
+            }
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::GuardianPauseExpiry, &now.saturating_add(GUARDIAN_PAUSE_TTL));
+        env.storage().instance().set(&DataKey::GuardianLastPause, &now);
+        env.events().publish((events::paused_set(&env),), (true,));
         Ok(())
     }
 
@@ -690,9 +843,17 @@ impl Perihelion {
     pub fn set_paused_eid(env: Env, eid: u32, paused: bool) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
-        env.storage()
-            .instance()
-            .set(&DataKey::PausedEid(eid), &paused);
+        // Issue #1074: per-eid pause flags live in persistent storage so the
+        // instance entry stays fixed-size. Setting false removes the key
+        // instead of writing `false`.
+        let key = DataKey::PausedEid(eid);
+        if paused {
+            let ps = env.storage().persistent();
+            ps.set(&key, &true);
+            ps.extend_ttl(&key, Self::max_ttl(&env) / 2, Self::max_ttl(&env));
+        } else {
+            env.storage().persistent().remove(&key);
+        }
         env.events()
             .publish((events::paused_eid_set(&env),), (eid, paused));
         Ok(())
@@ -775,11 +936,16 @@ impl Perihelion {
     ) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
+        // Issue #1074: the allowlist lives in persistent storage so the
+        // instance entry stays fixed-size and invocation cost does not grow
+        // with the number of allowlisted tokens.
         let key = DataKey::AllowedDestToken(token.clone());
         if allowed {
-            env.storage().instance().set(&key, &true);
+            let ps = env.storage().persistent();
+            ps.set(&key, &true);
+            ps.extend_ttl(&key, Self::max_ttl(&env) / 2, Self::max_ttl(&env));
         } else {
-            env.storage().instance().remove(&key);
+            env.storage().persistent().remove(&key);
         }
         env.events()
             .publish((events::dest_token_allowed_set(&env),), (token, allowed));
@@ -789,7 +955,7 @@ impl Perihelion {
     /// Whether `token` is allowlisted as a contract-native `destAsset`.
     pub fn is_dest_token_allowed(env: Env, token: Address) -> bool {
         env.storage()
-            .instance()
+            .persistent()
             .has(&DataKey::AllowedDestToken(token))
     }
 
@@ -1716,18 +1882,33 @@ impl Perihelion {
         Self::require_endpoint(&env)
     }
 
-    /// Whether the contract is paused.
+    /// Whether the contract is paused. A guardian-initiated pause auto-expires
+    /// after `GUARDIAN_PAUSE_TTL` (issue #1072).
     pub fn is_paused(env: Env) -> bool {
-        env.storage()
+        if !env
+            .storage()
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
+        {
+            return false;
+        }
+        if let Some(expiry) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::GuardianPauseExpiry)
+        {
+            if env.ledger().timestamp() >= expiry {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether the given source-chain corridor is individually paused.
     pub fn is_eid_paused(env: Env, eid: u32) -> bool {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::PausedEid(eid))
             .unwrap_or(false)
     }
@@ -1914,7 +2095,7 @@ impl Perihelion {
                 let token = Address::from_string_bytes(asset_id);
                 if env
                     .storage()
-                    .instance()
+                    .persistent()
                     .has(&DataKey::AllowedDestToken(token.clone()))
                 {
                     Ok(token)
@@ -1933,12 +2114,22 @@ impl Perihelion {
     }
 
     fn require_not_paused(env: &Env) -> Result<(), PerihelionError> {
+        // A guardian pause auto-expires after GUARDIAN_PAUSE_TTL (issue #1072).
         if env
             .storage()
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
         {
+            if let Some(expiry) = env
+                .storage()
+                .instance()
+                .get::<DataKey, u64>(&DataKey::GuardianPauseExpiry)
+            {
+                if env.ledger().timestamp() >= expiry {
+                    return Ok(());
+                }
+            }
             return Err(PerihelionError::ContractPaused);
         }
         Ok(())
@@ -1949,7 +2140,7 @@ impl Perihelion {
         Self::require_not_paused(env)?;
         if env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::PausedEid(eid))
             .unwrap_or(false)
         {

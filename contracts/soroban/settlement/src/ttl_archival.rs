@@ -545,3 +545,275 @@ fn inbound_nonce_archival_resets_replay_protection() {
     // Should fail with StaleNonce if nonce state is intact
     assert!(result.is_err(), "nonce replay should be rejected");
 }
+
+// --- Test 13: AllowedDestToken lives in persistent storage with TTL ---------
+
+#[test]
+fn allowed_dest_token_is_persistent_and_ttl_extended_on_write() {
+    let s = setup();
+    let token = Address::generate(&s.env);
+
+    // Not allowlisted initially: persistent entry absent.
+    assert!(
+        !s.env
+            .storage()
+            .persistent()
+            .has(&DataKey::AllowedDestToken(token.clone())),
+        "allowlist entry should not exist before it is added"
+    );
+
+    s.client.set_dest_token_allowed(&token, &true);
+
+    // The entry must live in persistent storage, not instance storage.
+    assert!(
+        s.env
+            .storage()
+            .persistent()
+            .has(&DataKey::AllowedDestToken(token.clone())),
+        "allowlist entry should be a persistent entry"
+    );
+    assert!(
+        !s.env
+            .storage()
+            .instance()
+            .has(&DataKey::AllowedDestToken(token.clone())),
+        "allowlist entry must not grow instance storage"
+    );
+
+    // The write must extend the persistent TTL to MAX_TTL.
+    let ttl = s
+        .env
+        .storage()
+        .persistent()
+        .get_ttl(&DataKey::AllowedDestToken(token.clone()));
+    assert!(
+        ttl >= MAX_TTL - 1,
+        "allowlist entry TTL should be extended to MAX_TTL on write"
+    );
+
+    // Reads still work after ledger advancement within the TTL window.
+    advance_ledger(&s.env, 100_000);
+    assert!(
+        s.client.is_dest_token_allowed(&token),
+        "allowlist entry should still be readable within its TTL"
+    );
+}
+
+// --- Test 14: AllowedDestToken read after simulated archival/restore --------
+
+#[test]
+fn allowed_dest_token_read_after_simulated_archive_and_restore() {
+    let s = setup();
+    let token = Address::generate(&s.env);
+
+    s.client.set_dest_token_allowed(&token, &true);
+    assert!(s.client.is_dest_token_allowed(&token));
+
+    // Simulate archival by removing the persistent entry (the test env does
+    // not archive automatically). A missing entry must read as "not allowed"
+    // rather than panicking.
+    s.env
+        .storage()
+        .persistent()
+        .remove(&DataKey::AllowedDestToken(token.clone()));
+    assert!(
+        !s.client.is_dest_token_allowed(&token),
+        "archived allowlist entry should read as not allowed"
+    );
+
+    // Simulate restore: re-adding the entry restores the allowlist state and
+    // re-extends the TTL.
+    s.client.set_dest_token_allowed(&token, &true);
+    assert!(
+        s.client.is_dest_token_allowed(&token),
+        "restored allowlist entry should be readable again"
+    );
+    let ttl = s
+        .env
+        .storage()
+        .persistent()
+        .get_ttl(&DataKey::AllowedDestToken(token.clone()));
+    assert!(
+        ttl >= MAX_TTL - 1,
+        "restore should re-extend the allowlist entry TTL"
+    );
+}
+
+// --- Test 15: Removing an allowlist entry leaves no stale key --------------
+
+#[test]
+fn removing_allowed_dest_token_leaves_no_stale_entry() {
+    let s = setup();
+    let token = Address::generate(&s.env);
+
+    s.client.set_dest_token_allowed(&token, &true);
+    assert!(s.client.is_dest_token_allowed(&token));
+
+    // Disallow: the key must be removed, not stored as `false`.
+    s.client.set_dest_token_allowed(&token, &false);
+    assert!(
+        !s.client.is_dest_token_allowed(&token),
+        "removed allowlist entry should read as not allowed"
+    );
+    assert!(
+        !s.env
+            .storage()
+            .persistent()
+            .has(&DataKey::AllowedDestToken(token.clone())),
+        "disallowing should remove the persistent key entirely"
+    );
+    assert!(
+        !s.env
+            .storage()
+            .instance()
+            .has(&DataKey::AllowedDestToken(token.clone())),
+        "disallowing should not leave an instance entry behind"
+    );
+}
+
+// --- Test 16: PausedEid lives in persistent storage with TTL ---------------
+
+#[test]
+fn paused_eid_is_persistent_and_ttl_extended_on_write() {
+    let s = setup();
+    let eid = 42u32;
+
+    assert!(
+        !s.env
+            .storage()
+            .persistent()
+            .has(&DataKey::PausedEid(eid)),
+        "paused-eid entry should not exist before it is set"
+    );
+
+    s.client.set_paused_eid(&eid, &true);
+
+    assert!(
+        s.env
+            .storage()
+            .persistent()
+            .has(&DataKey::PausedEid(eid)),
+        "paused-eid entry should be a persistent entry"
+    );
+    assert!(
+        !s.env.storage().instance().has(&DataKey::PausedEid(eid)),
+        "paused-eid entry must not grow instance storage"
+    );
+
+    let ttl = s
+        .env
+        .storage()
+        .persistent()
+        .get_ttl(&DataKey::PausedEid(eid));
+    assert!(
+        ttl >= MAX_TTL - 1,
+        "paused-eid entry TTL should be extended to MAX_TTL on write"
+    );
+
+    // Still paused after ledger advancement within the TTL window.
+    advance_ledger(&s.env, 100_000);
+    assert!(
+        s.client.is_paused_eid(&eid),
+        "paused-eid entry should still be readable within its TTL"
+    );
+}
+
+// --- Test 17: Unpausing an eid removes the key (no stale `false`) ----------
+
+#[test]
+fn unpausing_eid_removes_persistent_key() {
+    let s = setup();
+    let eid = 43u32;
+
+    s.client.set_paused_eid(&eid, &true);
+    assert!(s.client.is_paused_eid(&eid));
+
+    s.client.set_paused_eid(&eid, &false);
+    assert!(
+        !s.client.is_paused_eid(&eid),
+        "unpaused eid should read as not paused"
+    );
+    assert!(
+        !s.env
+            .storage()
+            .persistent()
+            .has(&DataKey::PausedEid(eid)),
+        "unpausing should remove the persistent key entirely"
+    );
+    assert!(
+        !s.env.storage().instance().has(&DataKey::PausedEid(eid)),
+        "unpausing should not leave an instance entry behind"
+    );
+}
+
+// --- Test 18: PausedEid read after simulated archival/restore --------------
+
+#[test]
+fn paused_eid_read_after_simulated_archive_and_restore() {
+    let s = setup();
+    let eid = 44u32;
+
+    s.client.set_paused_eid(&eid, &true);
+    assert!(s.client.is_paused_eid(&eid));
+
+    // Simulate archival by removing the persistent entry.
+    s.env
+        .storage()
+        .persistent()
+        .remove(&DataKey::PausedEid(eid));
+    assert!(
+        !s.client.is_paused_eid(&eid),
+        "archived paused-eid entry should read as not paused"
+    );
+
+    // Restore by re-setting the flag.
+    s.client.set_paused_eid(&eid, &true);
+    assert!(
+        s.client.is_paused_eid(&eid),
+        "restored paused-eid entry should be readable again"
+    );
+    let ttl = s
+        .env
+        .storage()
+        .persistent()
+        .get_ttl(&DataKey::PausedEid(eid));
+    assert!(
+        ttl >= MAX_TTL - 1,
+        "restore should re-extend the paused-eid entry TTL"
+    );
+}
+
+// --- Test 19: Guardian pause expiry across ledger advancement --------------
+
+#[test]
+fn guardian_pause_expires_after_ttl_across_ledger_advancement() {
+    let s = setup();
+    let guardian = Address::generate(&s.env);
+    s.client.set_guardian(&guardian);
+
+    // Guardian pauses; the pause is bounded by the guardian TTL.
+    s.client.pause(&guardian);
+    assert!(s.client.is_paused(), "guardian pause should take effect");
+
+    // Still paused just before the TTL elapses.
+    advance_ledger(&s.env, GUARDIAN_PAUSE_TTL - 1);
+    assert!(
+        s.client.is_paused(),
+        "pause should still be active before the TTL elapses"
+    );
+
+    // Once the TTL elapses the pause auto-expires.
+    advance_ledger(&s.env, 2);
+    assert!(
+        !s.client.is_paused(),
+        "guardian pause should auto-expire after the TTL"
+    );
+
+    // The guardian can pause again after the cooldown has elapsed.
+    advance_ledger(&s.env, GUARDIAN_PAUSE_COOLDOWN);
+    s.client.pause(&guardian);
+    assert!(
+        s.client.is_paused(),
+        "guardian should be able to pause again after cooldown"
+    );
+}
