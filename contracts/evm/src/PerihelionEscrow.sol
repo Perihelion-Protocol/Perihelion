@@ -729,7 +729,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
                 (bool refunded,) = msg.sender.call{ value: msg.value }("");
                 if (!refunded) revert NativeTransferFailed();
             }
-            return;
+            return 0;
         }
 
         // Measured-delta accounting: store exactly what the escrow received, so
@@ -745,6 +745,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         // Commit the actual received amount to the rolling window accumulator.
         _commitValueCaps(intent.sourceAsset, received);
+    }
 
     /// @dev Persist the lock, bump the aggregate liability and emit {Locked}.
     function _recordLock(bytes32 intentHash, Intent calldata intent, uint256 received) private {
@@ -779,6 +780,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         );
     }
 
+    /// @dev Quote, send the FillInstruction over LayerZero and refund any
+    ///      excess `msg.value` to the caller.
+    function _dispatchFillInstruction(bytes32 intentHash, Intent calldata intent) private {
         bytes memory message = _encodeFillInstruction(intentHash, intent, msg.sender);
         // Quote with nativeFee=0, identical to quoteFee(), so the value a solver
         // sized off-chain via quoteFee is the same value compared against below.

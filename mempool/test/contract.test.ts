@@ -171,7 +171,10 @@ test("PATCH /intents/:hash/status accepts exactly the documented IntentStatus vo
 
   for (const status of documented) {
     const res = await patchFresh(status);
-    assert.equal(res.status, 200, `documented status "${status}" must be accepted`);
+    // `expired` is only valid once the deadline has passed (#966), and these
+    // fresh intents have a future deadline, so it is refused with 409.
+    const expected = status === "expired" ? 409 : 200;
+    assert.equal(res.status, expected, `documented status "${status}" must be ${expected === 200 ? "accepted" : "refused before the deadline"}`);
   }
   // Lifecycle states the SDK's broader IntentStatus has but the mempool rejects.
   for (const status of ["claimed", "settling", "cancelling"]) {
