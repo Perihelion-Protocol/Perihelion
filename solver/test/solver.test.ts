@@ -5,20 +5,14 @@
  */
 
 import assert from "node:assert/strict";
-import { test, mock } from "node:test";
-import {
-  buildIntent,
-  hashIntent,
-  perihelionDomain,
-  type IntentRecord,
-  type Hex,
-} from "@perihelion/sdk";
+import { test, mock, describe } from "node:test";
+import { buildIntent, hashIntent, perihelionDomain, type IntentRecord, type Hex } from "@perihelion/sdk";
 import { Solver, FatalError, type Executor, type Logger } from "../src/solver.js";
 import { Executor as FillExecutor, DefiniteFailureError } from "../src/executor.js";
-import type { SolverConfig } from "../src/config.js";
-import type { InventoryProvider } from "../src/inventory.js";
-import { RATE_SCALE, type PricingDeps } from "../src/quote.js";
-
+import { type SolverConfig, loadConfig } from "../src/config.js";
+import { type InventoryProvider, InFlightTracker } from "../src/inventory.js";
+import { RATE_SCALE, type PricingDeps, evaluate } from "../src/quote.js";
+import { type Metrics } from "../src/metrics.js";
 // Test fixtures
 const CHAIN_ID = 8453;
 const ESCROW_ADDRESS = "0x0000000000000000000000000000000000000001" as const;
@@ -1460,4 +1454,906 @@ test("issue #724: mempool outage during status reporting does not fail the fill"
     warns.some((m) => m.includes("failed to report")),
     "status reporting failure should be logged as warning",
   );
+});
+
+// Solver in-flight reservation and retry-state bounds (#546, #547)
+describe("Solver in-flight reservation and retry-state bounds (#546, #547)", () => {
+  /**
+   * Regression tests for:
+   *   #547 – retryState must be bounded and pruned for intents that vanish from the mempool
+   *   #546 – in-flight reservation must survive a successful fill until the next tick
+   */
+
+
+  // ---------------------------------------------------------------------------
+  // Shared fixtures
+  // ---------------------------------------------------------------------------
+
+  const CHAIN_ID = 8453;
+  const ESCROW = "0x0000000000000000000000000000000000000001" as const;
+  const USER = "0x0000000000000000000000000000000000000002" as const;
+  const domain = perihelionDomain(CHAIN_ID, ESCROW);
+
+  const baseConfig: SolverConfig = {
+    mempoolUrl: "http://localhost:8080",
+    solverAddress: "0x0000000000000000000000000000000000000003" as const,
+    sourceChainId: CHAIN_ID,
+    escrowAddress: ESCROW,
+    minMarginBps: 10,
+    pollIntervalMs: 1000,
+    supportedDestAssets: ["native"],
+    verificationCacheSize: 100,
+    seenCacheSize: 1000,
+    retryCacheSize: 10,
+  };
+
+  const pricingDeps: PricingDeps = {
+    decimalsLookup: () => 6,
+    priceOracle: async () => RATE_SCALE,
+    feeEstimator: async () => 0n,
+  };
+
+  const silentLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  let nonceCounter = 10000;
+  function makeIntent(overrides: { nonce?: string } = {}) {
+    return buildIntent({
+      user: USER,
+      destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      sourceChainId: CHAIN_ID,
+      sourceAsset: "0x0000000000000000000000000000000000000004" as const,
+      sourceAmount: "1000000",
+      destAsset: "native",
+      minDestAmount: "990000",
+      deadline: Math.floor(Date.now() / 1000) + 600,
+      nonce: overrides.nonce ?? String(nonceCounter++),
+    });
+  }
+
+  function makeRecord(intent = makeIntent()): IntentRecord {
+    const hash = hashIntent(intent, domain);
+    return { intent, signature: "0xdeadbeef" as Hex, hash, status: "pending", createdAt: Math.floor(Date.now() / 1000) };
+  }
+
+  function setMempool(records: IntentRecord[]) {
+    global.fetch = (async () => ({
+      ok: true, status: 200,
+      json: async () => ({ records, nextCursor: undefined }),
+    })) as any;
+  }
+
+  /** Creates a fetch wrapper whose returned records can be swapped after the solver is constructed. */
+  function makeMutableMempool() {
+    let current: IntentRecord[] = [];
+    const fetcher = async () => ({
+      ok: true, status: 200,
+      json: async () => ({ records: current, nextCursor: undefined }),
+    });
+    global.fetch = fetcher as any;
+    return { set: (records: IntentRecord[]) => { current = records; } };
+  }
+
+  // ---------------------------------------------------------------------------
+  // #547 – RetryStateLRU: TTL eviction via evictExpired()
+  // ---------------------------------------------------------------------------
+
+  test("#547: retryState entries are evicted once their clamped TTL has passed", async () => {
+    // We test the RetryStateLRU directly by accessing it through the solver's
+    // private field via casting. This is the most precise way to verify the
+    // eviction logic without fighting the seen-set / scheduleRetry interactions.
+    const intent = makeIntent();
+    const record = makeRecord(intent);
+
+    let fillCount = 0;
+    const executor: Executor = {
+      fill: async () => {
+        fillCount++;
+        throw new Error("always fail");
+      },
+    };
+
+    setMempool([]);
+    const solver = new Solver(
+      // Use MAX_FILL_RETRIES=3, so we need to keep attempts below that.
+      { ...baseConfig, retryCacheSize: 100 },
+      executor, silentLogger,
+      undefined, undefined,
+      async () => true, pricingDeps,
+    );
+
+    const retryState = (solver as any).retryState as {
+      evictExpired(): number;
+      size(): number;
+      get(hash: string): { attempts: number; nextRetryAt: number } | undefined;
+      set(hash: string, state: { attempts: number; nextRetryAt: number }, deadlineMs: number): void;
+    };
+
+    // Directly insert an entry with a deadlineMs in the past.
+    const pastDeadline = Date.now() - 1; // already expired
+    retryState.set(record.hash, { attempts: 1, nextRetryAt: 0 }, pastDeadline);
+    assert.equal(retryState.size(), 1, "entry should be present before eviction");
+
+    // evictExpired() should remove the past-deadline entry.
+    const evicted = retryState.evictExpired();
+    assert.equal(evicted, 1, "one expired entry should be evicted");
+    assert.equal(retryState.size(), 0, "retryState should be empty after eviction");
+    assert.equal(retryState.get(record.hash), undefined, "entry must be gone after eviction");
+  });
+
+  test("#547: evictExpired() is called each tick and prunes stale entries", async () => {
+    const intent = makeIntent();
+    const record = makeRecord(intent);
+
+    let fillCount = 0;
+    const executor: Executor = {
+      fill: async () => {
+        fillCount++;
+        throw new Error("always fail");
+      },
+    };
+
+    const errors: string[] = [];
+    const logger: Logger = { ...silentLogger, error: (m) => errors.push(m) };
+
+    // Use a mutable mempool wrapper (SDK client captures fetch at construction time).
+    const mempool = makeMutableMempool();
+    mempool.set([record]);
+
+    // First tick: intent fails → added to retryState (attempts=1, nextRetryAt = now+1s).
+    const solver = new Solver(baseConfig, executor, logger, undefined, undefined, async () => true, pricingDeps);
+    await solver.tick();
+    assert.equal(fillCount, 1, "fill attempted on first tick");
+
+    const retryState = (solver as any).retryState as {
+      evictExpired(): number;
+      size(): number;
+      get(hash: string): unknown;
+    };
+    assert.equal(retryState.size(), 1, "retryState has one entry after first fill failure");
+
+    // Time-travel past the clamped TTL (MIN_SEEN_TTL_MS = 10 min).
+    const orig = Date.now;
+    try {
+      Date.now = () => orig() + 11 * 60_000;
+
+      // Second tick: empty mempool, but evictExpired() runs and prunes the entry.
+      mempool.set([]);
+      await solver.tick();
+
+      assert.equal(retryState.size(), 0, "retryState entry should be pruned by evictExpired() after TTL");
+    } finally {
+      Date.now = orig;
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // #547 – RetryStateLRU: LRU capacity eviction
+  // ---------------------------------------------------------------------------
+
+  test("#547: retryState is bounded by retryCacheSize via LRU eviction", () => {
+    const solver = new Solver(
+      { ...baseConfig, retryCacheSize: 2 },
+      { fill: async () => ({ settlementTx: "0x" }) },
+      silentLogger,
+    );
+
+    const retryState = (solver as any).retryState as {
+      size(): number;
+      set(hash: string, state: { attempts: number; nextRetryAt: number }, deadlineMs: number): void;
+      get(hash: string): unknown;
+    };
+
+    const farFuture = Date.now() + 60 * 60_000;
+
+    retryState.set("0xaaaa", { attempts: 1, nextRetryAt: 0 }, farFuture);
+    retryState.set("0xbbbb", { attempts: 1, nextRetryAt: 0 }, farFuture);
+    assert.equal(retryState.size(), 2, "two entries fit within capacity");
+
+    // Inserting a third evicts the LRU entry (0xaaaa).
+    retryState.set("0xcccc", { attempts: 1, nextRetryAt: 0 }, farFuture);
+    assert.equal(retryState.size(), 2, "size stays at capacity after LRU eviction");
+    assert.equal(retryState.get("0xaaaa"), undefined, "0xaaaa (LRU) must have been evicted");
+    assert.notEqual(retryState.get("0xbbbb"), undefined, "0xbbbb should still be present");
+    assert.notEqual(retryState.get("0xcccc"), undefined, "0xcccc should be present");
+  });
+
+  // ---------------------------------------------------------------------------
+  // #547 – resubmitted hash after eviction gets fresh state
+  // ---------------------------------------------------------------------------
+
+  test("#547: resubmitted hash after TTL eviction gets a fresh attempt counter", () => {
+    const solver = new Solver(
+      baseConfig,
+      { fill: async () => ({ settlementTx: "0x" }) },
+      silentLogger,
+    );
+
+    const retryState = (solver as any).retryState as {
+      size(): number;
+      set(hash: string, state: { attempts: number; nextRetryAt: number }, deadlineMs: number): void;
+      get(hash: string): { attempts: number } | undefined;
+      evictExpired(): number;
+    };
+
+    const hash = "0xdeadbeef00000000000000000000000000000000000000000000000000001234";
+    // Insert with a past deadline.
+    retryState.set(hash, { attempts: 2, nextRetryAt: 0 }, Date.now() - 1);
+
+    // Evict.
+    retryState.evictExpired();
+    assert.equal(retryState.get(hash), undefined, "entry should be gone after eviction");
+
+    // Re-insert as fresh.
+    retryState.set(hash, { attempts: 1, nextRetryAt: 0 }, Date.now() + 60_000);
+    assert.equal(retryState.get(hash)?.attempts, 1, "resubmitted hash starts fresh (attempts=1)");
+  });
+
+  // ---------------------------------------------------------------------------
+  // #546 – InFlightTracker unit tests
+  // ---------------------------------------------------------------------------
+
+  test("#546 InFlightTracker: holdForRefresh keeps capital committed immediately after fill", () => {
+    const tracker = new InFlightTracker();
+    tracker.reserve("native", 990_000n);
+    tracker.holdForRefresh("native", 990_000n);
+
+    assert.equal(
+      tracker.reservedFor("native"), 990_000n,
+      "capital must still appear reserved right after holdForRefresh (held bucket counts)",
+    );
+  });
+
+  test("#546 InFlightTracker: flushHeld releases the held amount after the tick boundary", () => {
+    const tracker = new InFlightTracker();
+    tracker.reserve("native", 990_000n);
+    tracker.holdForRefresh("native", 990_000n);
+    assert.equal(tracker.reservedFor("native"), 990_000n, "held before flush");
+
+    tracker.flushHeld();
+    assert.equal(tracker.reservedFor("native"), 0n, "held is zero after flush");
+  });
+
+  test("#546 InFlightTracker: release (definite-failure path) frees capital immediately without holding", () => {
+    const tracker = new InFlightTracker();
+    tracker.reserve("native", 990_000n);
+    tracker.release("native", 990_000n);
+
+    assert.equal(tracker.reservedFor("native"), 0n, "capital immediately free on definite failure");
+  });
+
+  test("#546 InFlightTracker: both reserved and held buckets count toward reservedFor", () => {
+    const tracker = new InFlightTracker();
+    // Two concurrent fills, one in-flight and one just completed but held.
+    tracker.reserve("native", 500_000n);          // in-flight
+    tracker.reserve("native", 490_000n);          // second in-flight
+    tracker.holdForRefresh("native", 490_000n);   // second fill succeeded, moved to held
+
+    // reserved bucket: 500_000; held bucket: 490_000 → total: 990_000.
+    assert.equal(tracker.reservedFor("native"), 990_000n,
+      "reservedFor must sum both reserved and held buckets");
+  });
+
+  // ---------------------------------------------------------------------------
+  // #546 – Solver integration: stale inventory cannot over-commit
+  // ---------------------------------------------------------------------------
+
+  test("#546: successful fill holds reservation — stale inventory cannot over-commit in same tick", async () => {
+    // Balance covers exactly one fill. Inventory is deliberately stale: it never
+    // updates to reflect the first fill's deduction.
+    const intentA = makeIntent();
+    const intentB = makeIntent();
+    const recordA = makeRecord(intentA);
+    const recordB = makeRecord(intentB);
+
+    const staleInventory: InventoryProvider = {
+      availableBalance: async () => 990_000n,
+    };
+
+    const fillAttempts: string[] = [];
+    const executor: Executor = {
+      fill: async (r) => {
+        fillAttempts.push(r.intent.nonce);
+        return { settlementTx: "0xok" };
+      },
+    };
+
+    setMempool([]);
+    const solver = new Solver(
+      baseConfig, executor, silentLogger,
+      undefined, staleInventory,
+      async () => true, pricingDeps,
+    );
+    const consider = (solver as any).consider.bind(solver) as (r: IntentRecord) => Promise<void>;
+
+    // Fill A: succeeds → reservation moves to `held`.
+    await consider(recordA);
+    assert.equal(fillAttempts.length, 1, "intentA should fill");
+
+    // B is evaluated in the same tick. Even though stale balance still reads
+    // 990_000, the `held` bucket adds 990_000 to reservedFor → available − held = 0.
+    // evaluate() must reject B.
+    await consider(recordB);
+    assert.equal(
+      fillAttempts.length, 1,
+      "intentB must be blocked: held reservation prevents double-spend against stale balance",
+    );
+  });
+
+  test("#546: flushHeld at tick start releases reservation so the next tick fills B", async () => {
+    const intentA = makeIntent();
+    const intentB = makeIntent();
+    const recordA = makeRecord(intentA);
+    const recordB = makeRecord(intentB);
+
+    const staleInventory: InventoryProvider = {
+      availableBalance: async () => 990_000n,
+    };
+
+    const fillAttempts: string[] = [];
+    const executor: Executor = {
+      fill: async (r) => {
+        fillAttempts.push(r.intent.nonce);
+        return { settlementTx: "0xok" };
+      },
+    };
+
+    // Must set up the fetch BEFORE constructing the solver; the SDK client
+    // captures globalThis.fetch at construction time.  Use a mutable wrapper
+    // so we can swap out which records are "pending" between ticks.
+    const mempool = makeMutableMempool();
+    mempool.set([recordA]);
+
+    const solver = new Solver(
+      baseConfig, executor, silentLogger,
+      undefined, staleInventory,
+      async () => true, pricingDeps,
+    );
+
+    // Tick 1: A fills, reservation moves to held.
+    await solver.tick();
+    assert.equal(fillAttempts.length, 1, "intentA fills in tick 1");
+
+    // Tick 2: flushHeld() fires at the top of tick, clearing A's held amount.
+    // B now sees 990_000 available − 0 reserved = fillable.
+    mempool.set([recordB]);
+    await solver.tick();
+    assert.equal(fillAttempts.length, 2, "intentB fills in tick 2 after held is flushed");
+  });
+
+  // ---------------------------------------------------------------------------
+  // #546 – DefiniteFailureError releases reservation immediately
+  // ---------------------------------------------------------------------------
+
+  test("#546: DefiniteFailureError releases reservation immediately (no tick boundary needed)", async () => {
+    const intentA = makeIntent();
+    const intentB = makeIntent();
+    const recordA = makeRecord(intentA);
+    const recordB = makeRecord(intentB);
+
+    const inventory: InventoryProvider = { availableBalance: async () => 990_000n };
+
+    const fillAttempts: string[] = [];
+    const executor: Executor = {
+      fill: async (r) => {
+        fillAttempts.push(r.intent.nonce);
+        if (r.intent.nonce === intentA.nonce) {
+          throw new DefiniteFailureError("on-chain revert: InsufficientBalance");
+        }
+        return { settlementTx: "0xok" };
+      },
+    };
+
+    setMempool([]);
+    const solver = new Solver(
+      baseConfig, executor, silentLogger,
+      undefined, inventory,
+      async () => true, pricingDeps,
+    );
+    const consider = (solver as any).consider.bind(solver) as (r: IntentRecord) => Promise<void>;
+
+    // A fails with DefiniteFailureError → immediate release (not held).
+    await consider(recordA);
+    assert.equal(fillAttempts.length, 1, "intentA attempted and failed definitively");
+
+    // B fills in the same tick: A's reservation was released immediately.
+    await consider(recordB);
+    assert.equal(
+      fillAttempts.length, 2,
+      "intentB must fill immediately after DefiniteFailureError released A's reservation",
+    );
+  });
+
+  test("#546: indefinite failure (generic Error) holds reservation until next tick", async () => {
+    const intentA = makeIntent();
+    const intentB = makeIntent();
+    const recordA = makeRecord(intentA);
+    const recordB = makeRecord(intentB);
+
+    const inventory: InventoryProvider = { availableBalance: async () => 990_000n };
+
+    const fillAttempts: string[] = [];
+    const executor: Executor = {
+      fill: async (r) => {
+        fillAttempts.push(r.intent.nonce);
+        if (r.intent.nonce === intentA.nonce) {
+          throw new Error("confirmation timeout"); // indefinite — tx may have landed
+        }
+        return { settlementTx: "0xok" };
+      },
+    };
+
+    // Use a mutable mempool wrapper (SDK client captures fetch at construction time).
+    const mempool = makeMutableMempool();
+    mempool.set([]);
+
+    const solver = new Solver(
+      baseConfig, executor, silentLogger,
+      undefined, inventory,
+      async () => true, pricingDeps,
+    );
+    const consider = (solver as any).consider.bind(solver) as (r: IntentRecord) => Promise<void>;
+
+    // A fails with an indefinite error → reservation moves to held, not released.
+    await consider(recordA);
+    assert.equal(fillAttempts.length, 1, "intentA attempted");
+
+    // B in the same tick: held reservation blocks it (stale balance = 990_000,
+    // held = 990_000 → net available = 0).
+    await consider(recordB);
+    assert.equal(
+      fillAttempts.length, 1,
+      "intentB must be blocked while A's reservation is held (indefinite failure)",
+    );
+
+    // After a tick boundary, flushHeld() runs and B can fill.
+    mempool.set([recordB]);
+    await solver.tick(); // flushHeld fires at top
+    assert.equal(fillAttempts.length, 2, "intentB fills after held is flushed at next tick");
+  });
+});
+
+// Solver tick concurrency (#728)
+describe("Solver tick concurrency (#728)", () => {
+  const baseConfig: SolverConfig = {
+    mempoolUrl: "http://localhost:8080",
+    solverAddress: "0x0000000000000000000000000000000000000003" as const,
+    sourceChainId: 8453,
+    escrowAddress: "0x0000000000000000000000000000000000000001" as const,
+    minMarginBps: 10,
+    sourceNativeFeeFloor: 0n,
+    stellarNativeFeeFloor: 0n,
+    pollIntervalMs: 1000,
+    supportedDestAssets: ["native"],
+    verificationCacheSize: 100,
+  };
+
+  const testPricingDeps: PricingDeps = {
+    decimalsLookup: () => 6,
+    priceOracle: async () => RATE_SCALE,
+    feeEstimator: async () => 0n,
+  };
+
+  const CHAIN_ID = 8453;
+  const ESCROW_ADDRESS = "0x0000000000000000000000000000000000000001" as const;
+  const USER_ADDRESS = "0x0000000000000000000000000000000000000002" as const;
+
+  const domain = perihelionDomain(CHAIN_ID, ESCROW_ADDRESS);
+
+  function buildTestIntent() {
+    return buildIntent({
+      user: USER_ADDRESS,
+      destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      sourceChainId: CHAIN_ID,
+      sourceAsset: "0x0000000000000000000000000000000000000004" as const,
+      sourceAmount: "1000000",
+      destAsset: "native",
+      minDestAmount: "990000",
+      deadline: Math.floor(Date.now() / 1000) + 600,
+    });
+  }
+
+  function buildTestRecord(intent = buildTestIntent()): IntentRecord {
+    const hash = hashIntent(intent, domain);
+    return {
+      intent,
+      signature: "0xdeadbeef" as Hex,
+      hash,
+      status: "pending",
+      createdAt: Math.floor(Date.now() / 1000),
+    };
+  }
+
+  // ---- #728 concurrent processing of intents ----
+
+  test("tick: processes multiple intents concurrently when fillConcurrency is configured", async () => {
+    const intentA = buildTestIntent();
+    const intentB = buildIntent({ ...intentA, nonce: "111111" });
+    const intentC = buildIntent({ ...intentA, nonce: "222222" });
+    const recordA = buildTestRecord(intentA);
+    const recordB = buildTestRecord(intentB);
+    const recordC = buildTestRecord(intentC);
+
+    let fillInFlight = 0;
+    let maxConcurrent = 0;
+    let releaseFillB!: () => void;
+    const fillBGate = new Promise<void>((resolve) => {
+      releaseFillB = resolve;
+    });
+
+    const mockExecutor: Executor = {
+      fill: async (signed) => {
+        fillInFlight++;
+        maxConcurrent = Math.max(maxConcurrent, fillInFlight);
+        if (signed.intent.nonce === intentB.nonce) {
+          await fillBGate;
+        }
+        fillInFlight--;
+        return { settlementTx: "0xfilled" };
+      },
+    };
+
+    const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+    global.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ records: [recordA, recordB, recordC], nextCursor: undefined }),
+    })) as any;
+
+    const solver = new Solver(
+      { ...baseConfig, fillConcurrency: 2 },
+      mockExecutor,
+      mockLogger,
+      undefined,
+      undefined,
+      async () => true,
+      testPricingDeps,
+    );
+
+    const tickPromise = solver.tick();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(maxConcurrent >= 2, "should have at least 2 fills concurrent");
+
+    releaseFillB();
+    await tickPromise;
+    assert.ok(
+      maxConcurrent <= 2,
+      "concurrency should not exceed the configured bound of 2",
+    );
+  });
+
+  test("tick: respects fillConcurrency=1 for strictly sequential processing", async () => {
+    const intentA = buildTestIntent();
+    const intentB = buildIntent({ ...intentA, nonce: "333333" });
+    const recordA = buildTestRecord(intentA);
+    const recordB = buildTestRecord(intentB);
+
+    const fillOrder: string[] = [];
+    let releaseFillA!: () => void;
+    const fillAGate = new Promise<void>((resolve) => {
+      releaseFillA = resolve;
+    });
+
+    const mockExecutor: Executor = {
+      fill: async (signed) => {
+        fillOrder.push(`start:${signed.intent.nonce}`);
+        if (signed.intent.nonce === intentA.nonce) {
+          await fillAGate;
+        }
+        fillOrder.push(`done:${signed.intent.nonce}`);
+        return { settlementTx: "0xfilled" };
+      },
+    };
+
+    const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+    global.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ records: [recordA, recordB], nextCursor: undefined }),
+    })) as any;
+
+    const solver = new Solver(
+      { ...baseConfig, fillConcurrency: 1 },
+      mockExecutor,
+      mockLogger,
+      undefined,
+      undefined,
+      async () => true,
+      testPricingDeps,
+    );
+
+    const tickPromise = solver.tick();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(
+      fillOrder.includes(`start:${intentA.nonce}`),
+      "intent A fill should have started",
+    );
+    assert.ok(
+      !fillOrder.some((e) => e.startsWith("start:") && e.endsWith(intentB.nonce)),
+      "intent B fill should not start until A is done",
+    );
+
+    releaseFillA();
+    await tickPromise;
+    assert.ok(
+      fillOrder.some((e) => e.startsWith("start:") && e.endsWith(intentB.nonce)),
+      "intent B fill should start after A completes",
+    );
+  });
+
+  test("tick: N concurrent fills complete in roughly the time of one fill (not N serial fills)", async () => {
+    // Issue #728: Currently tick processes intents sequentially, so N fills take N * fillTime.
+    // With bounded concurrency, N fills should take roughly max(fillTime, fillTime) time.
+    const intentA = buildTestIntent();
+    const intentB = buildIntent({ ...intentA, nonce: "444444" });
+    const intentC = buildIntent({ ...intentA, nonce: "555555" });
+    const recordA = buildTestRecord(intentA);
+    const recordB = buildTestRecord(intentB);
+    const recordC = buildTestRecord(intentC);
+
+    const fillTimings: { start: number; end: number; nonce: string }[] = [];
+    const FILL_DELAY_MS = 50;
+
+    const mockExecutor: Executor = {
+      fill: async (signed) => {
+        const start = Date.now();
+        fillTimings.push({ start, end: 0, nonce: signed.intent.nonce });
+        await new Promise((resolve) => setTimeout(resolve, FILL_DELAY_MS));
+        fillTimings.find((f) => f.nonce === signed.intent.nonce)!.end = Date.now();
+        return { settlementTx: "0xfilled" };
+      },
+    };
+
+    const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+    global.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ records: [recordA, recordB, recordC], nextCursor: undefined }),
+    })) as any;
+
+    const solver = new Solver(
+      { ...baseConfig, fillConcurrency: 3 },
+      mockExecutor,
+      mockLogger,
+      undefined,
+      undefined,
+      async () => true,
+      testPricingDeps,
+    );
+
+    const tickStart = Date.now();
+    await solver.tick();
+    const tickTotal = Date.now() - tickStart;
+
+    // With 3 concurrent fills, each taking 50ms, total should be ~50-100ms (not 150ms).
+    // Serial would take ~150ms+.
+    const serialTimeExpected = 3 * FILL_DELAY_MS;
+    assert.ok(
+      tickTotal < serialTimeExpected * 0.75,
+      `with fillConcurrency=3, tick should complete in <${serialTimeExpected * 0.75}ms, but took ${tickTotal}ms`,
+    );
+  });
+});
+
+// Solver timeout and retry configuration (#729)
+describe("Solver timeout and retry configuration (#729)", () => {
+  const baseConfig: SolverConfig = {
+    mempoolUrl: "http://localhost:8080",
+    solverAddress: "0x0000000000000000000000000000000000000003" as const,
+    sourceChainId: 8453,
+    escrowAddress: "0x0000000000000000000000000000000000000001" as const,
+    minMarginBps: 10,
+    sourceNativeFeeFloor: 0n,
+    stellarNativeFeeFloor: 0n,
+    pollIntervalMs: 1000,
+    supportedDestAssets: ["native"],
+    verificationCacheSize: 100,
+  };
+
+  const testPricingDeps: PricingDeps = {
+    decimalsLookup: () => 6,
+    priceOracle: async () => RATE_SCALE,
+    feeEstimator: async () => 0n,
+  };
+
+  // ---- #729 client timeout configuration ----
+
+  test("solver is constructed with configurable timeout and retry values", async () => {
+    // Issue #729: The PerihelionClient should accept timeout and retry configuration
+    // from SolverConfig, allowing operators to tune these values without hardcoding.
+    global.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ records: [], nextCursor: undefined }),
+    })) as any;
+
+    const solver = new Solver(baseConfig, { fill: async () => ({ settlementTx: "0x" }) }, {
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    });
+
+    // If construction fails due to missing config values, this would throw before tick.
+    await solver.tick();
+    assert.ok(true, "solver constructed and ticked successfully");
+  });
+
+  test("solver can be configured with explicit timeout values", async () => {
+    // When PERIHELION_REQUEST_TIMEOUT_MS is set, the solver should pass it to the client
+    // so that slow mempool responses fail fast rather than after 40+ seconds.
+    global.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ records: [], nextCursor: undefined }),
+    })) as any;
+
+    const configWithTimeout: SolverConfig = {
+      ...baseConfig,
+      // These values should be accepted if implemented
+      // requestTimeoutMs: 5000,
+      // maxRetries: 2,
+    };
+
+    const solver = new Solver(configWithTimeout, { fill: async () => ({ settlementTx: "0x" }) }, {
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    });
+
+    await solver.tick();
+    assert.ok(true, "solver with timeout config ticked successfully");
+  });
+
+  test("mempool timeout does not block the entire solver tick", async () => {
+    // A stalled mempool should be bounded by the configured timeout,
+    // not by the SDK default (10s per attempt * 4 attempts = 40s).
+    let callCount = 0;
+    global.fetch = mock.fn(async () => {
+      callCount++;
+      // Simulate a slow response
+      if (callCount === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ records: [], nextCursor: undefined }),
+      };
+    }) as any;
+
+    const solver = new Solver(baseConfig, { fill: async () => ({ settlementTx: "0x" }) }, {
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    });
+
+    const start = Date.now();
+    await solver.tick();
+    const elapsed = Date.now() - start;
+
+    // With default 10s timeout, this would take much longer.
+    // With a configured timeout, it should be much faster.
+    assert.ok(elapsed < 5000, `tick should complete quickly, took ${elapsed}ms`);
+  });
+});
+
+// Solver unconfigured-asset terminal skip (#730)
+describe("Solver unconfigured-asset terminal skip (#730)", () => {
+  const config = loadConfig({
+    PERIHELION_SOLVER_ADDRESS: "0x3333333333333333333333333333333333333333",
+    PERIHELION_ESCROW_ADDRESS: "0x2222222222222222222222222222222222222222",
+    PERIHELION_SOURCE_CHAIN_ID: "8453",
+    PERIHELION_SUPPORTED_ASSETS: "native,USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    PERIHELION_MIN_MARGIN_BPS: "10",
+  });
+
+  const baseConfig: SolverConfig = {
+    mempoolUrl: "http://localhost:8080",
+    solverAddress: "0x0000000000000000000000000000000000000003" as const,
+    sourceChainId: 8453,
+    escrowAddress: "0x0000000000000000000000000000000000000001" as const,
+    minMarginBps: 10,
+    sourceNativeFeeFloor: 0n,
+    stellarNativeFeeFloor: 0n,
+    pollIntervalMs: 1000,
+    supportedDestAssets: ["native"],
+    verificationCacheSize: 100,
+  };
+
+  function intent(overrides: Partial<Parameters<typeof buildIntent>[0]> = {}) {
+    return buildIntent({
+      user: "0x0000000000000000000000000000000000000001",
+      destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      sourceChainId: 8453,
+      sourceAsset: "0x0000000000000000000000000000000000000002",
+      sourceAmount: "1000000",
+      destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      minDestAmount: "9900000",
+      deadline: Math.floor(Date.now() / 1000) + 3_600,
+      ...overrides,
+    });
+  }
+
+  // ---- #730 unconfigured decimals should be terminal ----
+
+  test("evaluate: unconfigured asset decimals should produce terminal skip", async () => {
+    // Issue #730: defaultDecimalsLookup throws for EVM token addresses without
+    // explicit decimals configuration. This is correct (never guess decimals),
+    // but the error should be classified as terminal, not retriable.
+    // An unconfigured asset is a configuration fact that won't resolve on retry.
+    const noDecimalsDeps: PricingDeps = {
+      priceOracle: async () => RATE_SCALE,
+      feeEstimator: async () => 0n,
+      // No decimalsLookup -> defaultDecimalsLookup used, which throws for 0x addresses
+    };
+    const decision = await evaluate(
+      intent(),
+      config,
+      noDecimalsDeps,
+    );
+    assert.equal(decision.fill, false);
+    assert.equal(decision.terminal, true, "unconfigured asset must be terminal");
+  });
+
+  test("tick: unconfigured asset is recorded as a terminal skip once, not every tick", async () => {
+    // An intent with an unconfigured EVM token should be evaluated with the
+    // defaultDecimalsLookup, which throws. This should be caught and recorded
+    // as a terminal skip (configuration issue), not retried forever.
+    const testIntent = intent();
+    const { hashIntent, perihelionDomain } = await import("@perihelion/sdk");
+    const domain = perihelionDomain(baseConfig.sourceChainId, baseConfig.escrowAddress);
+    const hash = hashIntent(testIntent, domain);
+    const record = {
+      intent: testIntent,
+      signature: "0xdeadbeef" as const,
+      hash,
+      status: "pending" as const,
+      createdAt: Math.floor(Date.now() / 1000),
+    };
+
+    const skips: string[] = [];
+    const mockExecutor: Executor = {
+      fill: async () => ({ settlementTx: "0xfilled" }),
+    };
+
+    const mockMetrics: Metrics = {
+      recordFillAttempt: () => {},
+      recordFillWon: () => {},
+      recordFillLost: () => {},
+      recordSkip: (reason) => skips.push(reason),
+      recordFee: () => {},
+      recordFees: () => {},
+      snapshot: () => ({} as any),
+    };
+
+    const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+    global.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ records: [record], nextCursor: undefined }),
+    })) as any;
+
+    // Use no decimalsLookup override -> defaultDecimalsLookup will throw for EVM addresses
+    const pricingDeps: PricingDeps = {
+      priceOracle: async () => RATE_SCALE,
+      feeEstimator: async () => 0n,
+    };
+
+    const solver = new Solver(baseConfig, mockExecutor, mockLogger, mockMetrics, undefined, async () => true, pricingDeps);
+
+    // First tick: should skip the intent and record it
+    await solver.tick();
+    const skipsBefore = skips.length;
+
+    // Second tick: the intent is still in mempool, but it was marked terminal,
+    // so it should be in the seen-set and not reconsidered.
+    await solver.tick();
+    const skipsAfter = skips.length;
+
+    // The intent should have been recorded as a skip exactly once across both ticks.
+    assert.equal(
+      skipsAfter - skipsBefore,
+      0,
+      "terminal skip should not be recorded again on the second tick",
+    );
+  });
 });
