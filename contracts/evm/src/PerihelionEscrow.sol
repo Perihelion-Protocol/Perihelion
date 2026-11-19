@@ -882,6 +882,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     // --- LayerZero inbound ---------------------------------------------------
 
     /// @inheritdoc ILayerZeroReceiver
+    /// @dev The real EndpointV2 refuses to verify the first packet on a pathway unless the
+    ///      receiver opts in. Only the Stellar peer on the configured eid may open one (issue #1050).
+    function allowInitializePath(Origin calldata origin) external view returns (bool) {
+        return origin.srcEid == stellarEid && origin.sender == stellarPeer;
+    }
+
+    /// @inheritdoc ILayerZeroReceiver
+    /// @dev Always 0: inbound delivery is unordered and replay is enforced by the nonce bitmap.
+    ///      Ordered delivery is not supported (issue #1050).
+    function nextNonce(uint32, bytes32) external pure returns (uint64) {
+        return 0;
+    }
+
+    /// @inheritdoc ILayerZeroReceiver
     /// @dev `lzReceive` is declared `payable` to satisfy the `ILayerZeroReceiver` interface.
     ///      The contract does not process native value on inbound messages; any native value
     ///      delivered by the endpoint/executor remains as contract surplus and can be recovered

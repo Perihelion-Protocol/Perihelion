@@ -29,6 +29,9 @@ versioned independently.
 
 ### Fixed
 
+- **evm**: `lzReceive` rejects packets whose `origin.srcEid` is not the configured Stellar endpoint id, before any nonce is consumed (#1049).
+- **evm**: the escrow implements the LayerZero V2 receiver hooks `allowInitializePath` (opens only the Stellar peer on the configured eid) and `nextNonce` (returns 0, unordered delivery). A real EndpointV2 can now initialise the pathway and verify FillConfirmed and CancelIntent (#1050).
+
 - **sdk**: `ESCROW_ABI` had drifted from `PerihelionEscrow.sol` — it declared a
   non-existent `getLock` function and a `PausedError` error.
   `PerihelionEscrowClient.getLock` now reads the contract's `locks(bytes32)`

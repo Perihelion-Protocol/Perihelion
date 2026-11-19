@@ -820,6 +820,30 @@ contract PerihelionEscrowTest is Test {
         assertTrue(refunded);
     }
 
+    /// @notice Issue #1050: the endpoint may open only the genuine Stellar pathway.
+    function test_AllowInitializePath_OnlyStellarPathway() public view {
+        assertTrue(
+            escrow.allowInitializePath(
+                Origin({ srcEid: STELLAR_EID, sender: STELLAR_PEER, nonce: 0 })
+            )
+        );
+        assertFalse(
+            escrow.allowInitializePath(
+                Origin({ srcEid: STELLAR_EID + 1, sender: STELLAR_PEER, nonce: 0 })
+            )
+        );
+        assertFalse(
+            escrow.allowInitializePath(
+                Origin({ srcEid: STELLAR_EID, sender: bytes32(uint256(0xBAD)), nonce: 0 })
+            )
+        );
+    }
+
+    /// @notice Issue #1050: unordered delivery, so the endpoint never waits on a nonce.
+    function test_NextNonce_IsUnordered() public view {
+        assertEq(escrow.nextNonce(STELLAR_EID, STELLAR_PEER), 0);
+    }
+
     function test_RevertWhen_StaleNonce() public {
         bytes32 h = _lock();
         _confirm(h, solver, 5);
