@@ -778,7 +778,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
                 (bool refunded,) = msg.sender.call{ value: msg.value }("");
                 if (!refunded) revert NativeTransferFailed();
             }
-            // Signal the breaker path to `lock` with a zero received amount.
             return 0;
         }
 

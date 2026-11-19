@@ -1,7 +1,9 @@
 # Cross-Chain Clock and Deadline Analysis
 
 **Status:** Reference specification — do not change grace parameters without updating
-this document and the corresponding constants in `PerihelionEscrow.sol` and `lib.rs`.
+this document and the corresponding constants in
+`contracts/evm/src/PerihelionEscrow.sol` and `contracts/soroban/settlement/src/lib.rs`.
+The SDK mirrors of these values live in `sdk/src/intent.ts`.
 
 **Scope:** EVM `block.timestamp`, Stellar `env.ledger().timestamp()`, and SDK
 `Date.now()` — three independent clocks that all reason about the same
@@ -174,8 +176,8 @@ confirmationGrace  >  T_relay_p99  +  T_soroban_confirm  +  Δ_skew_worst
 
 | Component | Value | Source |
 |-----------|-------|--------|
-| `T_relay_p99` | 600 s (10 min) | `docs/MONITORING.md` — SLA baseline is 10 min; alert triggers at 20 min P95 |
-| `T_soroban_confirm` | 30 s | `docs/ECONOMICS.md` — "5–30 seconds per transaction + 30 second confirmation" |
+| `T_relay_p99` | 600 s (10 min) | `./MONITORING.md` — SLA baseline is 10 min; alert triggers at 20 min P95 |
+| `T_soroban_confirm` | 30 s | `./ECONOMICS.md` — "5–30 seconds per transaction + 30 second confirmation" |
 | `Δ_skew_worst` | 60 s | §2.1 above |
 | **Required minimum** | **690 s ≈ 11.5 min** | Sum of the above |
 
@@ -252,6 +254,15 @@ intent** — locking it will consume EVM gas and lock user funds, but the
 FillInstruction will arrive on Soroban after the Stellar clock has passed the
 deadline, making the fill impossible without any possibility of recovery.
 
+The 660 s figure bounds the relay leg only. The Soroban settlement contract
+enforces a stricter guard on dispatch: `fill_intent` rejects when
+`now + MIN_DISPATCH_WINDOW > deadline`, with `MIN_DISPATCH_WINDOW = 1 800 s`
+(`contracts/soroban/settlement/src/lib.rs`). A solver must therefore also refuse
+any intent with less than 1 800 s remaining, and the SDK exports
+`MIN_FILL_HEADROOM_SECS = 1 920 s` (1 800 s window + 120 s margin) for this
+purpose. Whichever constraint is larger governs the solver's lock decision; in
+practice that is the dispatch window.
+
 This constraint is enforced off-chain (in the solver's evaluation logic) rather
 than in the EVM contract. The EVM escrow deliberately allows locking right up to
 `deadline - 1` because it cannot know about relay latency or Stellar's clock; the
@@ -302,10 +313,11 @@ find the contract rejects `cancelExpired` with `DeadlineNotPassed`; no funds are
 at risk. For higher confidence, callers can pass a chain-sourced timestamp as a
 substitute for `Date.now()` if their environment supports it.
 
-The `confirmationGraceMs` parameter defaults to `2 * 60 * 60 * 1_000` ms (2 h),
-matching the `confirmationGrace` default on the deployed contract. If the
-deployed contract has been reconfigured via `setConfirmationGrace`, the caller is
-responsible for passing the correct value. A mismatch results only in a
+The `confirmationGraceMs` parameter has no default; callers must pass the live
+value read from the contract (`confirmationGrace()`, in seconds, converted to
+milliseconds). The contract's initial value is 2 h, but if the deployed contract
+has been reconfigured via `setConfirmationGrace`, the caller is responsible for
+passing the current value. A mismatch results only in a
 premature or delayed refund suggestion, not fund loss.
 
 ---
@@ -337,13 +349,13 @@ and are listed here for cross-reference.
 
 | Reference | Cited value | Used as |
 |-----------|-------------|---------|
-| `docs/MONITORING.md` — Alert M1 | "Baseline SLA: 10 minutes for inter-chain messages" | `T_relay_p99 = 600 s` |
-| `docs/MONITORING.md` — Alert M1 | "Alert threshold: > 20 minutes (P95)" | Upper bound; `T_relay_p99` is conservative |
-| `docs/ECONOMICS.md` | "Settlement latency: 5–30 seconds per transaction + 30 second confirmation" | `T_soroban_confirm = 30 s` |
-| `docs/TECHNICAL-ARCHITECTURE.md` §4.3 | "confirmationGrace window must exceed worst-case cross-chain latency (LayerZero relay + Stellar finality)" | Formal derivation of what that bound is |
-| `docs/deployment.md` | "confirmationGrace: A few hours; must exceed worst-case LayerZero delivery time" | Qualitative; now quantified above |
-| `docs/incident-response.md` | "Intent unresolved for > 2 × confirmationGrace → P1" | Alert calibration consistent with 2 h default |
-| `docs/MONITORING.md` | "MessageUndelivered: not relayed within 12 hours → P1" | Consistent: 12 h >> 2 h confirmationGrace |
+| `./MONITORING.md` — Alert M1 | "Baseline SLA: 10 minutes for inter-chain messages" | `T_relay_p99 = 600 s` |
+| `./MONITORING.md` — Alert M1 | "Alert threshold: > 20 minutes (P95)" | Upper bound; `T_relay_p99` is conservative |
+| `./ECONOMICS.md` | "Settlement latency: 5–30 seconds per transaction + 30 second confirmation" | `T_soroban_confirm = 30 s` |
+| `./TECHNICAL-ARCHITECTURE.md` §4.3 | "confirmationGrace window must exceed worst-case cross-chain latency (LayerZero relay + Stellar finality)" | Formal derivation of what that bound is |
+| `./deployment.md` | "confirmationGrace: A few hours; must exceed worst-case LayerZero delivery time" | Qualitative; now quantified above |
+| `./incident-response.md` | "Intent unresolved for > 2 × confirmationGrace → P1" | Alert calibration consistent with 2 h default |
+| `./MONITORING.md` | "MessageUndelivered: not relayed within 12 hours → P1" | Consistent: 12 h >> 2 h confirmationGrace |
 
 No inconsistencies were found. The monitoring alert thresholds and the grace
 parameters are calibrated to the same underlying latency model.

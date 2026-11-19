@@ -60,6 +60,9 @@ services:
       PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:?set PERIHELION_ESCROW_ADDRESS to the deployed escrow}
       # Bind every interface so the relayer and solver containers can reach it.
       PERIHELION_MEMPOOL_HOST: "0.0.0.0"
+      # Required: the mempool binds every interface, so status updates must be
+      # authenticated. The solver reads the same value (#966).
+      PERIHELION_MEMPOOL_STATUS_TOKEN: ${PERIHELION_MEMPOOL_STATUS_TOKEN:?set PERIHELION_MEMPOOL_STATUS_TOKEN (shared with the solver)}
     ports:
       - "3000:3000"
     networks:
@@ -135,6 +138,7 @@ services:
       NODE_ENV: development
       # Mempool configuration
       PERIHELION_MEMPOOL_URL: http://mempool:3000
+      PERIHELION_MEMPOOL_STATUS_TOKEN: ${PERIHELION_MEMPOOL_STATUS_TOKEN:?set PERIHELION_MEMPOOL_STATUS_TOKEN (shared with the mempool)}
       # Solver identification
       PERIHELION_SOLVER_ADDRESS: ${PERIHELION_SOLVER_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
       # Chain configuration

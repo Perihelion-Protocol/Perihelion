@@ -132,11 +132,14 @@ in good faith to minimize harm.
 
 ## Code review for security-sensitive paths
 
-Changes to fund-moving code, wire codecs, EIP-712 hashing, and replay guards
-require approval from `@Perihelion-Protocol/security-reviewers` in addition to
-the package owner. This is enforced automatically via `.github/CODEOWNERS` and
-branch protection. See [CONTRIBUTING.md](./CONTRIBUTING.md#security-review-policy)
-for the full list of sensitive paths and the rationale for each.
+Changes to fund-moving code, wire codecs, EIP-712 hashing, replay guards, the
+SDK's intent hashing and validation, and CI workflows require approval from
+`@Perihelion-Protocol/maintainers`. `.github/CODEOWNERS` assigns that team as the
+owner of every path in the repository, and it is enforced by branch protection
+only when **Require review from Code Owners** is enabled for `main`. No separate
+security-reviewers group is currently assigned. See
+[CONTRIBUTING.md](./CONTRIBUTING.md#security-review-policy) for the full list of
+sensitive paths and the rationale for each.
 
 ## Key Management & Operational Security
 

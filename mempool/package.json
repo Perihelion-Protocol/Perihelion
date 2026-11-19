@@ -26,8 +26,8 @@
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "build": "tsc",
-    "test": "node --test --import tsx test/*.test.ts",
-    "test:coverage": "c8 --all --src src --include 'src/**' --exclude 'dist/**' --exclude 'test/**' --reporter=lcov --reporter=text --report-dir=coverage node --test --import tsx test/*.test.ts",
+    "test": "node --test --test-concurrency=1 --import tsx test/*.test.ts",
+    "test:coverage": "c8 --all --src src --include 'src/**' --exclude 'dist/**' --exclude 'test/**' --reporter=lcov --reporter=text --report-dir=coverage node --test --test-concurrency=1 --import tsx test/*.test.ts",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit"
   },

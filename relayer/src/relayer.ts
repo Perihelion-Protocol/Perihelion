@@ -216,7 +216,6 @@ export class Relayer {
 
   /** Label for this directional loop (used in logs). */
   readonly name: string;
-=======
 
   // --- Internal state -------------------------------------------------------
 
