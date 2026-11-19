@@ -2,19 +2,69 @@
 
 import express, { type Request, Response, NextFunction } from "express";
 import type { Server } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import {
   hashIntent,
   verifyIntent,
   perihelionDomain,
   parseIntent,
   isExpired,
+  MAX_DEADLINE_HORIZON_SEC,
 } from "@perihelion/sdk";
 import type { Hex, SignedIntent, Address, VerifyIntentOptions } from "@perihelion/sdk";
 import { IntentStore } from "./store.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
 
 const SIGNATURE_RE = /^0x[0-9a-fA-F]+$/;
+
+/**
+ * Compare a presented `Authorization` header with the expected `Bearer <token>`
+ * value in constant time (#965). Both sides are SHA-256 digested first, so the
+ * inputs are always the same length, `timingSafeEqual` never throws on a
+ * differently sized token, and the comparison time does not reveal how much of
+ * the expected token a caller has guessed correctly.
+ */
+export function bearerTokenMatches(presented: string | undefined, expectedToken: string): boolean {
+  if (presented === undefined) return false;
+  const a = createHash("sha256").update(presented).digest();
+  const b = createHash("sha256").update(`Bearer ${expectedToken}`).digest();
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Statuses reachable from each non-terminal status (#966). Terminal statuses
+ * (`settled`, `refunded`, `expired`) have no outgoing edges, so any attempt to
+ * move them is rejected with 409.
+ */
+const ALLOWED_TRANSITIONS: Partial<Record<IntentStatus, ReadonlySet<IntentStatus>>> = {
+  pending: new Set<IntentStatus>(["filled", "settled", "refunded", "expired"]),
+  filled: new Set<IntentStatus>(["settled", "refunded"]),
+};
+
+/** Failed status-token attempts allowed per client per rate-limit window (#965). */
+const DEFAULT_AUTH_FAILURE_LIMIT = 10;
+
+/**
+ * Returns the reason a status change is not allowed, or `undefined` if it is.
+ * `expired` is only valid once the intent's deadline has passed (#966).
+ * Exported for unit tests.
+ */
+export function transitionRejection(
+  record: MempoolIntentRecord,
+  to: IntentStatus,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): string | undefined {
+  // Re-sending the current status is an idempotent no-op: relayers retry status
+  // reports, and a retry must not fail just because the first one landed.
+  if (record.status === to) return undefined;
+  if (!ALLOWED_TRANSITIONS[record.status]?.has(to)) {
+    return `Cannot change status from ${record.status} to ${to}`;
+  }
+  if (to === "expired" && record.intent.deadline > nowSec) {
+    return "Intent cannot be marked expired before its deadline";
+  }
+  return undefined;
+}
 
 /** Maximum accepted JSON request body. The label is echoed in the 413 message. */
 const MAX_BODY_LABEL = "8kb";
@@ -103,6 +153,8 @@ export class MempoolServer {
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
   private rateLimitHits = new Map<string, number[]>();
+  /** Timestamps of failed status-token attempts per client IP (#965). */
+  private authFailureHits = new Map<string, number[]>();
   private rateLimitWindowMs: number;
   private writeRateLimit: number;
   private readRateLimit: number;
@@ -138,9 +190,12 @@ export class MempoolServer {
     this.rateLimitWindowMs = opts.rateLimitWindowMs ?? DEFAULT_RATE_LIMIT_WINDOW_MS;
     this.writeRateLimit = opts.writeRateLimit ?? DEFAULT_WRITE_RATE_LIMIT;
     this.readRateLimit = opts.readRateLimit ?? DEFAULT_READ_RATE_LIMIT;
-    if (this.host !== "localhost" && this.host !== "127.0.0.1") {
+    // Warn on the absence of a status token, not on the bind host: a loopback
+    // bind behind a reverse proxy is still reachable by remote callers, and a
+    // configured token is authentication whatever the host (#966).
+    if (!this.statusToken) {
       console.warn(
-        `PERIHELION_MEMPOOL_HOST is set to ${this.host} — this endpoint has no write authentication and should not be exposed publicly.`,
+        `[mempool] no status token configured (host ${this.host}): PATCH /intents/:hash/status is unauthenticated. Set PERIHELION_MEMPOOL_STATUS_TOKEN before exposing this server.`,
       );
     }
     this.setupRoutes();
@@ -299,6 +354,25 @@ export class MempoolServer {
       res.status(400).json({ error: `Invalid intent: ${(err as Error).message}` });
       return;
     }
+    // The EIP-712 domain binds signatures to this chain, but `sourceChainId` is a
+    // separate field, so check it explicitly: an intent for another chain would
+    // otherwise sit in this mempool where every solver must skip it (#967).
+    if (parsed.sourceChainId !== this.chainId) {
+      this.submissionStats.rejected++;
+      res.status(400).json({
+        error: `Invalid intent: sourceChainId must be ${this.chainId} for this mempool (got ${parsed.sourceChainId})`,
+      });
+      return;
+    }
+    // The SDK and the Soroban settlement contract both reject deadlines beyond
+    // the horizon, so reject them at intake too (#967).
+    if (parsed.deadline > Math.floor(Date.now() / 1000) + MAX_DEADLINE_HORIZON_SEC) {
+      this.submissionStats.rejected++;
+      res.status(400).json({
+        error: `Invalid intent: deadline must be at most ${MAX_DEADLINE_HORIZON_SEC} seconds in the future`,
+      });
+      return;
+    }
     if (isExpired(parsed)) {
       this.submissionStats.rejected++;
       res.status(400).json({ error: "Intent has expired" });
@@ -419,8 +493,14 @@ export class MempoolServer {
 
   private handleUpdateStatus(req: Request, res: Response): void {
     if (this.statusToken) {
-      const auth = req.header("authorization");
-      if (auth !== `Bearer ${this.statusToken}`) {
+      const key = req.ip ?? "unknown";
+      if (this.authFailuresExhausted(key)) {
+        this.rateLimitRejections++;
+        res.status(429).json({ error: "Too many failed authentication attempts" });
+        return;
+      }
+      if (!bearerTokenMatches(req.header("authorization"), this.statusToken)) {
+        this.recordAuthFailure(key);
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
@@ -433,14 +513,36 @@ export class MempoolServer {
       res.status(400).json({ error: "Invalid status" });
       return;
     }
-    // `updateStatus` reports success as a boolean; the documented 200 body is
-    // the updated IntentRecord, so read it back after the write.
-    const updated = this.store.updateStatus(hash, status as IntentStatus);
-    if (!updated) {
+    const record = this.store.get(hash);
+    if (!record) {
       res.status(404).json({ error: "Intent not found" });
       return;
     }
+    const rejection = transitionRejection(record, status as IntentStatus);
+    if (rejection) {
+      res.status(409).json({ error: rejection });
+      return;
+    }
+    if (record.status !== status) {
+      this.store.updateStatus(hash, status as IntentStatus);
+    }
     res.status(200).json(this.store.get(hash));
+  }
+
+  /** True once a client has used up its failed-authentication budget for the window. */
+  private authFailuresExhausted(key: string): boolean {
+    const now = Date.now();
+    const hits = (this.authFailureHits.get(key) ?? []).filter(
+      (t) => now - t < this.rateLimitWindowMs,
+    );
+    this.authFailureHits.set(key, hits);
+    return hits.length >= DEFAULT_AUTH_FAILURE_LIMIT;
+  }
+
+  private recordAuthFailure(key: string): void {
+    const hits = this.authFailureHits.get(key) ?? [];
+    hits.push(Date.now());
+    this.authFailureHits.set(key, hits);
   }
 
   /**

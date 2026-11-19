@@ -25,6 +25,8 @@ test("SIGTERM shuts the CLI server down cleanly (#568)", async () => {
   const child = runCli({
     PORT: "3994",
     PERIHELION_MEMPOOL_HOST: "127.0.0.1",
+    // The status token is required at startup (#966).
+    PERIHELION_MEMPOOL_STATUS_TOKEN: "cli-test-token",
     PERIHELION_SOURCE_CHAIN_ID: "8453",
     PERIHELION_ESCROW_ADDRESS: "0x00000000000000000000000000000000000000aa",
   });

@@ -21,9 +21,15 @@ port or silently rejecting every submission.
 | `PERIHELION_SOURCE_CHAIN_ID` | Yes | — | Positive integer; binds the EIP-712 domain. |
 | `PERIHELION_ESCROW_ADDRESS` | Yes | — | `0x`-prefixed 20-byte EVM address; binds the EIP-712 domain. |
 | `PORT` | No | `3000` | Integer in `1`–`65535`. |
-| `PERIHELION_MEMPOOL_HOST` | No | `localhost` | Non-loopback hosts log a no-auth warning. |
-| `PERIHELION_MEMPOOL_STATUS_TOKEN` | No | — | Bearer token required on `PATCH /intents/:hash/status`. |
-| `PERIHELION_METRICS_TOKEN` | No | — | Bearer token required on `GET /metrics`. Same variable the relayer and solver use. Unset leaves `/metrics` open. |
+| `PERIHELION_MEMPOOL_HOST` | No | `localhost` | Bind host. |
+| `PERIHELION_MEMPOOL_STATUS_TOKEN` | Yes* | — | Bearer token required on `PATCH /intents/:hash/status`. |
+| `PERIHELION_MEMPOOL_INSECURE_DEV` | No | — | Set to `1` to start without a status token. Local development only: every status update is then unauthenticated. |
+
+\* Startup fails without the token unless `PERIHELION_MEMPOOL_INSECURE_DEV=1`.
+Status updates are validated against a transition graph: `pending` may move to
+`filled`, `settled`, `refunded`, or `expired` (only after the deadline); `filled`
+may move to `settled` or `refunded`; terminal statuses are final. Invalid
+transitions return `409`. Failed token attempts are rate-limited per client.
 
 The CLI installs `SIGINT`/`SIGTERM` handlers that stop the listener and let
 in-flight requests drain before the process exits.
