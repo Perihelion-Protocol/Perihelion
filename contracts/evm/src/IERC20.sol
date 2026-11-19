@@ -13,14 +13,15 @@ interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
     function approve(address spender, uint256 amount) external returns (bool);
     function allowance(address owner, address spender) external view returns (uint256);
+}
 
-    // --- Optional functions (may revert if not implemented) ---
+/// @notice Optional EIP-20 metadata. Kept separate from {IERC20} so that minimal
+///         tokens (and test mocks) only implement what the escrow actually calls.
+interface IERC20Metadata is IERC20 {
     /// @dev Returns the number of decimals the token uses. Optional in EIP-20.
     function decimals() external view returns (uint8);
     /// @dev Returns the name of the token. Optional in EIP-20.
     function name() external view returns (string memory);
     /// @dev Returns the symbol of the token. Optional in EIP-20.
     function symbol() external view returns (string memory);
-    /// @dev Returns the total supply of the token. Optional in EIP-20.
-    function totalSupply() external view returns (uint256);
 }

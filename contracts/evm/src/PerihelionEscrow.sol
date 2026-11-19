@@ -679,7 +679,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // enough live locals to exceed the legacy codegen's 16-slot stack limit
         // (#857). Order of checks, effects and interactions is unchanged.
         bytes32 intentHash = _validateIntent(intent, signature);
-        uint256 received = _pullFunds(intent);
+        (bool accepted, uint256 received) = _pullFunds(intent);
+        // A rolling-cap breach latches the breaker and returns without reverting
+        // (so the latch and diagnostic event persist). No lock is recorded and
+        // no FillInstruction is dispatched.
+        if (!accepted) return;
         _recordLock(intentHash, intent, received);
         _dispatchFillInstruction(intentHash, intent);
     }
@@ -721,15 +725,16 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @dev Enforce value caps, pull `sourceAmount` from the user and return the
-    ///      amount the escrow actually received.
-    function _pullFunds(Intent calldata intent) private returns (uint256 received) {
+    ///      amount the escrow actually received. Returns `accepted == false` (and
+    ///      refunds `msg.value`) when a rolling-window cap breach is recorded.
+    function _pullFunds(Intent calldata intent) private returns (bool accepted, uint256 received) {
         // Check value caps before pulling funds.
         if (!_checkValueCaps(intent.sourceAmount, intent.sourceAsset)) {
             if (msg.value > 0) {
                 (bool refunded,) = msg.sender.call{ value: msg.value }("");
                 if (!refunded) revert NativeTransferFailed();
             }
-            return;
+            return (false, 0);
         }
 
         // Measured-delta accounting: store exactly what the escrow received, so
@@ -745,6 +750,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         // Commit the actual received amount to the rolling window accumulator.
         _commitValueCaps(intent.sourceAsset, received);
+        return (true, received);
+    }
 
     /// @dev Persist the lock, bump the aggregate liability and emit {Locked}.
     function _recordLock(bytes32 intentHash, Intent calldata intent, uint256 received) private {
@@ -779,6 +786,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         );
     }
 
+    /// @dev Quote, send the FillInstruction over LayerZero and refund any
+    ///      excess `msg.value` to the caller.
+    function _dispatchFillInstruction(bytes32 intentHash, Intent calldata intent) private {
         bytes memory message = _encodeFillInstruction(intentHash, intent, msg.sender);
         // Quote with nativeFee=0, identical to quoteFee(), so the value a solver
         // sized off-chain via quoteFee is the same value compared against below.
@@ -1111,42 +1121,33 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         view
         returns (bytes memory)
     {
-        // Encode destination as a fixed 56-byte field (right-zero-padded).
-        bytes memory destBytes = bytes(intent.destination);
-        bytes memory recipientField = new bytes(56);
-        uint256 dstCopy = destBytes.length < 56 ? destBytes.length : 56;
-        for (uint256 i = 0; i < dstCopy; i++) {
-            recipientField[i] = destBytes[i];
-        }
-
-        // Encode destAsset as a fixed 69-byte field (right-zero-padded).
-        // Using abi.encodePacked instead of a bare mload avoids truncating
-        // CODE:ISSUER assets whose ISSUER bytes extend past position 32.
-        bytes memory destAssetBytes = bytes(intent.destAsset);
-        bytes memory destAssetField = new bytes(69);
-        uint256 assetCopy = destAssetBytes.length < 69 ? destAssetBytes.length : 69;
-        for (uint256 i = 0; i < assetCopy; i++) {
-            destAssetField[i] = destAssetBytes[i];
-        }
-
-        // Encode the canonical locking solver, not the user preference. This field
-        // is the cross-chain exclusivity binding and is never an alias/payout field.
-        bytes32 solverWord = bytes32(uint256(uint160(lockingSolver)));
-
+        // Field widths are fixed by the wire layout; {_padRight} right-zero-pads
+        // (and truncates, which the length checks in _validateIntent preclude).
+        // The locking solver (not the user preference) is the cross-chain
+        // exclusivity binding and is never an alias/payout field.
         return abi.encodePacked(
             PROTOCOL_VERSION,     // 1  byte  offset 0
             MSG_FILL_INSTRUCTION, // 1  byte  offset 1
             intentHash,           // 32 bytes offset 2
             uint32(stellarEid),   // 4  bytes offset 34
-            recipientField,       // 56 bytes offset 38
-            destAssetField,       // 69 bytes offset 94
+            _padRight(bytes(intent.destination), 56), // 56 bytes offset 38
+            _padRight(bytes(intent.destAsset), 69),   // 69 bytes offset 94; CODE:ISSUER may span >32 bytes
             uint128(intent.minDestAmount), // 16 bytes offset 163
             uint64(intent.deadline),       // 8  bytes offset 179
-            solverWord,           // 32 bytes offset 187
+            bytes32(uint256(uint160(lockingSolver))), // 32 bytes offset 187
             uint64(0)              // 8 bytes offset 219; no reservation in legacy EVM intents
             // reservation_window is explicit and zero until the signed EVM intent schema adds it.
             //                                 total       227
         );
+    }
+
+    /// @dev Copy `src` into a fresh `width`-byte buffer, right-zero-padded.
+    function _padRight(bytes memory src, uint256 width) private pure returns (bytes memory out) {
+        out = new bytes(width);
+        uint256 n = src.length < width ? src.length : width;
+        for (uint256 i = 0; i < n; i++) {
+            out[i] = src[i];
+        }
     }
 
     /// @dev Decode a 90-byte FillConfirmed:

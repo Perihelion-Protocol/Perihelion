@@ -26,7 +26,8 @@ contract DecoderHarness is PerihelionEscrow {
         view
         returns (bytes memory)
     {
-        return _encodeFillInstruction(intentHash, intent);
+        // The golden vectors carry an all-zero `solver_evm` word.
+        return _encodeFillInstruction(intentHash, intent, address(0));
     }
 
     function fillInstructionLength() external pure returns (uint256) {
@@ -111,9 +112,9 @@ contract WireFormatConformanceTest is Test {
     ///      SDK helper to `_decodeFillConfirmed` and to the golden vector's
     ///      `solver_evm` word (bytes 34-65 of fill_confirmed.hex), preventing a
     ///      regression to the left-justified encoding the escrow rejects.
-    function test_SolverEvmEncodingDecodesOnEvm() public view {
+    function test_SolverEvmEncodingDecodesOnEvm() public {
         // Known solver address used by the SDK helper's test vector.
-        address solverAddr = address(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);
+        address solverAddr = address(bytes20(hex"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
 
         // Mirror of @perihelion/sdk evmAddressToBytes32: left-pad into bytes 12-31.
         bytes32 solverWord = bytes32(uint256(uint160(solverAddr)));

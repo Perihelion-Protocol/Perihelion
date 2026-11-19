@@ -1489,7 +1489,7 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig); // below the 0.05 ether quote
     }
 
-    function test_LockExactFeeSucceeds() public {
+    function test_LockExactFeeSucceedsWithCustomFee() public {
         endpoint.setMockFee(0.01 ether);
         PerihelionEscrow.Intent memory intent = _intent();
         bytes memory sig = _sign(intent);
