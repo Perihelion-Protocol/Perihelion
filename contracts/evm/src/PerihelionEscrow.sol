@@ -894,6 +894,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         bytes calldata /* extraData */
     ) external payable nonReentrant {
         if (msg.sender != address(endpoint)) revert NotEndpoint();
+        // LayerZero scopes peers per source endpoint id, so the sender bytes32 alone does not
+        // identify the Stellar pathway. Bind both: a matching sender from another eid is refused
+        // before any nonce is consumed (issue #1049).
+        if (origin.srcEid != stellarEid) revert UntrustedPeer();
         if (origin.sender != stellarPeer) revert UntrustedPeer();
         // Bitmap-based nonce tracking supports unordered delivery (LayerZero
         // lazy-nonce model). A nonce is accepted exactly once regardless of

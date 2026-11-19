@@ -805,6 +805,21 @@ contract PerihelionEscrowTest is Test {
         endpoint.deliver(escrow, STELLAR_EID, bytes32(uint256(0xBAD)), 1, _fillConfirmed(h, solver));
     }
 
+    /// @notice Issue #1049: a packet carrying the Stellar peer bytes32 from a different source
+    ///         endpoint id is refused, and it does not consume the nonce on the real pathway.
+    function test_RevertWhen_WrongSourceEidWithCorrectSender() public {
+        bytes32 h = _lock();
+
+        vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
+        endpoint.deliver(escrow, STELLAR_EID + 1, STELLAR_PEER, 1, _cancelIntent(h));
+
+        // The same nonce is still accepted from the genuine Stellar pathway.
+        _cancel(h, 1);
+        (,,,,,, bool released, bool refunded) = escrow.locks(h);
+        assertFalse(released);
+        assertTrue(refunded);
+    }
+
     function test_RevertWhen_StaleNonce() public {
         bytes32 h = _lock();
         _confirm(h, solver, 5);
