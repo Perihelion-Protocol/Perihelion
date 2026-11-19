@@ -100,6 +100,13 @@ export interface Logger {
   error(msg: string, meta?: Record<string, unknown>): void;
 }
 
+/**
+ * Silent default for library classes. Each class accepts an optional `logger`
+ * and falls back to this, so importing the relayer never writes to the console;
+ * the CLI injects the structured logger.
+ */
+export const noopLogger: Logger = { info() {}, warn() {}, error() {} };
+
 /** Component tag written into every log line. */
 export type Component = "relayer" | "solver";
 

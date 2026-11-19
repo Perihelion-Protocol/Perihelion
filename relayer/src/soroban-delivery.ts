@@ -20,6 +20,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { evmAddressToBytes32 } from "@perihelion/sdk";
 import { FatalError, type DestinationDelivery } from "./relayer.js";
+import { noopLogger, type Logger } from "./logger.js";
 import {
   CANCEL_INTENT_LENGTH,
   FILL_INSTRUCTION_LENGTH,
@@ -154,6 +155,8 @@ export interface SorobanDeliveryConfig {
   escrowAddress?: string;
   /** Transaction timeout in seconds (default 30). */
   timeoutSeconds?: number;
+  /** Structured logger for delivery diagnostics. Defaults to silent. */
+  logger?: Logger;
 }
 
 /**
@@ -167,8 +170,10 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
   private signerSecret: string;
   private signerKeypair: Keypair;
   private timeoutSeconds: number;
+  private readonly logger: Logger;
 
   constructor(private config: SorobanDeliveryConfig) {
+    this.logger = config.logger ?? noopLogger;
     this.rpc = new SorobanRpc.Server(config.rpcUrl);
     this.networkPassphrase = config.networkPassphrase;
     this.settlementContractId = config.settlementContractId;
@@ -237,7 +242,8 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
 
       return false;
     } catch (err) {
-      console.error("Failed to check if delivered", { key, err });
+      // Stringify the error: Error objects serialize to {} in the JSON log stream.
+      this.logger.error("Failed to check if delivered", { key, err: String(err) });
       return false;
     }
   }

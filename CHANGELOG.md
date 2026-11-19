@@ -79,7 +79,18 @@ versioned independently.
   Docker image now run `dist/cli.js`, and `sideEffects` lists only the CLI
   (#579).
 
+- **sdk, relayer, mempool:** library code no longer writes to `console`. The SDK's
+  V_min and `http://` warnings go to `buildIntent`'s `onWarning` option and
+  `PerihelionClient`'s `logger` option, and are silent by default. The relayer's
+  `loadConfig`, `EVMSourceWatcher` and `SorobanDestinationDelivery` accept a
+  `logger`, which the CLI fills with its structured logger, so delivery-check
+  failures reach the JSON log stream. `MempoolServer` takes a `logger` option
+  (its CLI routes it to the terminal). (#980)
+
 ### Fixed
+
+- **relayer:** removed stray `=======` merge separators left in `src/config.ts` and
+  `src/relayer.ts`, which stopped the package from parsing. (#980)
 
 - The local Stellar quickstart service in `docker-compose.yml` uses the standalone
   network passphrase that `--local` creates, points the relayer and solver at the

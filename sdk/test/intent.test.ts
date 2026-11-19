@@ -278,71 +278,51 @@ test("verifyIntent rejects a 65-byte signature with a high-s (malleated) value",
 
 test("buildIntent warns when sourceAmount is below V_min", () => {
   const logged: string[] = [];
-  const warnStub = (msg: string) => logged.push(msg);
-  const originalWarn = console.warn;
-  console.warn = warnStub as unknown as typeof console.warn;
 
-  try {
-    buildIntent({
-      user: account.address,
-      destination: VALID_DESTINATION,
-      sourceChainId: 8453,
-      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      sourceAmount: "1000", // very small amount
-      destAsset: VALID_DEST_ASSET,
-      minDestAmount: "900",
-      deadline: FUTURE_DEADLINE,
-    });
-    assert.ok(logged.length > 0, "expected console.warn to be called");
-    assert.ok(logged[0].includes("below the economical minimum"));
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent({
+    user: account.address,
+    destination: VALID_DESTINATION,
+    sourceChainId: 8453,
+    sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    sourceAmount: "1000", // very small amount
+    destAsset: VALID_DEST_ASSET,
+    minDestAmount: "900",
+    deadline: FUTURE_DEADLINE,
+  }, { onWarning: (m) => logged.push(m) });
+  assert.ok(logged.length > 0, "expected onWarning to be called");
+  assert.ok(logged[0].includes("below the economical minimum"));
 });
 
 test("buildIntent does not warn when sourceAmount is above V_min", () => {
   const logged: string[] = [];
-  const warnStub = (msg: string) => logged.push(msg);
-  const originalWarn = console.warn;
-  console.warn = warnStub as unknown as typeof console.warn;
 
-  try {
-    buildIntent({
-      user: account.address,
-      destination: VALID_DESTINATION,
-      sourceChainId: 8453,
-      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      sourceAmount: "100000000", // well above default V_min
-      destAsset: VALID_DEST_ASSET,
-      minDestAmount: "99000000",
-      deadline: FUTURE_DEADLINE,
-    });
-    assert.equal(logged.length, 0, "expected no warning for amount above V_min");
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent({
+    user: account.address,
+    destination: VALID_DESTINATION,
+    sourceChainId: 8453,
+    sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    sourceAmount: "100000000", // well above default V_min
+    destAsset: VALID_DEST_ASSET,
+    minDestAmount: "99000000",
+    deadline: FUTURE_DEADLINE,
+  }, { onWarning: (m) => logged.push(m) });
+  assert.equal(logged.length, 0, "expected no warning for amount above V_min");
 });
 
 test("buildIntent does not warn when sourceAmount equals V_min", () => {
   const logged: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
 
-  try {
-    buildIntent({
-      user: account.address,
-      destination: VALID_DESTINATION,
-      sourceChainId: 8453,
-      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      sourceAmount: DEFAULT_V_MIN,
-      destAsset: VALID_DEST_ASSET,
-      minDestAmount: "9000000",
-      deadline: FUTURE_DEADLINE,
-    });
-    assert.equal(logged.length, 0, "expected no warning at the V_min boundary");
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent({
+    user: account.address,
+    destination: VALID_DESTINATION,
+    sourceChainId: 8453,
+    sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    sourceAmount: DEFAULT_V_MIN,
+    destAsset: VALID_DEST_ASSET,
+    minDestAmount: "9000000",
+    deadline: FUTURE_DEADLINE,
+  }, { onWarning: (m) => logged.push(m) });
+  assert.equal(logged.length, 0, "expected no warning at the V_min boundary");
 });
 
 // ---------------------------------------------------------------------------
@@ -351,110 +331,86 @@ test("buildIntent does not warn when sourceAmount equals V_min", () => {
 
 test("buildIntent warns for a 6-decimal (USDC) amount just below the default V_min", () => {
   const logged: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
 
-  try {
-    buildIntent(
-      {
-        user: account.address,
-        destination: VALID_DESTINATION,
-        sourceChainId: 8453,
-        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        sourceAmount: "9999999", // $9.999999 at 6dp — just under the $10 default V_min
-        destAsset: VALID_DEST_ASSET,
-        minDestAmount: "9000000",
-        deadline: FUTURE_DEADLINE,
-      },
-      { sourceDecimals: 6 }
-    );
-    assert.ok(logged.length > 0, "expected warning just below V_min for a 6-decimal asset");
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent(
+    {
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "9999999", // $9.999999 at 6dp — just under the $10 default V_min
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "9000000",
+      deadline: FUTURE_DEADLINE,
+    },
+    { onWarning: (m) => logged.push(m), sourceDecimals: 6 }
+  );
+  assert.ok(logged.length > 0, "expected warning just below V_min for a 6-decimal asset");
 });
 
 test("buildIntent warns for the economically-equivalent 18-decimal (WETH) amount", () => {
   const logged: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
 
-  try {
-    buildIntent(
-      {
-        user: account.address,
-        destination: VALID_DESTINATION,
-        sourceChainId: 8453,
-        sourceAsset: "0x4200000000000000000000000000000000000006", // 18dp asset (e.g. WETH)
-        // 9.999999 in 18-decimal units — economically identical to "9999999" at 6dp.
-        // A raw-unit comparison against vMin would wrongly skip this: the raw
-        // value (9.999999e18) is far larger than vMin's raw value (1e7).
-        sourceAmount: "9999999000000000000",
-        destAsset: VALID_DEST_ASSET,
-        minDestAmount: "9000000",
-        deadline: FUTURE_DEADLINE,
-      },
-      { sourceDecimals: 18 }
-    );
-    assert.ok(
-      logged.length > 0,
-      "expected warning: sourceAmount must be normalized by sourceDecimals before comparing to V_min"
-    );
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent(
+    {
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x4200000000000000000000000000000000000006", // 18dp asset (e.g. WETH)
+      // 9.999999 in 18-decimal units — economically identical to "9999999" at 6dp.
+      // A raw-unit comparison against vMin would wrongly skip this: the raw
+      // value (9.999999e18) is far larger than vMin's raw value (1e7).
+      sourceAmount: "9999999000000000000",
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "9000000",
+      deadline: FUTURE_DEADLINE,
+    },
+    { onWarning: (m) => logged.push(m), sourceDecimals: 18 }
+  );
+  assert.ok(
+    logged.length > 0,
+    "expected warning: sourceAmount must be normalized by sourceDecimals before comparing to V_min"
+  );
 });
 
 test("buildIntent does not warn at the exact V_min boundary for an 18-decimal asset", () => {
   const logged: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
 
-  try {
-    buildIntent(
-      {
-        user: account.address,
-        destination: VALID_DESTINATION,
-        sourceChainId: 8453,
-        sourceAsset: "0x4200000000000000000000000000000000000006",
-        // Exactly $10 in 18-decimal units — boundary is exclusive, so no warning.
-        sourceAmount: "10000000000000000000",
-        destAsset: VALID_DEST_ASSET,
-        minDestAmount: "9000000",
-        deadline: FUTURE_DEADLINE,
-      },
-      { sourceDecimals: 18 }
-    );
-    assert.equal(logged.length, 0, "expected no warning at the V_min boundary for an 18-decimal asset");
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent(
+    {
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x4200000000000000000000000000000000000006",
+      // Exactly $10 in 18-decimal units — boundary is exclusive, so no warning.
+      sourceAmount: "10000000000000000000",
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "9000000",
+      deadline: FUTURE_DEADLINE,
+    },
+    { onWarning: (m) => logged.push(m), sourceDecimals: 18 }
+  );
+  assert.equal(logged.length, 0, "expected no warning at the V_min boundary for an 18-decimal asset");
 });
 
 test("buildIntent does not warn for an 18-decimal amount comfortably above V_min", () => {
   const logged: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = ((msg: string) => logged.push(msg)) as typeof console.warn;
 
-  try {
-    buildIntent(
-      {
-        user: account.address,
-        destination: VALID_DESTINATION,
-        sourceChainId: 8453,
-        sourceAsset: "0x4200000000000000000000000000000000000006",
-        sourceAmount: "1000000000000000000000", // 1000 token-units @ 18dp — normalizes to $1000
-        destAsset: VALID_DEST_ASSET,
-        minDestAmount: "900000",
-        deadline: FUTURE_DEADLINE,
-      },
-      { sourceDecimals: 18 }
-    );
-    // 1e21 raw @ 18dp normalizes to $1000, well above the $10 default V_min.
-    assert.equal(logged.length, 0, "expected no warning for an 18-decimal amount well above V_min");
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent(
+    {
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x4200000000000000000000000000000000000006",
+      sourceAmount: "1000000000000000000000", // 1000 token-units @ 18dp — normalizes to $1000
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "900000",
+      deadline: FUTURE_DEADLINE,
+    },
+    { onWarning: (m) => logged.push(m), sourceDecimals: 18 }
+  );
+  // 1e21 raw @ 18dp normalizes to $1000, well above the $10 default V_min.
+  assert.equal(logged.length, 0, "expected no warning for an 18-decimal amount well above V_min");
 });
 
 // ---------------------------------------------------------------------------
@@ -534,81 +490,60 @@ test("buildIntent rejects a destination with an invalid checksum via validateInt
 
 test("buildIntent respects suppressWarning option", () => {
   const logged: string[] = [];
-  const warnStub = (msg: string) => logged.push(msg);
-  const originalWarn = console.warn;
-  console.warn = warnStub as unknown as typeof console.warn;
 
-  try {
-    buildIntent(
-      {
-        user: account.address,
-        destination: VALID_DESTINATION,
-        sourceChainId: 8453,
-        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        sourceAmount: "1000",
-        destAsset: VALID_DEST_ASSET,
-        minDestAmount: "900",
-        deadline: FUTURE_DEADLINE,
-      },
-      { suppressWarning: true }
-    );
-    assert.equal(logged.length, 0, "expected no warning when suppressWarning is true");
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent(
+    {
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000",
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "900",
+      deadline: FUTURE_DEADLINE,
+    },
+    { onWarning: (m) => logged.push(m), suppressWarning: true }
+  );
+  assert.equal(logged.length, 0, "expected no warning when suppressWarning is true");
 });
 
 test("buildIntent respects custom vMin option", () => {
   const logged: string[] = [];
-  const warnStub = (msg: string) => logged.push(msg);
-  const originalWarn = console.warn;
-  console.warn = warnStub as unknown as typeof console.warn;
 
-  try {
-    buildIntent(
-      {
-        user: account.address,
-        destination: VALID_DESTINATION,
-        sourceChainId: 8453,
-        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        sourceAmount: "50000000", // 50 USD
-        destAsset: VALID_DEST_ASSET,
-        minDestAmount: "49000000",
-        deadline: FUTURE_DEADLINE,
-      },
-      { vMin: "100000000" } // 100 USD minimum
-    );
-    assert.ok(logged.length > 0, "expected warning with custom vMin");
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent(
+    {
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "50000000", // 50 USD
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "49000000",
+      deadline: FUTURE_DEADLINE,
+    },
+    { onWarning: (m) => logged.push(m), vMin: "100000000" } // 100 USD minimum
+  );
+  assert.ok(logged.length > 0, "expected warning with custom vMin");
 });
 
 // V_min boundary: sourceAmount exactly equal to vMin must not trigger a warning.
 test("buildIntent does not warn when sourceAmount equals vMin exactly", () => {
   const logged: string[] = [];
-  const warnStub = (msg: string) => logged.push(msg);
-  const originalWarn = console.warn;
-  console.warn = warnStub as unknown as typeof console.warn;
 
-  try {
-    buildIntent(
-      {
-        user: account.address,
-        destination: VALID_DESTINATION,
-        sourceChainId: 8453,
-        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        // sourceAmount === DEFAULT_V_MIN: at the boundary, no warning should fire.
-        sourceAmount: DEFAULT_V_MIN,
-        destAsset: VALID_DEST_ASSET,
-        minDestAmount: "9900000",
-        deadline: FUTURE_DEADLINE,
-      }
-    );
-    assert.equal(logged.length, 0, "expected no warning when sourceAmount === vMin (boundary is exclusive)");
-  } finally {
-    console.warn = originalWarn;
-  }
+  buildIntent(
+    {
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      // sourceAmount === DEFAULT_V_MIN: at the boundary, no warning should fire.
+      sourceAmount: DEFAULT_V_MIN,
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "9900000",
+      deadline: FUTURE_DEADLINE,
+    }
+  , { onWarning: (m) => logged.push(m) });
+  assert.equal(logged.length, 0, "expected no warning when sourceAmount === vMin (boundary is exclusive)");
 });
 
 // ---------------------------------------------------------------------------
@@ -1249,4 +1184,27 @@ test("validateIntent accepts a contract-only token as destAsset", () => {
       deadline: FUTURE_DEADLINE,
     })
   );
+});
+
+test("buildIntent never writes to the console when no onWarning is given (#980)", () => {
+  const seen: unknown[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    seen.push(args);
+  };
+  try {
+    buildIntent({
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000", // below the default V_min, so the warning path runs
+      destAsset: VALID_DEST_ASSET,
+      minDestAmount: "900",
+      deadline: FUTURE_DEADLINE,
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(seen.length, 0, "the SDK must stay silent unless the caller opts in");
 });

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-/** Relayer runtime configuration, loaded from environment variables. */
+import { noopLogger, type Logger } from "./logger.js";
 
+/** Relayer runtime configuration, loaded from environment variables. */
 export interface RelayerConfig {
   /** RPC endpoint for the EVM source chain. */
   readonly evmRpcUrl: string;
@@ -77,7 +78,6 @@ export const PUBNET_PASSPHRASE = "Public Global Stellar Network ; September 2015
 
 /** Accepted truthy values for boolean environment flags. */
 const TRUTHY_RE = /^(1|true|yes|on)$/i;
-=======
 
 /** 0x-prefixed 20-byte EVM address. */
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -102,8 +102,8 @@ function validateUrl(value: string, name: string): URL {
  * Emit a one-time deprecation warning for an environment variable that has
  * been renamed.  The old name keeps working for one release.
  */
-function warnDeprecated(oldName: string, newName: string): void {
-  console.warn(
+function warnDeprecated(oldName: string, newName: string, log: Pick<Logger, "warn">): void {
+  log.warn(
     `[perihelion] ${oldName} is deprecated and will be removed in a future release; use ${newName} instead.`,
   );
 }
@@ -113,7 +113,10 @@ function warnDeprecated(oldName: string, newName: string): void {
  * Throws a descriptive error and exits if required vars are missing or
  * any value is malformed/NaN.
  */
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig {
+export function loadConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  log: Pick<Logger, "warn"> = noopLogger,
+): RelayerConfig {
   const errors: string[] = [];
 
   // --- Required: escrow address ---
@@ -141,7 +144,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     );
   }
   if (!env.PERIHELION_SETTLEMENT_CONTRACT_ID && env.PERIHELION_SETTLEMENT_CONTRACT) {
-    warnDeprecated("PERIHELION_SETTLEMENT_CONTRACT", "PERIHELION_SETTLEMENT_CONTRACT_ID");
+    warnDeprecated("PERIHELION_SETTLEMENT_CONTRACT", "PERIHELION_SETTLEMENT_CONTRACT_ID", log);
   }
 
   // --- Required: EVM RPC URL ---
@@ -173,7 +176,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     }
   }
   if (!env.PERIHELION_SOROBAN_RPC_URL && env.PERIHELION_STELLAR_RPC_URL) {
-    warnDeprecated("PERIHELION_STELLAR_RPC_URL", "PERIHELION_SOROBAN_RPC_URL");
+    warnDeprecated("PERIHELION_STELLAR_RPC_URL", "PERIHELION_SOROBAN_RPC_URL", log);
   }
 
   // --- Required: source EID (positive integer) ---

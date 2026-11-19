@@ -50,6 +50,17 @@ export interface ClientOptions {
   readonly maxRetries?: number;
   /** Override the fetch implementation (defaults to global `fetch`). */
   readonly fetch?: typeof fetch;
+  /**
+   * Receives non-fatal configuration warnings (e.g. an `http://` mempool URL
+   * with a non-loopback host). Defaults to silent: the SDK never writes to the
+   * console.
+   */
+  readonly logger?: PerihelionLogger;
+}
+
+/** Sink for the SDK's non-fatal warnings. Structurally compatible with most loggers. */
+export interface PerihelionLogger {
+  warn(message: string, meta?: Record<string, unknown>): void;
 }
 
 /**
@@ -117,7 +128,7 @@ export class PerihelionClient {
       parsed.hostname !== "127.0.0.1" &&
       parsed.hostname !== "::1"
     ) {
-      console.warn(
+      opts.logger?.warn(
         "[Perihelion] mempoolUrl uses http:// with a non-loopback host — " +
           "bearer tokens sent to reportStatus will be transmitted in clear text. " +
           "Use https:// in production.",

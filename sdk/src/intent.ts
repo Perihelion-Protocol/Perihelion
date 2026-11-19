@@ -342,6 +342,12 @@ export interface BuildOptions {
   sourceDecimals?: number;
   /** If true, suppress the warning even if below vMin. */
   suppressWarning?: boolean;
+  /**
+   * Receives the non-fatal V_min warning. Defaults to a no-op: the SDK never
+   * writes to the console, so an embedding application (wallet, backend, test
+   * harness) decides where the warning goes.
+   */
+  onWarning?: (message: string) => void;
 }
 
 /**
@@ -365,7 +371,8 @@ export interface BuildOptions {
  * @param params  Intent parameters (user, destination, amounts, etc.)
  * @param options Build options: `vMin` (minimum notional, see {@link BuildOptions.vMin}),
  *                `sourceDecimals` (asset precision, see {@link BuildOptions.sourceDecimals}),
- *                and `suppressWarning` (skip the V_min check)
+ *                `suppressWarning` (skip the V_min check), and `onWarning` (receives the
+ *                V_min warning; no-op when omitted)
  * @throws {@link PerihelionValidationError} if any field is malformed
  * @returns A fully-formed Intent with nonce and preferredSolver filled in
  */
@@ -412,7 +419,7 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
       const decimalNote = options?.sourceDecimals === undefined
         ? " (sourceDecimals not provided; assuming default 6-decimal precision)"
         : ` (normalized from ${sourceDecimals}-decimal source units)`;
-      console.warn(
+      options?.onWarning?.(
         `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
         `economical minimum V_min (${vMin})${decimalNote}. The fixed LayerZero messaging fee may ` +
         `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
