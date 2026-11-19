@@ -77,8 +77,8 @@ test("/metrics is subject to the read rate limit", async () => {
     }
     assert.deepEqual(statuses, [200, 200, 429]);
 
-    const counter = await (await fetch("http://localhost:3962/healthz")).status;
-    assert.equal(counter, 200, "health probes are not rate limited by the metrics budget");
+    const health = await fetch("http://localhost:3962/healthz");
+    assert.equal(health.status, 200, "health probes are not rate limited by the metrics budget");
   } finally {
     await server.stop();
   }
