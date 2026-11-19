@@ -37,7 +37,7 @@ keys for each deployment environment.
 |---|---|---|---|---|---|
 | **Timelock owners** | EVM | M-of-N multisig (hardware wallets) | Governance: `setPeer`, `setGuardian`, `setConfirmationGrace`, `setPaused`, ownership rotation | Low (≤1 tx per week typically) | Critical |
 | **Guardian** | EVM | Hot key or 1-of-N Safe | Emergency pause: `pause()` | Very low (only during incidents) | High |
-| **Soroban admin** | Stellar | Multisig account | Settlement contract config: `set_endpoint`, `set_peer`, `set_admin`, `set_paused` | Low (≤1 tx per month typically) | Critical |
+| **Soroban admin** | Stellar | Multisig account | Settlement contract config: `propose_endpoint`/`confirm_endpoint`, `set_peer`, `set_admin`, `set_paused` | Low (≤1 tx per month typically) | Critical |
 | **Relayer signing key** | Off-chain | Relayer operator | Signs LayerZero messages for replay guards | Medium (1+ tx per transfer) | High |
 | **Relayer RPC key** | Off-chain | Relayer operator | Authenticates RPC queries and relay submissions | Medium | Medium |
 | **Solver signing key** | Off-chain | Solver operator | Signs fill instructions on Stellar | Medium (1+ tx per fill) | High |
@@ -348,6 +348,34 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
      --simulate
    ```
 
+**Endpoint rotation (delayed, two-step):**
+
+Endpoint changes are never instant. The admin must propose, wait out the
+bounded delay, then confirm:
+
+1. **Propose:**
+   ```bash
+   stellar contract invoke --id $SETTLEMENT -- propose_endpoint \
+     --new_endpoint $NEW_LZ_ENDPOINT \
+     --delay $DELAY_SECONDS \
+     --source-account $ADMIN_ACCOUNT
+   ```
+   - Rejected with `PendingEndpointChangeExists` if a proposal is already
+     pending (cancel or wait it out first)
+   - Rejected with `AdminEndpointCollision` if `new_endpoint == admin`
+   - Emits `endpoint_change_proposed`; the delay is stored with the proposal
+
+2. **Wait** the stored delay (monitor the `endpoint_change_proposed` event and
+   the governance calendar).
+
+3. **Confirm:**
+   ```bash
+   stellar contract invoke --id $SETTLEMENT -- confirm_endpoint \
+     --source-account $ADMIN_ACCOUNT
+   ```
+   - Re-checks `AdminEndpointCollision` and the elapsed delay
+   - Emits `endpoint_set` on success
+
 2. **Sign (M signers independently):**
    Each signer signs the transaction envelope:
    ```bash
@@ -365,10 +393,19 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
 - Subscribe to `Perihelion::set_peer` events
 - Alert on unexpected peer changes
 - Subscribe to `Perihelion::set_admin` events
+- Subscribe to `Perihelion::endpoint_change_proposed` events: any proposal is a
+  security-sensitive config change and must be matched against the governance
+  calendar. A second proposal while one is pending is rejected on-chain
+  (`PendingEndpointChangeExists`), so repeated proposals indicate confusion or
+  an attempt to race the delay.
+- Subscribe to `Perihelion::endpoint_set` events: verify the confirmed endpoint
+  matches the proposal that was announced, and that the delay elapsed
 
 **Stellar ledger checks:**
 - Periodically verify `Perihelion::admin == expected_multisig_address`
 - Verify `Perihelion::endpoint == expected_lz_endpoint`
+- Verify no unexpected pending endpoint proposal exists (check the pending
+  endpoint and its stored delay)
 
 ### 3.5 Rotation
 
@@ -377,11 +414,16 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
 - Process: `set_admin(new_admin)` via existing admin multisig
   - Immediate (no timelock on Stellar)
   - Old admin loses all powers after execution
+- Endpoint rotation is separate and always delayed: use
+  `propose_endpoint` → wait → `confirm_endpoint` (see §3.3). There is no
+  instant endpoint setter; the delay is the only protection on this
+  security-sensitive change.
 
 **Emergency rotation (suspected compromise):**
 
 **Signs of compromise:**
-- Unexpected `set_peer` or `set_endpoint` invocations
+- Unexpected `set_peer` invocations
+- Unexpected `endpoint_change_proposed` or `endpoint_set` events
 - Signer key theft or device compromise
 - Unauthorized Stellar transactions from admin account
 
@@ -389,6 +431,10 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
 
 1. **Assess:**
    - Did a bad peer/endpoint get set? Check `Perihelion::peer` and `Perihelion::endpoint`
+   - Is there a pending endpoint proposal? A compromised admin can propose a
+     malicious endpoint, but it cannot take effect until the delay elapses and
+     `confirm_endpoint` is called. Cancel the pending proposal (if the contract
+     exposes a cancel path) or rotate the admin before the delay expires.
 
 2. **Propose new admin:**
    - Current admin (with enough uncompromised signers) proposes `set_admin(new_multisig_address)`
@@ -401,6 +447,10 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
 4. **Verify:**
    - Confirm on-chain: `Perihelion::admin == new_address`
    - Compromised keys lose all privileges
+   - If the endpoint itself must be changed, use the delayed path: the new
+     admin calls `propose_endpoint(new_endpoint, delay)` (rejected if a proposal
+     is already pending, or if `new_endpoint == admin`), waits out the delay,
+     then calls `confirm_endpoint`. There is no instant endpoint setter.
 
 5. **Post-rotation:**
    - Audit Stellar transaction history for unauthorized activity

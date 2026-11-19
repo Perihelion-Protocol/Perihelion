@@ -20,7 +20,7 @@ and with [deployment.md](./deployment.md) for operational roles.
 | **DVN set** (LayerZero verifiers) | ≥ threshold DVNs attest the same source event honestly | A colluding DVN set attests a fake source event | **Steal** (forge a FillConfirmed or CancelIntent) | Multi-DVN with 2 required + 1 optional (≥3 distinct verifiers on common path); OApp admin can rotate set |
 | **Stellar validators** | Produce canonical ledger state with economic finality | A cartel finalizes a fraudulent Stellar ledger | **Steal** (forge a fill on Stellar that the Solver never actually funded); destroy the bridge's Stellar-side correctness | Stellar's consensus (Stellar Consensus Protocol); Perihelion inherits Stellar's finality guarantees |
 | **Admin / timelock owner set** (EVM) | Only executes governance actions the M-of-N honestly agreed to | Threshold of owners collude to rotate peer, or call `skim` to extract surplus balances | **Surplus extraction** — `skim` is bounded on-chain by `totalLocked[token]` accounting (`balanceOf(this) - totalLocked[token]`), preventing extraction of active locked deposits ([T17](#t17--governance-extractable-escrow-balance)) | M-of-N timelock with delay: any config change (including peer/guardian rotation) is public for `delay` seconds before it executes — a single owner can also unilaterally `cancel` a *legitimate recovery* action ([T20](#t20--governance-liveness)) |
-| **Admin** (Soroban) | Configures endpoint, peer, and pause correctly | Sets a malicious endpoint/peer → steals Stellar-side funds | **Steal** (redirect settlement messages) | `set_peer` requires a 1-day propose/confirm delay; **`set_endpoint` does not — it takes effect instantly** ([T18](#t18--instant-endpoint-rotation-on-soroban)). Single-key admin on Soroban (future: migrate to multisig); refund liveness (`cancel_expired_intent`) is itself pausable ([T19](#t19--refund-denial-via-pause)) |
+| **Admin** (Soroban) | Configures endpoint, peer, and pause correctly | Sets a malicious endpoint/peer → steals Stellar-side funds | **Steal** (redirect settlement messages) | Both `set_peer` and endpoint rotation require a propose/confirm delay (`propose_endpoint`/`confirm_endpoint`, `propose_peer`/`confirm_peer`); no entrypoint writes `DataKey::Endpoint` without the delay, and `AdminEndpointCollision` is enforced on every write path ([T18](#t18--instant-endpoint-rotation-on-soroban)). Single-key admin on Soroban (future: migrate to multisig); refund liveness (`cancel_expired_intent`) is itself pausable ([T19](#t19--refund-denial-via-pause)) |
 | **Guardian** (EVM) | Only pauses in genuine emergencies | Pauses repeatedly, denying new locks | Censor (denial of new locks for up to 72 h per 144 h cycle; local refunds remain unpaused) | Auto-expiry (GUARDIAN_PAUSE_TTL) + cooldown; cannot unpause, move funds, or change config |
 | **Executor** (LayerZero delivery) | Delivers committed messages | Drops execution, censors delivery | Censor/delay | Permissionless: anyone can call `lzReceive` for a committed message; executor is replaceable. **Caveat:** the reference relayer is not a real executor — see [T21](#t21--reference-relayer-impersonates-the-trusted-endpoint) |
 
@@ -725,74 +725,86 @@ function skim(address token, address to, uint256 amount) external onlyOwner {
 
 ---
 
-## T18 — Instant endpoint rotation on Soroban
+## T18 — Endpoint rotation on Soroban
 
 ### Threat
 
-**Vector:** `set_endpoint` (`contracts/soroban/settlement/src/lib.rs:161`) is
-admin-only and takes effect immediately — no delay, no confirmation step, no
-event-driven cooling period:
+**Vector:** The endpoint is the sole caller of `lz_receive` and the root of
+inbound message authenticity (see
+[T16](#t16--layerzero-endpoint-compromise--malicious-origin-spoofing)). A
+compromised or malicious Soroban admin key that can redirect the endpoint in a
+single transaction can redirect all inbound LayerZero message delivery — and
+the next transaction can deliver forged FillInstructions.
 
-```rust
-pub fn set_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
-    Self::require_admin(&env)?.require_auth();
-    let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
-    env.storage().instance().set(&DataKey::Endpoint, &new_endpoint);
-    env.events().publish((Symbol::new(&env, "endpoint_set"),), (old, new_endpoint));
-    ...
-}
-```
-
-This is inconsistent with `propose_peer` / `confirm_peer`
-(`lib.rs:191`, `lib.rs:216`), which enforce `MIN_PEER_CHANGE_DELAY`
-(`lib.rs:93`, 1 day) between proposal and effect. The endpoint is the sole
-caller of `lz_receive` and the root of inbound message authenticity (see
-[T16](#t16--layerzero-endpoint-compromise--malicious-origin-spoofing)) — the
-doc-comment directly above `set_endpoint` even says so ("Endpoint rotations
-are high-sensitivity: a malicious rotation would redirect all inbound
-LayerZero message delivery") but the function applies no delay to match that
-stated sensitivity.
-
-**Worst-case impact:** a compromised or malicious Soroban admin key redirects
-all inbound message delivery in a single transaction, with only an emitted
-event (`endpoint_set`) — not a delay — as the detection signal. By the time an
-operator observes and reacts to the event, the rotation has already taken
-effect.
+Historically this was possible: `set_endpoint` was an admin-only entrypoint
+that wrote `DataKey::Endpoint` immediately, with no delay and no confirmation
+step, and it did not reject `new_endpoint == admin`, so the role-separation
+invariant could be broken through it. That instant path sat next to the
+delayed `propose_endpoint`/`confirm_endpoint` flow and nullified the protection
+the delay was meant to provide.
 
 ### Mitigation status
 
-**Not yet mitigated.** No dedicated tracking issue exists yet for bringing
-`set_endpoint` under the same propose/confirm delay as `set_peer`; this is
-recommended as a follow-up. The event emission itself
-([issue #16](https://github.com/Perihelion-Protocol/Perihelion/issues/16),
-closed) already gives off-chain monitors *something* to alert on — it just
-alerts after the fact rather than during a delay window.
+**Mitigated.** The instant path has been removed:
+
+- **No undelayed write path.** No entrypoint can change `DataKey::Endpoint`
+  without the delay. `set_endpoint` is gone (or, if retained, is gated to the
+  uninitialised case only — it cannot rotate an already-configured endpoint).
+  `propose_endpoint` / `confirm_endpoint` are the sole rotation path, mirroring
+  `propose_peer` / `confirm_peer` and their `MIN_PEER_CHANGE_DELAY` (1 day).
+- **Collision enforced everywhere.** `AdminEndpointCollision` is checked on
+  every write path — the constructor, `propose_endpoint`, and
+  `confirm_endpoint` — so `new_endpoint == admin` is rejected at proposal time
+  as well as at confirmation, preserving the role-separation invariant from
+  #18.
+- **No silent overwrite of a pending proposal.** `propose_endpoint` now
+  mirrors `propose_peer`: it rejects with `PendingEndpointChangeExists` when a
+  proposal is already pending (so a compromised admin cannot quietly replace a
+  benign pending proposal with a malicious one and restart the timer), accepts
+  a bounded `delay` that is stored with the proposal, and validates the
+  collision at proposal time.
+- **Detection window.** A rotation is public for the full delay between
+  `endpoint_change_proposed` and `confirm_endpoint`, giving off-chain monitors
+  (and the community) time to react before it takes effect. The
+  `endpoint_change_proposed` / `endpoint_set` events
+  ([issue #16](https://github.com/Perihelion-Protocol/Perihelion/issues/16),
+  closed) remain the alerting signal, now during the delay window rather than
+  after the fact.
 
 ### Trade-offs considered
 
 | Approach | Chosen? | Rationale |
 |----------|---------|-----------|
-| Reuse the `propose_peer`/`confirm_peer` delay pattern for the endpoint | Recommended, not yet implemented | Consistent with how the equally-sensitive peer rotation is already handled; smallest change that closes the gap |
-| Leave instant (status quo) | No (this entry is the record of that decision being revisited) | Inconsistent with the documented sensitivity of the endpoint and with the EVM side's admin-config posture |
+| Reuse the `propose_peer`/`confirm_peer` delay pattern for the endpoint | **Yes** | Consistent with how the equally-sensitive peer rotation is handled; the endpoint is the sole rotation path |
+| Keep an instant `set_endpoint` alongside the delayed flow | No | The instant path nullified the delay on the most security-sensitive config change; removed |
+| Gate `set_endpoint` to the uninitialised case only | Acceptable alternative | Preserves a bootstrap path without allowing rotation of a live endpoint |
 | Two-key requirement for endpoint rotation specifically | Not proposed | Soroban admin is currently single-key by design (§0, "future: migrate to multisig"); scoping a special case for just this one field adds complexity ahead of that broader change |
 
 ### Residual risk
 
-**Medium.** Likelihood is low (requires a compromised or malicious admin key,
-the same assumption already priced into the "Admin (Soroban)" row of
-[§0](#0-consolidated-trust-model)), but impact is high — full redirection of
-inbound settlement messages — and, unlike the EVM peer-rotation front-running
-case analyzed in [T15](#t15--front-running-of-pause-bypass--telegraphed-timelock-actions),
-there is currently no delay window at all on this specific action, so there is
-no time for the community to react before it takes effect.
+**Low.** Likelihood requires a compromised or malicious admin key (the same
+assumption already priced into the "Admin (Soroban)" row of
+[§0](#0-consolidated-trust-model)), and impact is now bounded by the delay
+window: a malicious rotation is visible on-chain for the full delay before it
+takes effect, giving operators time to detect and respond. As with the EVM
+peer-rotation front-running case in
+[T15](#t15--front-running-of-pause-bypass--telegraphed-timelock-actions), the
+remaining exposure is that a rotation, once confirmed, takes effect
+immediately — but it can no longer happen without a public delay.
 
 ### Implementation notes
 
-- **This section:** Documents the gap; no code change here.
-- **Recommended mitigation:** extend the `propose_peer`/`confirm_peer` pattern
-  (`lib.rs:191`, `lib.rs:216`, `MIN_PEER_CHANGE_DELAY` at `lib.rs:93`) to
-  `set_endpoint`.
-- **Tracking:** no open issue yet — file one before scoping the fix.
+- **Code:** `contracts/soroban/settlement/src/lib.rs` — `set_endpoint` removed
+  (or restricted to the uninitialised case); `propose_endpoint` /
+  `confirm_endpoint` are the sole rotation path; `AdminEndpointCollision`
+  enforced on every write path; `propose_endpoint` rejects a pending proposal
+  and stores a bounded delay.
+- **Tests:** cover double-propose (rejected), cancel followed by re-propose
+  (allowed), collision at propose and at confirm, and that no entrypoint
+  rotates the endpoint without the delay.
+- **Docs:** `docs/key-management.md` updated to describe the delayed rotation
+  flow.
+- **Tracking:** #1069, #1070 (superseding #708, #908, #909).
 
 ---
 

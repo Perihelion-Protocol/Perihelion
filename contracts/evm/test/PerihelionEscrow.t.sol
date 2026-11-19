@@ -1539,6 +1539,84 @@ contract PerihelionEscrowTest is Test {
 
     // --- #40: MIN_CONFIRMATION_GRACE ----------------------------------------
 
+    /// @notice Cross-language constant test (#1067).
+    ///         The Stellar `dispatch_confirmation` cutoff is
+    ///         `deadline + MIN_DISPATCH_WINDOW`, and a FillConfirmed dispatched at
+    ///         that cutoff still needs DVN verification and executor delivery
+    ///         before it lands on EVM. The EVM `cancelExpired` opens at
+    ///         `deadline + confirmationGrace`, so the minimum grace must exceed
+    ///         the dispatch window by a positive latency budget `L`:
+    ///
+    ///             MIN_CONFIRMATION_GRACE >= MIN_DISPATCH_WINDOW + LATENCY_BUDGET
+    ///
+    ///         The Soroban constants are read from the settlement contract source
+    ///         so this test fails if either side drifts without the other.
+    function test_MinConfirmationGraceCoversDispatchWindowPlusLatency() public view {
+        uint256 minDispatchWindow = _sorobanConst("MIN_DISPATCH_WINDOW");
+        uint256 latencyBudget = _sorobanConst("LATENCY_BUDGET");
+
+        // Sanity: the Soroban constants must be non-zero and the budget positive.
+        assertGt(minDispatchWindow, 0, "MIN_DISPATCH_WINDOW must be > 0");
+        assertGt(latencyBudget, 0, "LATENCY_BUDGET must be > 0");
+
+        uint256 minGrace = escrow.MIN_CONFIRMATION_GRACE();
+        assertGe(
+            minGrace,
+            minDispatchWindow + latencyBudget,
+            "MIN_CONFIRMATION_GRACE must cover MIN_DISPATCH_WINDOW + LATENCY_BUDGET"
+        );
+
+        // The default grace must also satisfy the inequality.
+        assertGe(escrow.confirmationGrace(), minDispatchWindow + latencyBudget);
+    }
+
+    /// @dev Parse `pub const <name>: u64 = <value>;` from the Soroban settlement
+    ///      source. Reverts the test if the constant is missing or unparsable.
+    function _sorobanConst(string memory name) internal view returns (uint256) {
+        string memory path = "contracts/soroban/settlement/src/lib.rs";
+        string memory src = vm.readFile(path);
+        bytes memory haystack = bytes(src);
+        bytes memory needle = bytes(string.concat("pub const ", name, ": u64 = "));
+
+        uint256 start = _indexOf(haystack, needle);
+        require(start != type(uint256).max, string.concat("missing const ", name));
+        start += needle.length;
+
+        uint256 value;
+        uint256 digits;
+        while (start < haystack.length) {
+            bytes1 c = haystack[start];
+            if (c < bytes1("0") || c > bytes1("9")) break;
+            value = value * 10 + (uint8(c) - uint8(bytes1("0")));
+            digits++;
+            start++;
+        }
+        require(digits > 0, string.concat("unparsable const ", name));
+        return value;
+    }
+
+    /// @dev First index of `needle` in `haystack`, or type(uint256).max.
+    function _indexOf(bytes memory haystack, bytes memory needle)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (needle.length == 0 || haystack.length < needle.length) {
+            return type(uint256).max;
+        }
+        for (uint256 i = 0; i <= haystack.length - needle.length; i++) {
+            bool matched = true;
+            for (uint256 j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) return i;
+        }
+        return type(uint256).max;
+    }
+
     function test_RevertWhen_GraceBelowMinimum() public {
         uint256 tooShort = escrow.MIN_CONFIRMATION_GRACE() - 1;
         vm.expectRevert(PerihelionEscrow.GraceTooShort.selector);
@@ -1548,6 +1626,30 @@ contract PerihelionEscrowTest is Test {
     function test_SetConfirmationGraceAtMinimum() public {
         escrow.setConfirmationGrace(escrow.MIN_CONFIRMATION_GRACE());
         assertEq(escrow.confirmationGrace(), escrow.MIN_CONFIRMATION_GRACE());
+    }
+
+    /// @notice The minimum grace must still be enough for a FillConfirmed
+    ///         dispatched at the Stellar cutoff to land before `cancelExpired`
+    ///         opens (#1067). A confirm at the cutoff plus the latency budget
+    ///         must release, not race the refund.
+    function test_ConfirmAtDispatchCutoffPlusLatencyStillReleases() public {
+        bytes32 h = _lock();
+        PerihelionEscrow.Intent memory intent = _intent();
+
+        uint256 minDispatchWindow = _sorobanConst("MIN_DISPATCH_WINDOW");
+        uint256 latencyBudget = _sorobanConst("LATENCY_BUDGET");
+
+        // Configure the minimum grace and land the confirm at the latest
+        // possible dispatch time plus the full latency budget.
+        escrow.setConfirmationGrace(escrow.MIN_CONFIRMATION_GRACE());
+        vm.warp(intent.deadline + minDispatchWindow + latencyBudget);
+
+        _confirm(h, solver, 1);
+        assertEq(token.balanceOf(solver), 100_000);
+
+        // The refund window must not have opened yet.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
+        escrow.cancelExpired(h);
     }
 
     function test_RevertWhen_GraceAboveMaximum() public {
