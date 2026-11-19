@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 /**
- * End-to-end refund path tests: covering cancellation scenarios where the user
+ * Protocol MODEL tests (TypeScript re-implementation, not the deployed contracts): covering cancellation scenarios where the user
  * gets their funds back from the escrow.
  *
  * These tests drive the cancel/refund lifecycle:
@@ -23,7 +23,7 @@ import {
 } from "./mocks.js";
 
 // Test configuration
-const EVM_EID = 30101;
+const EVM_EID = 30101; // LayerZero eid for Ethereum mainnet (label only; not Base testnet)
 const STELLAR_EID = 30316;
 const ESCROW_ADDRESS = "0x1111111111111111111111111111111111111111";
 
@@ -32,7 +32,7 @@ const SOLVER_ADDRESS = "0x3333333333333333333333333333333333333333";
 const SOLVER_STELLAR = "GAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCF6M";
 const RECIPIENT_STELLAR = "GARCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCFRVX";
 
-test("refund path: cancel from Stellar after deadline", async () => {
+test("model/refund path: cancel from Stellar after deadline", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
@@ -102,7 +102,7 @@ test("refund path: cancel from Stellar after deadline", async () => {
   console.log("\n✅ Refund path complete: cancel from Stellar");
 });
 
-test("refund path: local timeout on EVM", async () => {
+test("model/refund path: local timeout on EVM", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
@@ -153,7 +153,7 @@ test("refund path: local timeout on EVM", async () => {
   console.log("\n✅ Refund path complete: local timeout on EVM");
 });
 
-test("refund path: fill rejected if insufficient headroom", async () => {
+test("model/refund path: fill rejected if insufficient headroom", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
@@ -230,7 +230,7 @@ test("refund path: fill rejected if insufficient headroom", async () => {
   console.log("   • Solver loss scenario is unreachable");
 });
 
-test("refund path: race — local timeout wins, late FillConfirmed rejected", async () => {
+test("model/refund path: race — local timeout wins, late FillConfirmed rejected", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
@@ -310,7 +310,7 @@ test("refund path: race — local timeout wins, late FillConfirmed rejected", as
   console.log("   • Late FillConfirmed properly rejected");
 });
 
-test("refund path: cannot cancel before deadline", async () => {
+test("model/refund path: cannot cancel before deadline", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
@@ -371,7 +371,7 @@ test("refund path: cannot cancel before deadline", async () => {
   console.log("   • Intent remains locked and unfilled");
 });
 
-test("refund path: value conserved across refund", async () => {
+test("model/refund path: value conserved across refund", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);

@@ -357,6 +357,10 @@ test-e2e: ## Run end-to-end integration tests
 	@echo "▶ test-e2e"
 	cd test && npm test
 
+test-integration: ## Run live EVM/Soroban endpoint checks (set PERIHELION_INTEGRATION=1 and RPC URLs)
+	@echo "▶ test-integration"
+	cd test && npm run test:integration
+
 test-e2e-watch: ## Run end-to-end tests in watch mode
 	@echo "▶ test-e2e-watch"
 	cd test && npm run test:watch
