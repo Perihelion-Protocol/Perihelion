@@ -795,7 +795,13 @@ export const ESCROW_ABI = [
   {
     "type": "function",
     "name": "resetRollingWindowCap",
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
     "outputs": [],
     "stateMutability": "nonpayable"
   },
@@ -840,7 +846,13 @@ export const ESCROW_ABI = [
   {
     "type": "function",
     "name": "rollingWindowResetEarliestAt",
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
     "outputs": [
       {
         "name": "",
@@ -853,25 +865,18 @@ export const ESCROW_ABI = [
   {
     "type": "function",
     "name": "rollingWindowTriggered",
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
     "outputs": [
       {
         "name": "",
         "type": "bool",
         "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "rollingWindowTriggeredAsset",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -1524,13 +1529,26 @@ export const ESCROW_ABI = [
   {
     "type": "event",
     "name": "RollingWindowCapReset",
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
     "anonymous": false
   },
   {
     "type": "event",
     "name": "RollingWindowCapTriggered",
     "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
       {
         "name": "windowStart",
         "type": "uint256",
@@ -1729,6 +1747,11 @@ export const ESCROW_ABI = [
   {
     "type": "error",
     "name": "RollingWindowCapExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "RollingWindowNotTriggered",
     "inputs": []
   },
   {

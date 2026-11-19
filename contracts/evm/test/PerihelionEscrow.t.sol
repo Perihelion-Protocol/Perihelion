@@ -1565,6 +1565,85 @@ contract PerihelionEscrowTest is Test {
         escrow.setDelegate(address(0));
     }
 
+    // --- Per-asset breaker latch (#1038) -------------------------------------
+
+    event RollingWindowCapReset(address indexed asset);
+
+    function test_BreachOnOneAssetDoesNotBlockAnother() public {
+        vm.warp(1_000_000);
+        MockERC20 tokenB = _allowSecondToken();
+        escrow.setRollingWindowCapForAsset(address(token), 1 days, 150_000);
+        escrow.setRollingWindowCapForAsset(address(tokenB), 1 days, 1_000_000);
+
+        _lockIntent(_intentFor(address(token), 100_000, 1));
+        _lockIntent(_intentFor(address(token), 100_000, 2)); // breaches A
+        assertTrue(escrow.rollingWindowTriggered(address(token)));
+        assertFalse(escrow.rollingWindowTriggered(address(tokenB)));
+
+        // B keeps locking while A is latched.
+        PerihelionEscrow.Intent memory itB = _intentFor(address(tokenB), 100_000, 3);
+        _lockIntent(itB);
+        (, address lockUser,,,,,,) = escrow.locks(escrow.hashIntent(itB));
+        assertEq(lockUser, user);
+
+        // A keeps refusing until it is reset.
+        PerihelionEscrow.Intent memory itA = _intentFor(address(token), 1, 4);
+        bytes memory sig = _sign(itA);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.RollingWindowCapAlreadyTriggered.selector);
+        escrow.lock{ value: 0.01 ether }(itA, sig);
+    }
+
+    function test_ResetClearsOnlyTheNamedAssetLatch() public {
+        vm.warp(1_000_000);
+        MockERC20 tokenB = _allowSecondToken();
+        escrow.setRollingWindowCapForAsset(address(token), 1 days, 150_000);
+        escrow.setRollingWindowCapForAsset(address(tokenB), 1 days, 150_000);
+        _lockIntent(_intentFor(address(token), 100_000, 1));
+        _lockIntent(_intentFor(address(token), 100_000, 2)); // A breaches
+        _lockIntent(_intentFor(address(tokenB), 100_000, 3));
+        _lockIntent(_intentFor(address(tokenB), 100_000, 4)); // B breaches
+        assertTrue(escrow.rollingWindowTriggered(address(token)));
+        assertTrue(escrow.rollingWindowTriggered(address(tokenB)));
+
+        vm.warp(block.timestamp + 1 days);
+        escrow.resetRollingWindowCap(address(token));
+        assertFalse(escrow.rollingWindowTriggered(address(token)));
+        assertTrue(escrow.rollingWindowTriggered(address(tokenB)));
+        assertEq(escrow.rollingWindowResetEarliestAt(address(tokenB)), 1_000_000 + 1 days);
+    }
+
+    function test_RevertWhen_ResetNotTriggered() public {
+        vm.warp(1_000_000);
+        escrow.setRollingWindowCapForAsset(address(token), 1 days, 150_000);
+        vm.expectRevert(PerihelionEscrow.RollingWindowNotTriggered.selector);
+        escrow.resetRollingWindowCap(address(token));
+    }
+
+    function test_RevertWhen_ResetBeforeWindowElapses() public {
+        vm.warp(1_000_000);
+        escrow.setRollingWindowCapForAsset(address(token), 1 days, 150_000);
+        _lockIntent(_intentFor(address(token), 100_000, 1));
+        _lockIntent(_intentFor(address(token), 100_000, 2));
+        vm.expectRevert(PerihelionEscrow.RollingWindowNotYetResettable.selector);
+        escrow.resetRollingWindowCap(address(token));
+    }
+
+    function test_RollingWindowEventsIndexTheAsset() public {
+        vm.warp(1_000_000);
+        escrow.setRollingWindowCapForAsset(address(token), 1 days, 150_000);
+        _lockIntent(_intentFor(address(token), 100_000, 1));
+
+        vm.expectEmit(true, false, false, false);
+        emit RollingWindowCapTriggered(address(token), 0, 0);
+        _lockIntent(_intentFor(address(token), 100_000, 2));
+
+        vm.warp(block.timestamp + 1 days);
+        vm.expectEmit(true, false, false, false);
+        emit RollingWindowCapReset(address(token));
+        escrow.resetRollingWindowCap(address(token));
+    }
+
     // --- Per-asset rolling window duration (#1037) ---------------------------
 
     function _intentFor(address asset, uint256 amount, uint256 nonce)
@@ -1609,11 +1688,11 @@ contract PerihelionEscrowTest is Test {
 
         // B's hourly window has rolled over, so its bucket is fresh and 100k fits.
         _lockIntent(_intentFor(address(tokenB), 100_000, 2));
-        assertFalse(escrow.rollingWindowTriggered());
+        assertFalse(escrow.rollingWindowTriggered(address(tokenB)));
 
         // A's day window has not rolled over: 100k + 100k > 150k must breach.
         _lockIntent(_intentFor(address(token), 100_000, 3));
-        assertTrue(escrow.rollingWindowTriggered());
+        assertTrue(escrow.rollingWindowTriggered(address(token)));
     }
 
     /// @notice Disabling one asset's window (duration 0, cap 0) must leave another
@@ -1626,12 +1705,14 @@ contract PerihelionEscrowTest is Test {
 
         _lockIntent(_intentFor(address(token), 100_000, 1));
         _lockIntent(_intentFor(address(token), 100_000, 2));
-        assertTrue(escrow.rollingWindowTriggered());
+        assertTrue(escrow.rollingWindowTriggered(address(token)));
     }
 
     // --- Rolling-window breaker (#1035) --------------------------------------
 
-    event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
+    event RollingWindowCapTriggered(
+        address indexed asset, uint256 windowStart, uint256 accumulated
+    );
 
     /// @notice A breaching lock latches the breaker, refunds msg.value once, records
     ///         no lock and dispatches no FillInstruction. The same signed intent then
@@ -1656,12 +1737,12 @@ contract PerihelionEscrowTest is Test {
 
         vm.recordLogs();
         vm.expectEmit(false, false, false, false);
-        emit RollingWindowCapTriggered(0, 0);
+        emit RollingWindowCapTriggered(address(token), 0, 0);
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(second, sig);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        assertTrue(escrow.rollingWindowTriggered());
+        assertTrue(escrow.rollingWindowTriggered(address(token)));
         (, address lockUser,,,,,,) = escrow.locks(h);
         assertEq(lockUser, address(0), "no lock recorded for the breaching intent");
         assertEq(escrow.totalLocked(address(token)), 100_000, "only the first lock is a liability");
@@ -1674,8 +1755,8 @@ contract PerihelionEscrowTest is Test {
 
         // Reset after the window elapses; the same intent now locks.
         vm.warp(block.timestamp + 1 days);
-        escrow.resetRollingWindowCap();
-        assertFalse(escrow.rollingWindowTriggered());
+        escrow.resetRollingWindowCap(address(token));
+        assertFalse(escrow.rollingWindowTriggered(address(token)));
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(second, sig);
         (, lockUser,,,,,,) = escrow.locks(h);

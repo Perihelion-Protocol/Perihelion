@@ -994,3 +994,48 @@ than left as a footnote on the trust table.
   [#283](https://github.com/Perihelion-Protocol/Perihelion/issues/283)
   (compounding `confirmedBy`/`readyAt` issues in the same function family).
   Closed-without-fix history: [#44](https://github.com/Perihelion-Protocol/Perihelion/issues/44).
+
+## T22 — Cross-asset circuit-breaker griefing
+
+**Vector:** The rolling-window latch was a single protocol-wide flag. A breach on
+a low-cap, allowlisted asset (for example a test token) blocked locks of every
+other asset until the owner reset it, which takes at least the timelock delay.
+Anyone holding an allowlisted asset could halt the corridor that matters.
+
+**Mitigation (#1038):** The latch, its reset deadline and the bucket accounting
+are per asset. A breach on asset A rejects further locks of A only. The
+`RollingWindowCapTriggered` and `RollingWindowCapReset` events index the asset.
+
+**Policy decisions:**
+
+- Only the owner (the timelock) may reset a latch. The guardian cannot. The
+  guardian can pause, but it cannot clear a latch or lift a pause. This keeps
+  the guardian's emergency power limited to halting, as in T11.
+- A protocol-wide halt during an incident remains {pause}. It is not a
+  per-asset latch.
+- {resetRollingWindowCap} reverts with `RollingWindowNotTriggered` when the
+  asset is not latched, so an owner cannot clear an asset's bucket without a
+  recorded breach.
+
+**Residual risk:** An owner-approved reset can still be delayed by the timelock.
+A breach on an asset with a very low cap still halts that asset for up to one
+window plus the timelock delay.
+
+## T23 — LayerZero delegate left with the deployer key
+
+**Vector:** The LayerZero endpoint delegate controls the escrow's cross-chain
+security configuration: DVN set, send and receive libraries, and skip, clear or
+nilify of inbound packets. The constructor set it to the deployer EOA, and
+ownership transfer does not move it. After the documented handover to the
+timelock, the deployer key could still forge or block `FillConfirmed` and
+`CancelIntent` messages.
+
+**Mitigation (#1036):** `setDelegate(address)` is owner-only and rejects the zero
+address. `docs/deployment.md` (step 4.3a) hands the delegate to the timelock
+through the same propose, confirm and execute flow. It then requires
+`endpoint.delegates(escrow) == timelock` before the deployment is recorded. The
+delegate is listed in the key inventory in `docs/key-management.md`.
+
+**Open:** Monitoring alerts on `DelegateSet` are not yet wired into alerting
+infrastructure.
+

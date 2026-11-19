@@ -44,7 +44,7 @@
       "detector": "encode-packed-collision",
       "contract": "PerihelionEscrow",
       "function": "_encodeFillInstruction",
-      "description": "PerihelionEscrow._encodeFillInstruction(bytes32,PerihelionEscrow.Intent,address) (src/PerihelionEscrow.sol#1122-1149) calls abi.encodePacked() with multiple dynamic arguments:\n\t- abi.encodePacked(PROTOCOL_VERSION,MSG_FILL_INSTRUCTION,intentHash,uint32(stellarEid),recipientField,destAssetField,uint128(intent.minDestAmount),uint64(intent.deadline),bytes32(uint256(uint160(lockingSolver))),uint64(0)) (src/PerihelionEscrow.sol#1133-1148)\n",
+      "description": "PerihelionEscrow._encodeFillInstruction(bytes32,PerihelionEscrow.Intent,address) (src/PerihelionEscrow.sol#1125-1152) calls abi.encodePacked() with multiple dynamic arguments:\n\t- abi.encodePacked(PROTOCOL_VERSION,MSG_FILL_INSTRUCTION,intentHash,uint32(stellarEid),recipientField,destAssetField,uint128(intent.minDestAmount),uint64(intent.deadline),bytes32(uint256(uint160(lockingSolver))),uint64(0)) (src/PerihelionEscrow.sol#1136-1151)\n",
       "rationale": "Both dynamic fields are fixed width by construction: recipientField is always 56 bytes and destAssetField always 69 bytes (see _padField), so two distinct inputs cannot yield the same packed encoding. Field offsets are pinned by the WireFormat conformance vectors."
     }
   ]
