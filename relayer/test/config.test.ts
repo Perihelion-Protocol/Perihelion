@@ -2,7 +2,7 @@ import { test } from "node:test";
 // SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
 import { loadConfig } from "../src/config.js";
-import { REQUIRED_CONFIG_VARS, validConfigEnv } from "./fixtures.js";
+import { REQUIRED_CONFIG_VARS, VALID_SIGNER_SECRET, validConfigEnv } from "./fixtures.js";
 
 test("loadConfig succeeds with valid required fields and applies defaults", () => {
   const config = loadConfig(validConfigEnv());
@@ -69,7 +69,7 @@ test("loadConfig rejects dev mode against Pubnet without an explicit override", 
     () =>
       loadConfig({
         ...validConfigEnv(),
-        PERIHELION_NETWORK: "pubnet",
+        STELLAR_NETWORK: "Public Global Stellar Network ; September 2015",
       }),
     /PERIHELION_RELAYER_MODE/,
   );
@@ -77,7 +77,7 @@ test("loadConfig rejects dev mode against Pubnet without an explicit override", 
     () =>
       loadConfig({
         ...validConfigEnv(),
-        PERIHELION_NETWORK: "pubnet",
+        STELLAR_NETWORK: "Public Global Stellar Network ; September 2015",
         PERIHELION_RELAYER_MODE: "dev",
       }),
     /PERIHELION_RELAYER_MODE/,
@@ -87,9 +87,9 @@ test("loadConfig rejects dev mode against Pubnet without an explicit override", 
 test("loadConfig permits dev mode against Pubnet with the explicit override", () => {
   const config = loadConfig({
     ...validConfigEnv(),
-    PERIHELION_NETWORK: "pubnet",
+    STELLAR_NETWORK: "Public Global Stellar Network ; September 2015",
     PERIHELION_RELAYER_MODE: "dev",
-    PERIHELION_ALLOW_DEV_RELAYER_ON_PUBNET: "true",
+    PERIHELION_ALLOW_ENDPOINT_IMPERSONATION: "true",
   });
   assert.equal(config.relayerMode, "dev");
 });
@@ -108,4 +108,64 @@ test("loadConfig rejects malformed health and readiness settings, naming each va
       `${key}=${value} must be rejected`,
     );
   }
+});
+
+// --- Strict integer and signer validation (#978) -----------------------------
+
+function errorFor(env: NodeJS.ProcessEnv): string {
+  try {
+    loadConfig(env);
+  } catch (err) {
+    return (err as Error).message;
+  }
+  assert.fail("loadConfig was expected to throw");
+}
+
+test("loadConfig rejects fractional endpoint ids and names the variable", () => {
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_SOURCE_EID: "1.5" }),
+    /PERIHELION_SOURCE_EID/,
+  );
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_STELLAR_EID: "40161.0" }),
+    /PERIHELION_STELLAR_EID/,
+  );
+});
+
+test("loadConfig rejects endpoint ids outside uint32", () => {
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_SOURCE_EID: "4294967296" }),
+    /PERIHELION_SOURCE_EID/,
+  );
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_STELLAR_EID: "-1" }),
+    /PERIHELION_STELLAR_EID/,
+  );
+});
+
+test("loadConfig accepts the largest uint32 endpoint id", () => {
+  const config = loadConfig({ ...validConfigEnv(), PERIHELION_SOURCE_EID: "4294967295" });
+  assert.equal(config.sourceEid, 4294967295);
+});
+
+test("loadConfig rejects fractional start block and poll interval", () => {
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_START_BLOCK: "10.5" }),
+    /PERIHELION_START_BLOCK/,
+  );
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_POLL_INTERVAL_MS: "1000.5" }),
+    /PERIHELION_POLL_INTERVAL_MS/,
+  );
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_POLL_INTERVAL_MS: "0" }),
+    /PERIHELION_POLL_INTERVAL_MS/,
+  );
+});
+
+test("loadConfig rejects a signer secret with a bad checksum", () => {
+  const secret = VALID_SIGNER_SECRET;
+  const last = secret[secret.length - 1];
+  const tampered = secret.slice(0, -1) + (last === "A" ? "B" : "A");
+  assert.match(errorFor({ ...validConfigEnv(), SIGNER_SECRET: tampered }), /SIGNER_SECRET/);
 });

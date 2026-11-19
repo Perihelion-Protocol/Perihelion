@@ -29,6 +29,23 @@ versioned independently.
 
 ### Fixed
 
+- **relayer**: `loadConfig` now rejects fractional or out-of-range endpoint ids
+  (`PERIHELION_SOURCE_EID`, `PERIHELION_STELLAR_EID` must be integers in
+  1..4294967295), fractional `PERIHELION_START_BLOCK` and
+  `PERIHELION_POLL_INTERVAL_MS`, and a `SIGNER_SECRET` whose strkey checksum is
+  wrong. Each fails at startup naming the variable (#978).
+
+- **build**: the `test/` workspace has `build`, `lint`, `typecheck`, `clean` and
+  `fmt` scripts, so root aggregate commands and the lefthook type-check loop
+  include it (#977).
+
+- **relayer, solver**: removed stray `=======` lines left by a bad merge that
+  stopped `config.ts`, `relayer.ts` and `solver/cli.ts` from parsing.
+
+- **ci**: added `.github/workflows/release.yml`, which runs on `vX.Y.Z` tags to
+  verify versions and the changelog, pack the packages and publish a GitHub
+  release with `SHA256SUMS`. See `RELEASING.md` (#979).
+
 - **sdk**: `ESCROW_ABI` had drifted from `PerihelionEscrow.sol` — it declared a
   non-existent `getLock` function and a `PausedError` error.
   `PerihelionEscrowClient.getLock` now reads the contract's `locks(bytes32)`
