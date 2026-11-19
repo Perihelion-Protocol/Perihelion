@@ -153,19 +153,19 @@ test("/metrics endpoint", async (t) => {
     const res = await fetch(`${BASE}/metrics`);
     const text = await res.text();
     assert.match(text, /# HELP mempool_submissions_accepted/);
-    assert.match(text, /# TYPE mempool_submissions_accepted counter/);
-    assert.match(text, /^mempool_submissions_accepted \d+$/m);
-    assert.match(text, /# HELP mempool_submissions_rejected/);
-    assert.match(text, /# TYPE mempool_submissions_rejected counter/);
-    assert.match(text, /^mempool_submissions_rejected \d+$/m);
+    assert.match(text, /# TYPE mempool_submissions_accepted_total counter/);
+    assert.match(text, /^mempool_submissions_accepted_total \d+$/m);
+    assert.match(text, /# HELP mempool_submissions_rejected_total/);
+    assert.match(text, /# TYPE mempool_submissions_rejected_total counter/);
+    assert.match(text, /^mempool_submissions_rejected_total \d+$/m);
   });
 
   await t.test("includes rate-limit rejection counter", async () => {
     const res = await fetch(`${BASE}/metrics`);
     const text = await res.text();
-    assert.match(text, /# HELP mempool_rate_limit_rejections/);
-    assert.match(text, /# TYPE mempool_rate_limit_rejections counter/);
-    assert.match(text, /^mempool_rate_limit_rejections \d+$/m);
+    assert.match(text, /# HELP mempool_rate_limit_rejections_total/);
+    assert.match(text, /# TYPE mempool_rate_limit_rejections_total counter/);
+    assert.match(text, /^mempool_rate_limit_rejections_total \d+$/m);
   });
 
   await t.test("updates submission counters after intent submission", async () => {
@@ -182,7 +182,7 @@ test("/metrics endpoint", async (t) => {
     const metricsRes = await fetch(`${BASE}/metrics`);
     const text = await metricsRes.text();
     // At minimum, submissions_accepted should be > 0
-    const match = text.match(/^mempool_submissions_accepted (\d+)$/m);
+    const match = text.match(/^mempool_submissions_accepted_total (\d+)$/m);
     assert(match, "Should find submissions_accepted metric");
     const accepted = Number(match[1]);
     assert(accepted > 0, "Should have accepted at least one submission");
@@ -199,7 +199,7 @@ test("/metrics endpoint", async (t) => {
 
     const metricsRes = await fetch(`${BASE}/metrics`);
     const text = await metricsRes.text();
-    const match = text.match(/^mempool_submissions_rejected (\d+)$/m);
+    const match = text.match(/^mempool_submissions_rejected_total (\d+)$/m);
     assert(match, "Should find submissions_rejected metric");
     const rejected = Number(match[1]);
     assert(rejected > 0, "Should have rejected at least one submission");

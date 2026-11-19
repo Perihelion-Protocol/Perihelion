@@ -2,6 +2,7 @@
 
 import express, { type Request, Response, NextFunction } from "express";
 import type { Server } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import {
   hashIntent,
   verifyIntent,
@@ -56,6 +57,12 @@ export interface MempoolServerOptions {
    */
   statusToken?: string;
   /**
+   * Optional shared bearer token required on `GET /metrics`, matching the
+   * relayer's and solver's `PERIHELION_METRICS_TOKEN`. If omitted, `/metrics`
+   * is open to any client that can reach the listener.
+   */
+  metricsToken?: string;
+  /**
    * Maximum number of records the in-memory store retains before evicting.
    * Defaults to the store's own default (50 000). Raise it for a busier
    * corridor so a fresh `pending` intent does not evict an unseen one.
@@ -101,6 +108,7 @@ export class MempoolServer {
   private readRateLimit: number;
   private sweepTimer?: ReturnType<typeof setInterval>;
   private statusToken?: string;
+  private metricsToken?: string;
   private client?: VerifyIntentOptions["client"];
   private isReady = false;
   private submissionStats = { accepted: 0, rejected: 0 };
@@ -121,6 +129,7 @@ export class MempoolServer {
     this.verifyingContract = opts.verifyingContract;
     this.domain = perihelionDomain(this.chainId, this.verifyingContract);
     this.statusToken = opts.statusToken;
+    this.metricsToken = opts.metricsToken;
     this.client = opts.client;
     this.store = new IntentStore({
       maxSize: opts.maxStoreSize,
@@ -156,7 +165,11 @@ export class MempoolServer {
       }
       res.status(200).json({ status: "ready" });
     });
-    this.app.get("/metrics", (req: Request, res: Response) => {
+    this.app.get("/metrics", read, (req: Request, res: Response) => {
+      if (this.metricsToken && !this.isMetricsAuthorized(req)) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
       res.setHeader("Content-Type", "text/plain; version=0.0.4");
       res.status(200).send(this.getPrometheusMetrics());
     });
@@ -242,6 +255,14 @@ export class MempoolServer {
       this.rateLimitHits.set(key, hits);
       next();
     };
+  }
+
+  /** Constant-time bearer-token check for `/metrics`. Mirrors the relayer's check. */
+  private isMetricsAuthorized(req: Request): boolean {
+    const header = req.header("authorization") ?? "";
+    const expected = Buffer.from(`Bearer ${this.metricsToken}`);
+    const actual = Buffer.from(header);
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
   }
 
   private handleInfo(_req: Request, res: Response): void {
@@ -409,44 +430,40 @@ export class MempoolServer {
     res.status(200).json(updated);
   }
 
+  /**
+   * Render the Prometheus exposition. Every value is O(1) in store size: the
+   * store keeps per-status index sets, and submission/rate-limit figures are
+   * incremented as events happen, so a scrape never visits the records.
+   */
   private getPrometheusMetrics(): string {
-    const records = this.store.all();
-    const recordsByStatus = {
-      pending: records.filter((r) => r.status === "pending").length,
-      filled: records.filter((r) => r.status === "filled").length,
-      settled: records.filter((r) => r.status === "settled").length,
-      refunded: records.filter((r) => r.status === "refunded").length,
-      expired: records.filter((r) => r.status === "expired").length,
-    };
-
     const lines: string[] = [
       "# HELP mempool_store_size Total number of records in the store",
       "# TYPE mempool_store_size gauge",
-      `mempool_store_size ${records.length}`,
+      `mempool_store_size ${this.store.size()}`,
       "# HELP mempool_store_pending_intents Number of pending intents",
       "# TYPE mempool_store_pending_intents gauge",
-      `mempool_store_pending_intents ${recordsByStatus.pending}`,
+      `mempool_store_pending_intents ${this.store.countByStatus("pending")}`,
       "# HELP mempool_store_filled_intents Number of filled intents (delivered on Stellar, awaiting source-chain release)",
       "# TYPE mempool_store_filled_intents gauge",
-      `mempool_store_filled_intents ${recordsByStatus.filled}`,
+      `mempool_store_filled_intents ${this.store.countByStatus("filled")}`,
       "# HELP mempool_store_settled_intents Number of settled intents",
       "# TYPE mempool_store_settled_intents gauge",
-      `mempool_store_settled_intents ${recordsByStatus.settled}`,
+      `mempool_store_settled_intents ${this.store.countByStatus("settled")}`,
       "# HELP mempool_store_refunded_intents Number of refunded intents",
       "# TYPE mempool_store_refunded_intents gauge",
-      `mempool_store_refunded_intents ${recordsByStatus.refunded}`,
+      `mempool_store_refunded_intents ${this.store.countByStatus("refunded")}`,
       "# HELP mempool_store_expired_intents Number of expired intents",
       "# TYPE mempool_store_expired_intents gauge",
-      `mempool_store_expired_intents ${recordsByStatus.expired}`,
-      "# HELP mempool_submissions_accepted Total number of accepted submissions",
-      "# TYPE mempool_submissions_accepted counter",
-      `mempool_submissions_accepted ${this.submissionStats.accepted}`,
-      "# HELP mempool_submissions_rejected Total number of rejected submissions",
-      "# TYPE mempool_submissions_rejected counter",
-      `mempool_submissions_rejected ${this.submissionStats.rejected}`,
-      "# HELP mempool_rate_limit_rejections Total number of rate-limit rejections",
-      "# TYPE mempool_rate_limit_rejections counter",
-      `mempool_rate_limit_rejections ${this.rateLimitRejections}`,
+      `mempool_store_expired_intents ${this.store.countByStatus("expired")}`,
+      "# HELP mempool_submissions_accepted_total Total number of accepted submissions",
+      "# TYPE mempool_submissions_accepted_total counter",
+      `mempool_submissions_accepted_total ${this.submissionStats.accepted}`,
+      "# HELP mempool_submissions_rejected_total Total number of rejected submissions",
+      "# TYPE mempool_submissions_rejected_total counter",
+      `mempool_submissions_rejected_total ${this.submissionStats.rejected}`,
+      "# HELP mempool_rate_limit_rejections_total Total number of rate-limit rejections",
+      "# TYPE mempool_rate_limit_rejections_total counter",
+      `mempool_rate_limit_rejections_total ${this.rateLimitRejections}`,
     ];
 
     return lines.join("\n") + "\n";

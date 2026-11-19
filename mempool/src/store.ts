@@ -211,4 +211,13 @@ export class IntentStore {
   size(): number {
     return this.records.size;
   }
+
+  /**
+   * Number of records currently in `status`. O(1): reads the size of the
+   * per-status index set rather than visiting the store, so metrics scrapes
+   * do not scale with the number of retained records.
+   */
+  countByStatus(status: IntentStatus): number {
+    return this.byStatus.get(status)?.size ?? 0;
+  }
 }

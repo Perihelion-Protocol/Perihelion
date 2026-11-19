@@ -15,6 +15,8 @@ export interface MempoolConfig {
   readonly verifyingContract: Address;
   /** Shared bearer token for `PATCH /intents/:hash/status`, if configured. */
   readonly statusToken?: string;
+  /** Bearer token required on `GET /metrics`, if configured. */
+  readonly metricsToken?: string;
   /** Maximum number of intents retained in the store, if configured. */
   readonly maxStoreSize?: number;
   /** Grace period past expiry before an intent is pruned, in ms, if configured. */
@@ -104,6 +106,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   }
 
   const statusToken = env.PERIHELION_MEMPOOL_STATUS_TOKEN || undefined;
+  const metricsToken = env.PERIHELION_METRICS_TOKEN || undefined;
 
   // --- Optional: store and rate-limit tuning ---
   const maxStoreSize = optionalPositiveInt(
@@ -144,6 +147,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
     chainId,
     verifyingContract: escrowAddress as Address,
     statusToken,
+    metricsToken,
     maxStoreSize,
     expiryGraceMs,
     rateLimitWindowMs,

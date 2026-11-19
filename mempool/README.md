@@ -23,6 +23,7 @@ port or silently rejecting every submission.
 | `PORT` | No | `3000` | Integer in `1`–`65535`. |
 | `PERIHELION_MEMPOOL_HOST` | No | `localhost` | Non-loopback hosts log a no-auth warning. |
 | `PERIHELION_MEMPOOL_STATUS_TOKEN` | No | — | Bearer token required on `PATCH /intents/:hash/status`. |
+| `PERIHELION_METRICS_TOKEN` | No | — | Bearer token required on `GET /metrics`. Same variable the relayer and solver use. Unset leaves `/metrics` open. |
 
 The CLI installs `SIGINT`/`SIGTERM` handlers that stop the listener and let
 in-flight requests drain before the process exits.
