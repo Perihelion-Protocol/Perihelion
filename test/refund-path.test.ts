@@ -36,7 +36,10 @@ test("model/refund path: cancel from Stellar after deadline", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -106,7 +109,10 @@ test("model/refund path: local timeout on EVM", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -157,7 +163,10 @@ test("model/refund path: fill rejected if insufficient headroom", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -234,7 +243,10 @@ test("model/refund path: race — local timeout wins, late FillConfirmed rejecte
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -314,7 +326,10 @@ test("model/refund path: cannot cancel before deadline", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -375,7 +390,10 @@ test("model/refund path: value conserved across refund", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);

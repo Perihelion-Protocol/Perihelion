@@ -218,7 +218,10 @@ interface LockRecord {
 export class MockStellarAsset {
   private readonly balances = new Map<string, bigint>();
 
-  constructor(public readonly code: string, public readonly issuer: string) {}
+  constructor(
+    public readonly code: string,
+    public readonly issuer: string,
+  ) {}
 
   mint(address: string, amount: bigint): void {
     const current = this.balances.get(address) ?? 0n;
@@ -293,7 +296,9 @@ export class MockSettlement {
       throw new Error(`IntentExpired: ${intentHash}`);
     }
     if (intent.deadline - now < MIN_FILL_HEADROOM) {
-      throw new Error(`InsufficientHeadroom: deadline - now = ${intent.deadline - now}s, need >= ${MIN_FILL_HEADROOM}s`);
+      throw new Error(
+        `InsufficientHeadroom: deadline - now = ${intent.deadline - now}s, need >= ${MIN_FILL_HEADROOM}s`,
+      );
     }
     if (fillAmount < intent.minDestAmount) {
       throw new Error(`InsufficientFillAmount: ${fillAmount} < ${intent.minDestAmount}`);
