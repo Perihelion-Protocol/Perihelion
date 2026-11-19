@@ -11,13 +11,37 @@ import { loadConfig } from "../src/config.js";
 
 const VALID_ESCROW = "0x00000000000000000000000000000000000000aa";
 
+// The insecure-dev flag lets these tests exercise other validation without a
+// status token; the token requirement has its own tests below (#966).
 function baseEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     PERIHELION_SOURCE_CHAIN_ID: "8453",
     PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
+    PERIHELION_MEMPOOL_INSECURE_DEV: "1",
     ...overrides,
   };
 }
+
+test("loadConfig refuses to start without a status token (#966)", () => {
+  const env = baseEnv();
+  delete env.PERIHELION_MEMPOOL_INSECURE_DEV;
+  assert.throws(() => loadConfig(env), /PERIHELION_MEMPOOL_STATUS_TOKEN is required/);
+});
+
+test("loadConfig starts without a token only with PERIHELION_MEMPOOL_INSECURE_DEV=1 (#966)", () => {
+  const config = loadConfig(baseEnv({ PERIHELION_MEMPOOL_INSECURE_DEV: "1" }));
+  assert.equal(config.statusToken, undefined);
+  assert.throws(
+    () => loadConfig(baseEnv({ PERIHELION_MEMPOOL_INSECURE_DEV: "true" })),
+    /PERIHELION_MEMPOOL_STATUS_TOKEN is required/,
+  );
+});
+
+test("loadConfig accepts a status token without the insecure-dev flag (#966)", () => {
+  const env = baseEnv({ PERIHELION_MEMPOOL_STATUS_TOKEN: "shhh" });
+  delete env.PERIHELION_MEMPOOL_INSECURE_DEV;
+  assert.equal(loadConfig(env).statusToken, "shhh");
+});
 
 test("loadConfig returns a validated config and applies defaults", () => {
   const config = loadConfig(baseEnv());

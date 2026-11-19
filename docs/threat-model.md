@@ -610,7 +610,8 @@ Even if the endpoint is compromised and funds are incorrectly released:
 
 - **Deadline expiry:** If the user's intent deadline passes without a valid
   FillConfirmed being received on Soroban, the user can always call
-  `cancel_expired_intent()` to refund their collateral
+  `cancel_expired_intent()` to refund their collateral (timing bounds are in
+  [`clock-and-deadline-analysis.md`](./clock-and-deadline-analysis.md))
 - **Permissionless:** Anyone can call this; a compromised endpoint cannot
   prevent refunds
 - **Mechanism:** Protects against loss only if the release on EVM was forged
