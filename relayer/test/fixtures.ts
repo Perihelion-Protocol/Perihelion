@@ -8,9 +8,9 @@
  * visible, intentional fixture update instead of breaking many tests.
  */
 
-/** A well-formed Stellar `S…` strkey (regex-validated by config.ts). */
+/** A well-formed Stellar `S…` strkey with a valid checksum, encoded from 32 fixed 0x42 bytes (test only, holds no funds). */
 export const VALID_SIGNER_SECRET =
-  "SBZVMB74Z76QB3ZL2YFBN7EWUIXVXSNXKNQRIPZTKMZDDQ3FJBNRHWBU";
+  "SBBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEE5BQ";
 
 export const VALID_ESCROW = "0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA";
 export const VALID_CONTRACT =

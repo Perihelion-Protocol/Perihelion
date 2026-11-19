@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+import { isValidEd25519SecretSeed } from "./strkey.js";
+
 /** Relayer runtime configuration, loaded from environment variables. */
 
 export interface RelayerConfig {
@@ -77,6 +79,42 @@ export const PUBNET_PASSPHRASE = "Public Global Stellar Network ; September 2015
 
 /** Accepted truthy values for boolean environment flags. */
 const TRUTHY_RE = /^(1|true|yes|on)$/i;
+
+/** Largest LayerZero endpoint id: endpoint ids are uint32 on-chain. */
+const MAX_ENDPOINT_ID = 0xffff_ffff;
+
+/**
+ * Parse a base-10 integer from an environment value. Only ASCII digits are
+ * accepted, so fractions ("1.5"), exponents ("1e3"), signs and empty strings
+ * are rejected. Returns undefined when the value is not an integer in
+ * [min, max].
+ */
+function parseIntegerInRange(raw: string, min: number, max: number): number | undefined {
+  if (!/^\d+$/.test(raw)) return undefined;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : undefined;
+}
+
+/**
+ * Read an optional integer setting. Falls back to `fallback` when unset and
+ * records an error naming the variable when the value is malformed.
+ */
+function readIntegerEnv(
+  errors: string[],
+  name: string,
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (raw === undefined) return fallback;
+  const value = parseIntegerInRange(raw, min, max);
+  if (value === undefined) {
+    errors.push(`${name} must be an integer between ${min} and ${max}, got: "${raw}"`);
+    return fallback;
+  }
+  return value;
+}
 
 /** 0x-prefixed 20-byte EVM address. */
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -158,8 +196,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
   // --- Required: Stellar RPC URL ---
   // Preferred name is PERIHELION_SOROBAN_RPC_URL; the old
   // PERIHELION_STELLAR_RPC_URL is accepted as a deprecated alias.
-  const stellarRpcUrl =
-    env.PERIHELION_SOROBAN_RPC_URL ?? env.PERIHELION_STELLAR_RPC_URL ?? "";
+  const stellarRpcUrl = env.PERIHELION_SOROBAN_RPC_URL ?? env.PERIHELION_STELLAR_RPC_URL ?? "";
   if (!stellarRpcUrl) {
     errors.push(
       "PERIHELION_SOROBAN_RPC_URL is required (deprecated alias: PERIHELION_STELLAR_RPC_URL)",
@@ -175,17 +212,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     warnDeprecated("PERIHELION_STELLAR_RPC_URL", "PERIHELION_SOROBAN_RPC_URL");
   }
 
-  // --- Required: source EID (positive integer) ---
-  const sourceEid = Number(env.PERIHELION_SOURCE_EID ?? "");
-  if (!env.PERIHELION_SOURCE_EID || Number.isNaN(sourceEid) || sourceEid <= 0) {
-    errors.push("PERIHELION_SOURCE_EID is required and must be a positive integer");
+  // --- Required: source EID (uint32 LayerZero endpoint id) ---
+  const parsedSourceEid = parseIntegerInRange(env.PERIHELION_SOURCE_EID ?? "", 1, MAX_ENDPOINT_ID);
+  if (parsedSourceEid === undefined) {
+    errors.push(
+      `PERIHELION_SOURCE_EID is required and must be a positive integer no greater than ${MAX_ENDPOINT_ID}` +
+        (env.PERIHELION_SOURCE_EID ? `, got: "${env.PERIHELION_SOURCE_EID}"` : ""),
+    );
   }
+  const sourceEid = parsedSourceEid ?? 0;
 
-  // --- Required: stellar EID (positive integer) ---
-  const stellarEid = Number(env.PERIHELION_STELLAR_EID ?? "");
-  if (!env.PERIHELION_STELLAR_EID || Number.isNaN(stellarEid) || stellarEid <= 0) {
-    errors.push("PERIHELION_STELLAR_EID is required and must be a positive integer");
+  // --- Required: stellar EID (uint32 LayerZero endpoint id) ---
+  const parsedStellarEid = parseIntegerInRange(
+    env.PERIHELION_STELLAR_EID ?? "",
+    1,
+    MAX_ENDPOINT_ID,
+  );
+  if (parsedStellarEid === undefined) {
+    errors.push(
+      `PERIHELION_STELLAR_EID is required and must be a positive integer no greater than ${MAX_ENDPOINT_ID}` +
+        (env.PERIHELION_STELLAR_EID ? `, got: "${env.PERIHELION_STELLAR_EID}"` : ""),
+    );
   }
+  const stellarEid = parsedStellarEid ?? 0;
 
   // --- Required: Stellar network passphrase ---
   const stellarNetwork = env.STELLAR_NETWORK ?? "";
@@ -197,9 +246,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
   const signerSecret = env.SIGNER_SECRET ?? "";
   if (!signerSecret) {
     errors.push("SIGNER_SECRET is required");
-  } else if (!STELLAR_SECRET_RE.test(signerSecret)) {
+  } else if (!STELLAR_SECRET_RE.test(signerSecret) || !isValidEd25519SecretSeed(signerSecret)) {
     errors.push(
-      "SIGNER_SECRET must be a valid Stellar secret key (S…, 56 chars)",
+      "SIGNER_SECRET must be a valid Stellar secret key (S…, 56 chars, with a valid checksum)",
     );
   }
 
@@ -211,29 +260,38 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     );
   }
 
-  const pollIntervalMs = Number(env.PERIHELION_POLL_INTERVAL_MS ?? 5_000);
-  if (Number.isNaN(pollIntervalMs) || pollIntervalMs <= 0) {
-    errors.push(
-      `PERIHELION_POLL_INTERVAL_MS must be a positive integer, got: "${env.PERIHELION_POLL_INTERVAL_MS}"`,
-    );
-  }
+  const pollIntervalMs = readIntegerEnv(
+    errors,
+    "PERIHELION_POLL_INTERVAL_MS",
+    env.PERIHELION_POLL_INTERVAL_MS,
+    5_000,
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
 
-  const startBlock = Number(env.PERIHELION_START_BLOCK ?? 0);
-  if (Number.isNaN(startBlock) || startBlock < 0) {
-    errors.push(
-      `PERIHELION_START_BLOCK must be a non-negative integer, got: "${env.PERIHELION_START_BLOCK}"`,
-    );
-  }
+  const startBlock = readIntegerEnv(
+    errors,
+    "PERIHELION_START_BLOCK",
+    env.PERIHELION_START_BLOCK,
+    0,
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
 
   const txTimeoutSeconds = Number(env.PERIHELION_TX_TIMEOUT_SECONDS ?? 30);
-  if (Number.isNaN(txTimeoutSeconds) || txTimeoutSeconds <= 0 || !Number.isInteger(txTimeoutSeconds)) {
+  if (
+    Number.isNaN(txTimeoutSeconds) ||
+    txTimeoutSeconds <= 0 ||
+    !Number.isInteger(txTimeoutSeconds)
+  ) {
     errors.push(
       `PERIHELION_TX_TIMEOUT_SECONDS must be a positive integer, got: "${env.PERIHELION_TX_TIMEOUT_SECONDS}"`,
     );
   }
 
   const checkpointFile = env.PERIHELION_CHECKPOINT_FILE || "./.perihelion-relayer-checkpoint.json";
-  const deadLetterFile = env.PERIHELION_DEAD_LETTER_FILE || "./.perihelion-relayer-dead-letter.json";
+  const deadLetterFile =
+    env.PERIHELION_DEAD_LETTER_FILE || "./.perihelion-relayer-dead-letter.json";
 
   const healthPort = Number(env.PERIHELION_HEALTH_PORT ?? 8080);
   if (!Number.isInteger(healthPort) || healthPort < 1 || healthPort > 65_535) {
