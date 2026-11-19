@@ -1193,6 +1193,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             destAssetField, // 69 bytes offset 94
             uint128(intent.minDestAmount), // 16 bytes offset 163
             uint64(intent.deadline), // 8  bytes offset 179
+            // The canonical locking solver, not the user preference: this field is the
+            // cross-chain exclusivity binding and is never an alias/payout field.
             bytes32(uint256(uint160(lockingSolver))), // 32 bytes offset 187
             uint64(0) // 8 bytes offset 219; no reservation in legacy EVM intents
                 // reservation_window is explicit and zero until the signed EVM intent schema adds it.
