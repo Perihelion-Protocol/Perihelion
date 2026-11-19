@@ -228,12 +228,12 @@ pub const RECIPIENT_TYPE_CONTRACT: u8 = 0x10; // C... contract (0x02 << 3)
 ///
 /// `recipient` contains the full Stellar strkey text (56 bytes), while `dest_asset`
 /// contains its canonical text form (up to 69 bytes). Both are decoded into Soroban
-/// `Address` objects at the adapter boundary.
+/// `Address` objects at the adapter boundary. The body carries no source eid: the
+/// routing eid is the authenticated LayerZero origin (#1051).
 #[contracttype]
 #[derive(Clone)]
 pub struct FillInstruction {
     pub intent_hash: BytesN<32>,
-    pub src_eid: u32,
     pub recipient: Address,
     pub dest_asset: Address,
     pub min_dest_amount: i128,

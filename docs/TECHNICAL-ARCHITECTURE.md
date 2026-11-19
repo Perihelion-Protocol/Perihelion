@@ -954,7 +954,7 @@ fields. Amounts are unsigned 128-bit in the asset's smallest unit.
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 2 | 32 | `intent_hash` | EIP-712 id (I5). |
-| 34 | 4 | `src_eid` | LayerZero eid of the locking chain (redundant with envelope; included for self-containment of the record). |
+| 34 | 4 | `reserved` | Always zero on the wire. The Soroban decoder ignores it: the locking chain's eid is the authenticated LayerZero origin (`origin.src_eid`), never a body field. Replaces the former `src_eid` slot (#1051). |
 | 38 | 56 | `recipient` | Full Stellar account or contract strkey text, right-zero-padded if needed. |
 | 94 | 69 | `dest_asset` | Canonical Stellar asset text, including `CODE:ISSUER`, right-zero-padded if needed. |
 | 163 | 16 | `min_dest_amount` | u128 slippage floor. |
@@ -2167,21 +2167,15 @@ an eid they only receive from (or only send to) will get an asymmetric
 configuration that is logically incorrect, even though the two maps are one
 and the same data structure.
 
-### 10.2 Two distinct meanings of `src_eid`
+### 10.2 A single source of truth for `src_eid`
 
-There are two values in the system that are both called "src_eid" but refer to
-different things:
-
-| Name | Where it appears | Meaning |
-|------|-----------------|---------|
-| `origin.src_eid` | `lz_receive` parameter | LayerZero transport source — the endpoint id of the chain that **sent this LayerZero message**. Authenticated by the endpoint before delivery. |
-| `fi.src_eid` | Inside `FillInstruction` payload | Intent source eid — the chain that holds the **locked funds** and to which `FillConfirmed`/`CancelIntent` must be sent. |
-
-For well-formed messages from a compliant EVM escrow these two values are always
-equal: the escrow sends `FillInstruction` from its own chain and embeds its own
-`src_eid` in the payload. In all known deployments they are the same. However,
-`dispatch` uses `fi.src_eid` (from the record), not `origin.src_eid` (from
-delivery), so it is `fi.src_eid` that matters for settlement routing.
+`src_eid` now has exactly one meaning: `origin.src_eid`, the LayerZero transport
+source, i.e. the endpoint id of the chain that **sent this message**. The endpoint
+authenticates it before delivery. The `FillInstruction` payload carries no eid
+(offset 34 is `reserved`, always zero, and ignored by the decoder), so the
+`IntentRecord.src_eid` used for settlement routing is always the authenticated
+transport value. This removes the former confused-deputy hazard in which a body
+field could be mistaken for the routing eid (#1051).
 
 ### 10.3 Registration-time peer guard (anti-stranding)
 
@@ -2191,7 +2185,7 @@ configured peer. The intent would fill successfully on Stellar, but
 when trying to look up `Peer(rec.src_eid)` for the outbound send — permanently
 stranding the filled intent with no way to repay the solver.
 
-**The fix.** `on_fill_instruction` now checks `Peer(fi.src_eid)` exists before
+**The fix.** `on_fill_instruction` now checks `Peer(transport_src_eid)` exists before
 writing the `IntentRecord`. If no peer is configured for the intent's source
 eid, registration fails with `UntrustedPeer` (error 163). The LayerZero message
 is rejected and can be replayed after the operator calls `set_peer` for the

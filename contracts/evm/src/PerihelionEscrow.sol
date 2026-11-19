@@ -1107,7 +1107,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @dev Encode a FillInstruction payload (227 bytes) using the fixed big-endian
     ///      layout from architecture spec §3.3, matching the Soroban decoder byte-for-byte:
     ///
-    ///      version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56)
+    ///      version(1) | type(1) | intent_hash(32) | reserved(4) | recipient(56)
     ///        | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
     ///        | reservation_window(8)
     ///
@@ -1131,7 +1131,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             PROTOCOL_VERSION, // 1  byte  offset 0
             MSG_FILL_INSTRUCTION, // 1  byte  offset 1
             intentHash, // 32 bytes offset 2
-            uint32(stellarEid), // 4  bytes offset 34
+            uint32(0), // 4  bytes offset 34: reserved, always zero; the Soroban
+                //    decoder ignores it and takes the origin eid from transport
             _padRight(bytes(intent.destination), 56), // 56 bytes offset 38
             _padRight(bytes(intent.destAsset), 69), // 69 bytes offset 94
             uint128(intent.minDestAmount), // 16 bytes offset 163

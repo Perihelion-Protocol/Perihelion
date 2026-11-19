@@ -202,7 +202,6 @@ fn fill_instruction_matches_golden_vector() {
 
     let fi = crate::types::FillInstruction {
         intent_hash: BytesN::from_array(&env, &[0xAAu8; 32]),
-        src_eid: 30316,
         recipient,
         dest_asset,
         min_dest_amount: 1_000_000_000,
@@ -289,7 +288,7 @@ fn fill_instruction_recipient_round_trips_with_227_byte_format() {
     payload.push_back(PROTOCOL_VERSION);
     payload.push_back(MSG_FILL_INSTRUCTION);
     payload.append(&Bytes::from_array(&env, &[0xAAu8; 32])); // intent_hash
-    payload.append(&Bytes::from_array(&env, &30316u32.to_be_bytes())); // src_eid
+    payload.append(&Bytes::from_array(&env, &[0u8; 4])); // reserved (offset 34)
     payload.append(&Bytes::from_array(&env, &strkey_bytes)); // recipient (56 bytes, full strkey text)
     payload.append(&Bytes::from_array(&env, &dest_asset_bytes)); // dest_asset (69 bytes)
     payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes()));

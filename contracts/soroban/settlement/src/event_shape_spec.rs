@@ -104,7 +104,6 @@ fn deliver_fill_instruction(
 ) {
     let fi = FillInstruction {
         intent_hash: h.clone(),
-        src_eid: s.src_eid,
         recipient: recipient.clone(),
         dest_asset: dest_asset.clone(),
         min_dest_amount: 100,

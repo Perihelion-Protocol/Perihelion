@@ -5,6 +5,12 @@ import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 
 /// @dev Exposes the escrow's internal inbound decoders for direct testing.
+/// @dev The escrow constructor registers itself as the endpoint delegate; the
+///      conformance tests only need that call to succeed.
+contract StubEndpointV2 {
+    function setDelegate(address) external { }
+}
+
 contract DecoderHarness is PerihelionEscrow {
     constructor(address endpoint_, uint32 eid_) PerihelionEscrow(endpoint_, eid_) { }
 
@@ -82,7 +88,7 @@ contract WireFormatConformanceTest is Test {
         "CDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZLND";
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), 30_316);
+        harness = new DecoderHarness(address(new StubEndpointV2()), 30_316);
     }
 
     function _readVector(string memory name) internal view returns (bytes memory) {
@@ -200,16 +206,14 @@ contract WireFormatConformanceTest is Test {
             encoded, golden, "Solidity encoder output must match fill_instruction.hex golden vector"
         );
 
-        // Issue #706: the src_eid slot (offset 34, 4 bytes) must be the source
-        // eid — the escrow's own LayerZero endpoint id — not the destination
-        // `stellarEid`. The harness is constructed with eid 30_316.
-        uint32 encodedSrcEid;
+        // Offset 34 is `reserved` (4 bytes). The escrow always writes zero there:
+        // the origin eid is authenticated by the LayerZero transport, so the body
+        // carries no eid that a router or the decoder could mistake for a route.
+        uint32 encodedReserved;
         assembly {
-            encodedSrcEid := shr(224, mload(add(add(encoded, 0x20), 34)))
+            encodedReserved := shr(224, mload(add(add(encoded, 0x20), 34)))
         }
-        assertEq(
-            encodedSrcEid, 30_316, "offset 34 must encode the source eid, not the destination eid"
-        );
+        assertEq(encodedReserved, 0, "offset 34 (reserved) must be zero");
     }
 
     /// @dev The other two canonical destAsset forms (`native`, `CODE:ISSUER`)
@@ -343,17 +347,17 @@ contract FillInstructionEncodeTest is Test {
     uint32 internal constant STELLAR_EID = 30_316;
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), STELLAR_EID);
+        harness = new DecoderHarness(address(new StubEndpointV2()), STELLAR_EID);
     }
 
     function _baseIntent() internal view returns (PerihelionEscrow.Intent memory) {
         return PerihelionEscrow.Intent({
             user: address(0xA1),
-            destination: "GUSERSTELLARADDRESSFIXEDLENGTH56CHARS123", // will be padded
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF", // exactly 56 chars
             sourceChainId: block.chainid,
             sourceAsset: address(0xA2),
             sourceAmount: 1_000_000,
-            destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV",
+            destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
             minDestAmount: 990_000,
             deadline: 9_999_999,
             nonce: 1,
@@ -371,7 +375,7 @@ contract FillInstructionEncodeTest is Test {
     /// The full 69-byte destAsset appears at offset 94 in the payload.
     function test_DestAsset69BytesPreserved() public view {
         // Use a CODE:ISSUER asset whose issuer is 56 chars (total 69 bytes with CODE: prefix).
-        string memory fullAsset = "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV";
+        string memory fullAsset = "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
         assertEq(bytes(fullAsset).length, 61); // "USDC:" (5) + 56 char issuer
 
         PerihelionEscrow.Intent memory intent = _baseIntent();

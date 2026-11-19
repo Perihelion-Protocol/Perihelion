@@ -1295,10 +1295,7 @@ impl Perihelion {
             .get(&DataKey::DispatchKeeperReward)
             .unwrap_or(0);
         let reward_eligible = caller != solver
-            && env
-                .ledger()
-                .sequence()
-                .saturating_sub(rec.fill_ledger)
+            && env.ledger().sequence().saturating_sub(rec.fill_ledger)
                 >= DISPATCH_REWARD_GRACE_LEDGERS;
         if dispatch_reward > 0 && reward_eligible {
             if let Some(native_token) = env.storage().instance().get(&DataKey::NativeToken) {
@@ -2112,14 +2109,11 @@ impl Perihelion {
         transport_src_eid: u32,
         fi: FillInstruction,
     ) -> Result<(), PerihelionError> {
-        // The intent's return-path eid must equal the transport-authenticated
-        // origin eid. If they differ, a compromised or misconfigured adapter
-        // could declare a different src_eid in the body and route the eventual
-        // FillConfirmed/CancelIntent to a different chain than the one that
-        // actually locked the funds. We override fi.src_eid with the transport
-        // value rather than just asserting-equal so that adapters are not
-        // required to populate the field (they may leave it zero); the
-        // authoritative value is always the transport origin.
+        // The source eid of the intent is always the transport-authenticated origin
+        // (`transport_src_eid`). The FillInstruction body carries no eid: offset 34
+        // is `reserved` and the decoder ignores it, so there is no body-declared
+        // value that could route FillConfirmed/CancelIntent to a different chain
+        // than the one that locked the funds (#1051).
         let key = DataKey::Intent(fi.intent_hash.clone());
         // Idempotent: ignore re-delivery of a known or finalized intent.
         if Self::is_finalized(env, &fi.intent_hash) || env.storage().persistent().has(&key) {
@@ -2148,17 +2142,10 @@ impl Perihelion {
         // Peer(rec.src_eid) to find the EVM escrow receiver). This is intentional
         // and documented in set_peer above.
         //
-        // Note on the two distinct src_eid values:
-        // - `origin.src_eid` (LayerZero transport source): the eid of the chain
-        //   that sent this LayerZero message. Already validated by lz_receive
-        //   against the registered peer before we arrive here.
-        // - `fi.src_eid` (intent source eid): the eid embedded inside the
-        //   FillInstruction payload, identifying which chain holds the locked
-        //   funds. For well-formed messages from a compliant EVM escrow these
-        //   two values are always equal (the escrow sets fi.src_eid = stellarEid
-        //   which is the Stellar endpoint id, NOT its own eid; see the EVM codec).
-        //   We validate against transport_src_eid because that is what dispatch
-        //   will use at settlement time (stored in rec.src_eid).
+        // `transport_src_eid` is the only source eid in play: the eid of the chain
+        // that sent this LayerZero message, authenticated by lz_receive against the
+        // registered peer. It is the value dispatch uses at settlement time (stored
+        // in rec.src_eid), so the peer check below validates exactly that value.
         if !env
             .storage()
             .instance()
@@ -2175,7 +2162,7 @@ impl Perihelion {
 
         let rec = IntentRecord {
             intent_hash: fi.intent_hash.clone(),
-            // Use transport_src_eid (authenticated) instead of fi.src_eid (body-declared).
+            // The authenticated transport origin is the only source eid (#1051).
             src_eid: transport_src_eid,
             recipient: fi.recipient,
             dest_asset: fi.dest_asset,
