@@ -61,6 +61,7 @@ interface IERC1271 {
 ///      | PeerSet                | -                                                   | peer                          | `peer_set`                     |
 ///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  | -                              |
 ///      | GuardianSet            | guardian                                            | -                             | -                              |
+///      | DelegateSet            | delegate                                            | -                             | -                              |
 ///      | PausedSet              | -                                                   | paused                        | `paused_set`                   |
 ///      | OwnershipTransferStart | previousOwner, newOwner                             | -                             | `admin_transfer_started`       |
 ///      | OwnershipTransferred   | previousOwner, newOwner                             | -                             | `admin_transfer_completed`     |
@@ -328,6 +329,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
+    event DelegateSet(address indexed delegate);
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -471,6 +473,18 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     function setGuardian(address newGuardian) external onlyOwner {
         guardian = newGuardian;
         emit GuardianSet(newGuardian);
+    }
+
+    /// @notice Rotate the LayerZero endpoint delegate: the address that controls this
+    ///         OApp's security configuration (DVNs, libraries, skip/clear/nilify of
+    ///         inbound packets). The constructor sets it to the deployer, and ownership
+    ///         transfer does not move it, so the deployment runbook must call this to
+    ///         hand the delegate to the timelock (#1036). Owner-only.
+    /// @param newDelegate Address to become the endpoint delegate; must be non-zero.
+    function setDelegate(address newDelegate) external onlyOwner {
+        if (newDelegate == address(0)) revert ZeroAddress();
+        endpoint.setDelegate(newDelegate);
+        emit DelegateSet(newDelegate);
     }
 
     /// @notice Emergency halt / resume. Blocks new locks only; local `cancelExpired`

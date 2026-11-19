@@ -223,7 +223,12 @@ contract MockERC1271Wallet {
 /// @dev Records the last outbound LayerZero send and can replay inbound messages
 ///      back into the escrow as if it were the canonical endpoint.
 contract MockEndpoint is ILayerZeroEndpointV2 {
-    function setDelegate(address) external { }
+    /// @dev Last delegate set via setDelegate (the escrow sets it in its constructor).
+    address public delegate;
+
+    function setDelegate(address _delegate) external {
+        delegate = _delegate;
+    }
 
     uint32 public lastDstEid;
     bytes32 public lastReceiver;
@@ -1530,6 +1535,34 @@ contract PerihelionEscrowTest is Test {
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig);
         assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    // --- LayerZero delegate (#1036) ------------------------------------------
+
+    event DelegateSet(address indexed delegate);
+
+    function test_ConstructorSetsEndpointDelegateToDeployer() public view {
+        assertEq(endpoint.delegate(), address(this));
+    }
+
+    function test_SetDelegateRotatesEndpointDelegate() public {
+        address newDelegate = address(0x71E1);
+        vm.expectEmit(true, false, false, false);
+        emit DelegateSet(newDelegate);
+        escrow.setDelegate(newDelegate);
+        assertEq(endpoint.delegate(), newDelegate);
+    }
+
+    function test_RevertWhen_SetDelegateNotOwner() public {
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.setDelegate(address(0x71E1));
+        assertEq(endpoint.delegate(), address(this));
+    }
+
+    function test_RevertWhen_SetDelegateZero() public {
+        vm.expectRevert(PerihelionEscrow.ZeroAddress.selector);
+        escrow.setDelegate(address(0));
     }
 
     // --- Rolling-window breaker (#1035) --------------------------------------

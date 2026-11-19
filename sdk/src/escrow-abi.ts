@@ -916,6 +916,19 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "setDelegate",
+    "inputs": [
+      {
+        "name": "newDelegate",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setGuardian",
     "inputs": [
       {
@@ -1171,6 +1184,19 @@ export const ESCROW_ABI = [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DelegateSet",
+    "inputs": [
+      {
+        "name": "delegate",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
       }
     ],
     "anonymous": false
