@@ -188,7 +188,10 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
      `x.y.z`, then run `npm install` and `cargo update -p perihelion-settlement
      --precise x.y.z` so the lockfiles stay consistent.
   3. Open a PR with just the version bump and changelog rename; once merged,
-     tag the resulting commit `vx.y.z` and push the tag.
+     tag the resulting commit `vx.y.z` and push the tag. Pushing the tag runs
+     `.github/workflows/release.yml`, which builds and attaches the packages.
+     The full steps, and the artefacts that are still manual, are in
+     [RELEASING.md](./RELEASING.md).
   - This monorepo does not yet use per-package independent versioning or
     changeset/release-please automation — all packages move together until
     a package reaches 1.0 and needs its own release cadence.
