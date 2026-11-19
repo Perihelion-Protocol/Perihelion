@@ -1656,6 +1656,11 @@ export const ESCROW_ABI = [
   },
   {
     "type": "error",
+    "name": "GuardianIsOwner",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "IntentExpired",
     "inputs": []
   },

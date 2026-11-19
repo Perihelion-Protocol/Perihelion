@@ -1729,6 +1729,60 @@ contract PerihelionEscrowTest is Test {
         escrow.decayGuardianPause();
     }
 
+    /// @dev Incident: leaked guardian pauses, the pause decays, and the cooldown
+    ///      locks out the guardian slot. Owner rotates to a fresh key, which must
+    ///      be able to pause at once rather than waiting out the old cooldown.
+    function test_GuardianRotation_NewGuardianPausesImmediately() public {
+        address leaked = address(0x6A);
+        address fresh = address(0x6B);
+        escrow.setGuardian(leaked);
+
+        vm.prank(leaked);
+        escrow.pause();
+        vm.warp(block.timestamp + escrow.GUARDIAN_PAUSE_TTL());
+        escrow.decayGuardianPause();
+        assertGt(escrow.guardianPauseCooldownUntil(), block.timestamp);
+
+        // Still inside the leaked key's cooldown: the old key is locked out.
+        vm.prank(leaked);
+        vm.expectRevert(PerihelionEscrow.GuardianCooldown.selector);
+        escrow.pause();
+
+        escrow.setGuardian(fresh);
+        assertEq(escrow.guardianPauseCooldownUntil(), 0);
+
+        vm.prank(fresh);
+        escrow.pause();
+        assertTrue(escrow.paused());
+    }
+
+    /// @dev An active pause started by the outgoing guardian is converted to an
+    ///      owner pause on rotation, so it cannot lapse on that key's TTL.
+    function test_GuardianRotation_ActivePauseBecomesOwnerControlled() public {
+        address leaked = address(0x6A);
+        escrow.setGuardian(leaked);
+
+        vm.prank(leaked);
+        escrow.pause();
+        escrow.setGuardian(address(0x6B));
+        assertEq(escrow.guardianPauseExpiry(), 0);
+
+        vm.warp(block.timestamp + escrow.GUARDIAN_PAUSE_TTL() + 1);
+        vm.expectRevert(PerihelionEscrow.PauseNotGuardianInitiated.selector);
+        escrow.decayGuardianPause();
+        assertTrue(escrow.paused());
+
+        // The owner resumes when the incident is over.
+        escrow.setPaused(false);
+        assertFalse(escrow.paused());
+    }
+
+    function test_RevertWhen_GuardianSetToOwner() public {
+        vm.expectRevert(PerihelionEscrow.GuardianIsOwner.selector);
+        escrow.setGuardian(owner);
+        assertEq(escrow.guardian(), address(0));
+    }
+
     function test_OwnerUnpause_ResetsGuardianCooldown() public {
         address g = address(0x6A);
         escrow.setGuardian(g);

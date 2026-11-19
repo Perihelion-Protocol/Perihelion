@@ -370,6 +370,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error NoPendingOwner();
     /// @dev `transferOwnership` was called with the current owner as the nominee.
     error TransferToCurrentOwner();
+    /// @dev `setGuardian` was called with the owner address; the roles must stay separate.
+    error GuardianIsOwner();
     /// @dev An address expected to be a contract (e.g. an allowlisted asset) has no code.
     error NotAContract();
     error NotAuthorized();
@@ -467,8 +469,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Set (or clear) the emergency guardian. Owner-only.
+    /// @dev Rotation resets the guardian's pause clock so the incoming key is not
+    ///      locked out by a cooldown earned by the outgoing one. An active
+    ///      guardian-initiated pause is converted to an owner pause (no auto-expiry):
+    ///      the owner is the party handling the rotation, and the pause must not
+    ///      lapse on the outgoing key's TTL. The owner resumes with {setPaused}.
+    ///      Reverts with {GuardianIsOwner} if `newGuardian` is the owner.
     /// @param newGuardian Address of the new guardian (use address(0) to clear).
     function setGuardian(address newGuardian) external onlyOwner {
+        if (newGuardian == owner) revert GuardianIsOwner();
+        guardianPauseCooldownUntil = 0;
+        guardianPauseExpiry = 0; // no-op unless a guardian pause is active
         guardian = newGuardian;
         emit GuardianSet(newGuardian);
     }
