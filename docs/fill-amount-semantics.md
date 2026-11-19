@@ -1,3 +1,9 @@
+# Fill Amount Semantics
+
+How `fill_amount` relates to `min_dest_amount` and the locked source amount.
+The cross-chain wire format and state machine are in
+[TECHNICAL-ARCHITECTURE.md](./TECHNICAL-ARCHITECTURE.md) (§2 and §3).
+
 ## Fill Amount Semantics
 
 ### Current Behavior (All-or-Nothing)

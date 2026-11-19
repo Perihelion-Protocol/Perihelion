@@ -7,7 +7,6 @@ scopeable issues that contributors at every level can meaningfully tackle.
 This file is the quick-start. The full contributor playbook — issue taxonomy by
 skill and Wave cycle, PR review process, and the path from first-time
 contributor to maintainer — lives in
-[`docs/CONTRIBUTING.md`](./docs/CONTRIBUTING.md) and
 [the architecture spec, §9](./docs/TECHNICAL-ARCHITECTURE.md#9-contribution-guide-for-drips-wave).
 
 ## Code of Conduct
@@ -158,6 +157,14 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
 
 - Keep PRs focused — one logical change per PR is easier to review and merge.
 - PR titles must also follow conventional commits (also enforced by CI).
+- Triage conclusions (for example "already fixed on `main`, no change needed")
+  belong in the issue or PR comment thread, not in files committed to the
+  repository. Do not add per-contributor notes or scratch triage files to the
+  tree.
+- Name test files after the module or behaviour they cover (`quote.test.ts`,
+  `cursor-validation.test.ts`), not after the issue that prompted them. Keep
+  issue numbers in test names or `describe` titles for traceability, for
+  example `describe("evaluate: malformed preferredSolver handling (#731)")`.
 - Ensure CI is green: `npm test`, `cargo test`, `forge test`, and lints.
 - **Invariants first.** Reviewers check every contract PR against the protocol's
   [design invariants](./docs/TECHNICAL-ARCHITECTURE.md#0-design-invariants-read-first);

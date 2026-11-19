@@ -85,7 +85,6 @@ npm run dev
 | ---------------------------- | -------------------------------------------------------------- |
 | `PERIHELION_RELAYER_MODE`    | Must be `dev`; any other value (or unset) refuses to start.    |
 | `PERIHELION_STELLAR_NETWORK` | Stellar network; `pubnet`/`public` is refused in `dev` mode.   |
-=======
 
 ## Customizing
 

@@ -27,7 +27,7 @@ import {
 } from "@stellar/stellar-sdk";
 import {
   ESCROW_ABI,
-  IntentStatus,
+  OnChainIntentStatus,
   decodeIntentStatus,
   submitAndWait,
 } from "@perihelion/sdk";
@@ -466,7 +466,9 @@ export class Executor {
     }
 
     const status = decodeIntentStatus(simulated.result.retval);
-    return status === IntentStatus.Filled || status === IntentStatus.ConfirmationSent;
+    return (
+      status === OnChainIntentStatus.Filled || status === OnChainIntentStatus.ConfirmationSent
+    );
   }
 
   /**
