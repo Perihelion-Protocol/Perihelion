@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
+import { StubEndpoint } from "./StubEndpoint.sol";
 
 /// @dev Differential fuzzer: cross-validate Solidity encode/decode against Rust.
 /// Generates random structured messages, encodes them, and asserts symmetric
@@ -30,7 +31,7 @@ contract DifferentialFuzzTest is Test {
     string internal constant CORPUS_DIR = "../shared/wire-vectors/fuzz-corpus/";
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), 30_316);
+        harness = new DecoderHarness(address(new StubEndpoint()), 30_316);
     }
 
     // -------------------------------------------------------------------------

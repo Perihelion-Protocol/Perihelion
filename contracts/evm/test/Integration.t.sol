@@ -125,6 +125,7 @@ contract IntegrationTest is Test {
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
         escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
         vm.deal(solver, 10 ether);
     }
 
@@ -163,7 +164,7 @@ contract IntegrationTest is Test {
         assertEq(token.balanceOf(address(escrow)), 100_000);
 
         // Stellar settles and confirms back; the escrow pays the solver.
-        relay.deliverFillConfirmed(h, solver, 100_000, 42);
+        relay.deliverFillConfirmed(h, solver, 990_000, 42);
 
         assertEq(token.balanceOf(solver), 100_000);
         assertEq(token.balanceOf(address(escrow)), 0);
@@ -177,8 +178,11 @@ contract IntegrationTest is Test {
     function test_RoundTrip_PayoutAddressIndependentOfLocker() public {
         address payout = address(0xDECAF0);
         bytes32 h = _lock(_intent(1));
+        // Before the deadline the lock is reserved for its locking solver
+        // (ReservedForSolver); the payout-independence property applies after it.
+        vm.warp(block.timestamp + 601);
 
-        relay.deliverFillConfirmed(h, payout, 100_000, 42);
+        relay.deliverFillConfirmed(h, payout, 990_000, 42);
 
         assertEq(token.balanceOf(payout), 100_000);
         assertEq(token.balanceOf(solver), 0);
@@ -206,7 +210,7 @@ contract IntegrationTest is Test {
 
         // The relay's late settlement reverts inside lzReceive.
         vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
-        relay.deliverFillConfirmed(h, solver, 100_000, 99);
+        relay.deliverFillConfirmed(h, solver, 990_000, 99);
     }
 
     /// Two concurrent intents resolve independently, and value is conserved.
@@ -215,7 +219,7 @@ contract IntegrationTest is Test {
         bytes32 h2 = _lock(_intent(2));
         assertEq(token.balanceOf(address(escrow)), 200_000);
 
-        relay.deliverFillConfirmed(h1, solver, 100_000, 1);
+        relay.deliverFillConfirmed(h1, solver, 990_000, 1);
         relay.deliverCancel(h2, 0);
 
         assertEq(token.balanceOf(solver), 100_000); // settled leg paid out

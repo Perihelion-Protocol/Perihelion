@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
+import { StubEndpoint } from "./StubEndpoint.sol";
 
 /// @dev Exposes the escrow's internal inbound decoders for direct testing.
 contract DecoderHarness is PerihelionEscrow {
@@ -81,7 +82,7 @@ contract WireFormatConformanceTest is Test {
     string internal constant FI_DEST_ASSET_STR = "CDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZLND";
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), 30_316);
+        harness = new DecoderHarness(address(new StubEndpoint()), 30_316);
     }
 
     function _readVector(string memory name) internal view returns (bytes memory) {
@@ -319,7 +320,7 @@ contract FillInstructionEncodeTest is Test {
     uint32 internal constant STELLAR_EID = 30_316;
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), STELLAR_EID);
+        harness = new DecoderHarness(address(new StubEndpoint()), STELLAR_EID);
     }
 
     function _baseIntent() internal view returns (PerihelionEscrow.Intent memory) {

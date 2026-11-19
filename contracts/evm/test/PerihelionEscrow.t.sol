@@ -377,7 +377,7 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             intentHash,
             bytes32(uint256(uint160(solverEvm))),
-            uint128(100_000),
+            uint128(990_000), // >= the intent's minDestAmount (UnderDelivered otherwise)
             uint64(12_345)
         );
     }
@@ -414,6 +414,7 @@ contract PerihelionEscrowTest is Test {
         PerihelionEscrow.Intent memory intent = _intent();
         bytes memory sig = _sign(intent);
         bytes32 h = escrow.hashIntent(intent);
+        endpoint.setMockFee(0.01 ether); // the forwarded LayerZero fee is what the mock records
 
         vm.expectEmit(true, true, true, true);
         emit Locked(
@@ -466,6 +467,8 @@ contract PerihelionEscrowTest is Test {
         feeToken.mint(user, 1_000_000);
         vm.prank(user);
         feeToken.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(feeToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(feeToken), type(uint256).max);
 
         PerihelionEscrow.Intent memory intent = _intent();
         intent.sourceAsset = address(feeToken);
@@ -621,6 +624,7 @@ contract PerihelionEscrowTest is Test {
         newToken.approve(address(escrow), type(uint256).max);
 
         escrow.setAssetAllowed(address(newToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(newToken), type(uint256).max);
         assertTrue(escrow.assetAllowed(address(newToken)));
 
         PerihelionEscrow.Intent memory intent = _intent();
@@ -721,7 +725,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Released(h, solver, 100_000, 100_000, 12_345, 990_000);
+        emit Released(h, solver, 100_000, 990_000, 12_345, 990_000);
         _confirm(h, solver, 1);
 
         assertEq(token.balanceOf(solver), 100_000);
@@ -1110,6 +1114,8 @@ contract PerihelionEscrowTest is Test {
         noReturnToken.mint(user, 1_000_000);
         vm.prank(user);
         noReturnToken.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(noReturnToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(noReturnToken), type(uint256).max);
 
         PerihelionEscrow.Intent memory intent = _intent();
         intent.sourceAsset = address(noReturnToken);
@@ -1129,6 +1135,8 @@ contract PerihelionEscrowTest is Test {
         falseToken.mint(user, 1_000_000);
         vm.prank(user);
         falseToken.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(falseToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(falseToken), type(uint256).max);
 
         PerihelionEscrow.Intent memory intent = _intent();
         intent.sourceAsset = address(falseToken);
@@ -1144,6 +1152,8 @@ contract PerihelionEscrowTest is Test {
         heavyFeeToken.mint(user, 1_000_000);
         vm.prank(user);
         heavyFeeToken.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(heavyFeeToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(heavyFeeToken), type(uint256).max);
 
         PerihelionEscrow.Intent memory intent = _intent();
         intent.sourceAsset = address(heavyFeeToken);
@@ -1219,7 +1229,7 @@ contract PerihelionEscrowTest is Test {
     }
 
     /// @notice Symmetric: message amount smaller than locked still releases l.amount.
-    function test_FillConfirmedReleasesLockAmountWhenMessageAmountIsSmaller() public {
+    function test_FillConfirmedBelowMinDestRevertsAndHoldsFunds() public {
         bytes32 h = _lock(); // locks 100_000 tokens
 
         bytes memory msgWithSmallAmount = abi.encodePacked(
@@ -1227,13 +1237,14 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             h,
             bytes32(uint256(uint160(solver))),
-            uint128(1), // tiny — must NOT under-release
+            uint128(1), // tiny — must NOT release
             uint64(1)
         );
+        vm.expectRevert(PerihelionEscrow.UnderDelivered.selector);
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgWithSmallAmount);
 
-        assertEq(token.balanceOf(solver), 100_000);
-        assertEq(token.balanceOf(address(escrow)), 0);
+        assertEq(token.balanceOf(solver), 0);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
     }
 
     // --- FillConfirmed/CancelIntent codec: exact byte layout ----

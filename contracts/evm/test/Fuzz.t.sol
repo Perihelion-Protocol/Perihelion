@@ -31,6 +31,7 @@ contract PerihelionEscrowFuzzTest is Test {
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
         escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
         vm.deal(solver, 100 ether);
     }
 
@@ -72,7 +73,8 @@ contract PerihelionEscrowFuzzTest is Test {
 
     /// The escrow records and holds exactly the amount pulled, for any amount.
     function testFuzz_LockHoldsExactAmount(uint128 amount) public {
-        amount = uint128(bound(amount, 1, type(uint128).max));
+        // minDestAmount mirrors amount; the escrow caps minDestAmount at uint128.max >> 1.
+        amount = uint128(bound(amount, 1, type(uint128).max >> 1));
         PerihelionEscrow.Intent memory intent = _intent(amount, block.timestamp + 600);
         bytes memory sig = _sign(userPk, intent);
         bytes32 h = escrow.hashIntent(intent);
@@ -100,7 +102,8 @@ contract PerihelionEscrowFuzzTest is Test {
 
     /// Tampering with the amount after signing always invalidates the signature.
     function testFuzz_TamperedAmountRejected(uint128 signedAmount, uint128 sentAmount) public {
-        signedAmount = uint128(bound(signedAmount, 1, type(uint128).max - 1));
+        // minDestAmount mirrors the signed amount; keep it under uint128.max >> 1.
+        signedAmount = uint128(bound(signedAmount, 1, type(uint128).max >> 1));
         sentAmount = uint128(bound(sentAmount, 1, type(uint128).max));
         vm.assume(signedAmount != sentAmount);
 
@@ -242,8 +245,8 @@ contract PerihelionEscrowFuzzTest is Test {
     /// @dev Two intents with the same fields but different nonces produce distinct
     ///      intent hashes, so they can both be locked without collision.
     function testFuzz_NonceDifferentiatesIntents(uint128 amountA, uint128 amountB) public {
-        amountA = uint128(bound(amountA, 1, type(uint128).max - 1));
-        amountB = uint128(bound(amountB, 1, type(uint128).max));
+        amountA = uint128(bound(amountA, 1, type(uint128).max >> 1)); // minDestAmount cap
+        amountB = uint128(bound(amountB, 1, type(uint128).max >> 1));
         vm.assume(amountA != amountB);
 
         uint256 deadline = block.timestamp + 600;
@@ -344,7 +347,7 @@ contract PerihelionEscrowFuzzTest is Test {
             bytes1(0x02), // T_FILL_CONFIRMED
             intentHash,
             bytes32(uint256(uint160(address(0x5012E5)))), // solver
-            uint128(100_000),
+            uint128(type(uint128).max >> 1), // fill >= any fuzzed minDestAmount (UnderDelivered otherwise)
             uint64(12_345)
         );
     }

@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
+import { StubEndpoint } from "./StubEndpoint.sol";
 import { IERC20 } from "../src/IERC20.sol";
 
 /// @notice Issue #57 — Amount boundary conformance tests.
@@ -50,7 +51,7 @@ contract AmountBoundaryTest is Test {
     AmountBoundaryHarness internal harness;
 
     function setUp() public {
-        harness = new AmountBoundaryHarness(address(0x1), 30_316);
+        harness = new AmountBoundaryHarness(address(new StubEndpoint()), 30_316);
     }
 
     // -----------------------------------------------------------------------
