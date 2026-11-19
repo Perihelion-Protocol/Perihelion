@@ -24,13 +24,18 @@ import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 /// ## CI integration
 /// - Bounded run (100 cases): `forge test --match-contract DifferentialFuzz`
 /// - Extended nightly (10k cases): `forge test --match-contract DifferentialFuzz -vvv --fuzz-runs 10000`
+/// @dev Endpoint stub: the escrow constructor calls `setDelegate` and needs code.
+contract DiffFuzzNoopEndpoint {
+    function setDelegate(address) external { }
+}
+
 contract DifferentialFuzzTest is Test {
     DecoderHarness internal harness;
 
     string internal constant CORPUS_DIR = "../shared/wire-vectors/fuzz-corpus/";
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), 30_316);
+        harness = new DecoderHarness(address(new DiffFuzzNoopEndpoint()), 30_316);
     }
 
     // -------------------------------------------------------------------------
