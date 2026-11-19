@@ -377,14 +377,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error GraceTooShort();
     error FeeTooLow();
     error ZeroAddress();
-    error SourceChainMismatch();
     error StringFieldEmpty();
     error StringFieldTooLong();
     error GuardianCooldown();
     error PauseNotGuardianInitiated();
     error PauseNotExpired();
     error ExceedsMaxIntentAmount();
-    error RollingWindowCapExceeded();
     error RollingWindowCapAlreadyTriggered();
     error RollingWindowNotYetResettable();
     error InvalidDuration();

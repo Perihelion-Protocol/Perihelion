@@ -82,6 +82,12 @@ jobs:
       - name: Format check
         run: forge fmt --check
 
+      # Fails on custom errors that are declared but never reverted with; they
+      # inflate the ABI and suggest checks the contract does not perform.
+      - name: Unused custom errors
+        working-directory: .
+        run: node scripts/check-unused-errors.mjs
+
       - name: Build
         working-directory: .
         run: make build-evm
