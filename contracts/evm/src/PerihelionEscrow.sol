@@ -518,18 +518,40 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Asset allowlist (issue #335) -------------------------------------------
 
     /// @notice Set or revoke an asset's allowlist status. Owner-only.
+    /// @dev Revoking an asset also clears its per-asset configuration (max intent
+    ///      amount, rolling-window cap and the current rolling-window bucket) so
+    ///      that re-allowing the asset later starts from a clean slate rather than
+    ///      resurrecting stale caps or a stale bucket. If the revoked asset is the
+    ///      one that engaged the rolling-window breaker, the breaker is reset.
     /// @param asset Address of the ERC-20 token to allow or disallow.
     /// @param allowed True to add to allowlist, false to remove.
     function setAssetAllowed(address asset, bool allowed) external onlyOwner {
         if (allowed && asset.code.length == 0) revert NotAContract();
         assetAllowed[asset] = allowed;
+        if (!allowed) {
+            delete maxIntentAmountPerAsset[asset];
+            delete rollingWindowCapPerAsset[asset];
+            if (rollingWindowDuration > 0) {
+                uint256 windowStart =
+                    (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
+                delete _rollingWindowBuckets[asset][windowStart];
+            }
+            if (rollingWindowTriggeredAsset == asset) {
+                rollingWindowTriggeredAsset = address(0);
+                rollingWindowTriggered = false;
+            }
+        }
         emit AssetAllowed(asset, allowed);
     }
 
     /// @notice Set per-asset maximum lock amount. Owner-only. Overrides global cap.
+    /// @dev Shared precondition with {setRollingWindowCapForAsset}: the asset must
+    ///      be allowlisted, so governance cannot pre-stage caps for assets that
+    ///      were never vetted. Reverts with {AssetNotAllowed} otherwise.
     /// @param asset Address of the ERC-20 token.
     /// @param maxAmount Maximum lock amount for this asset, or 0 to use global cap.
     function setMaxIntentAmountPerAsset(address asset, uint256 maxAmount) external onlyOwner {
+        if (!assetAllowed[asset]) revert AssetNotAllowed();
         maxIntentAmountPerAsset[asset] = maxAmount;
         emit MaxIntentAmountPerAssetSet(asset, maxAmount);
     }
@@ -561,7 +583,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Set the rolling-window cap for one allowlisted asset.
     ///         Window accounting is isolated by asset; amounts from another
     ///         token can never consume this asset's bucket.
-
+    /// @dev Shared precondition with {setMaxIntentAmountPerAsset}: the asset must
+    ///      be allowlisted. Reverts with {AssetNotAllowed} otherwise.
     function setRollingWindowCapForAsset(address asset, uint256 _windowDuration, uint256 _cap)
         external
         onlyOwner

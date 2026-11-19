@@ -750,6 +750,78 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
     }
 
+    // --- Per-asset admin setters share the allowlist precondition (Issue #1055) ---
+
+    function test_RevertWhen_SetMaxIntentAmountPerAssetNotAllowed() public {
+        MockERC20 unknownToken = new MockERC20();
+        assertFalse(escrow.assetAllowed(address(unknownToken)));
+
+        vm.expectRevert(PerihelionEscrow.AssetNotAllowed.selector);
+        escrow.setMaxIntentAmountPerAsset(address(unknownToken), 1_000);
+    }
+
+    function test_RevertWhen_SetMaxIntentAmountPerAssetEOA() public {
+        address eoa = address(0xE0A);
+        vm.expectRevert(PerihelionEscrow.AssetNotAllowed.selector);
+        escrow.setMaxIntentAmountPerAsset(eoa, 1_000);
+    }
+
+    function test_RevertWhen_SetMaxIntentAmountPerAssetZeroAddress() public {
+        vm.expectRevert(PerihelionEscrow.AssetNotAllowed.selector);
+        escrow.setMaxIntentAmountPerAsset(address(0), 1_000);
+    }
+
+    function test_RevertWhen_SetRollingWindowCapForAssetNotAllowed() public {
+        MockERC20 unknownToken = new MockERC20();
+        vm.expectRevert(PerihelionEscrow.AssetNotAllowed.selector);
+        escrow.setRollingWindowCapForAsset(address(unknownToken), 1_000);
+    }
+
+    /// @notice Full flow: allowlist -> set caps -> disallow (caps/bucket cleared)
+    ///         -> re-allow (caps stay zero until explicitly reconfigured).
+    function test_DisallowAssetClearsCapsAndReAllowRequiresReconfiguration() public {
+        MockERC20 newToken = new MockERC20();
+        newToken.mint(user, 1_000_000);
+        vm.prank(user);
+        newToken.approve(address(escrow), type(uint256).max);
+
+        // 1. Allowlist and configure caps.
+        escrow.setAssetAllowed(address(newToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(newToken), 500_000);
+        escrow.setRollingWindowCapForAsset(address(newToken), 400_000);
+
+        assertEq(escrow.maxIntentAmountPerAsset(address(newToken)), 500_000);
+        assertEq(escrow.rollingWindowCap(address(newToken)), 400_000);
+
+        // 2. Disallow: per-asset cap, window cap and rolling bucket are cleared.
+        escrow.setAssetAllowed(address(newToken), false);
+        assertFalse(escrow.assetAllowed(address(newToken)));
+        assertEq(escrow.maxIntentAmountPerAsset(address(newToken)), 0);
+        assertEq(escrow.rollingWindowCap(address(newToken)), 0);
+        assertEq(escrow.rollingWindowUsed(address(newToken)), 0);
+
+        // 3. Re-allow: caps stay at zero until explicitly reconfigured.
+        escrow.setAssetAllowed(address(newToken), true);
+        assertTrue(escrow.assetAllowed(address(newToken)));
+        assertEq(escrow.maxIntentAmountPerAsset(address(newToken)), 0);
+        assertEq(escrow.rollingWindowCap(address(newToken)), 0);
+
+        // With a zero cap, locking against the re-allowed asset is rejected.
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(newToken);
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.IntentTooLarge.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        // Explicit reconfiguration restores usability.
+        escrow.setMaxIntentAmountPerAsset(address(newToken), type(uint256).max);
+        escrow.setRollingWindowCapForAsset(address(newToken), type(uint256).max);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(newToken.balanceOf(address(escrow)), 100_000);
+    }
+
     // --- String field validation --------------------------------------------
 
     /// Build a string of `n` repeated 'A' bytes.

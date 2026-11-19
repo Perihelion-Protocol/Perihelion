@@ -689,6 +689,211 @@ contract PerihelionTimelockTest is Test {
         assertEq(target.value(), 99);
     }
 
+    // --- Owner rotation must not pre-arm the delay clock (issue #1056) ------
+
+    /// @notice AC (#1056): a confirmation from an owner who is later removed
+    ///         must not start the delay clock. The clock starts only when the
+    ///         current owner set first reaches the threshold, so execute cannot
+    ///         succeed before `delay` has elapsed since that moment.
+    function test_RemovedOwnerConfirmation_DoesNotStartDelayClock() public {
+        // 2-of-3 timelock: a, b, c.
+        bytes memory data = _setValueData(123);
+        bytes32 id = tl.hashOperation(address(target), 0, data, SALT);
+
+        // a proposes and confirms; b confirms — threshold reached, clock armed.
+        vm.prank(a);
+        tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        (, uint64 readyAtBefore,,) = tl.operations(id);
+        assertGt(readyAtBefore, 0, "clock armed by a+b");
+
+        // Remove b through governance (a and c confirm the removal).
+        bytes memory removeData = abi.encodeWithSelector(PerihelionTimelock.removeOwner.selector, b);
+        bytes32 removeId = tl.hashOperation(address(tl), 0, removeData, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, removeData, SALT);
+        vm.prank(c);
+        tl.confirm(removeId);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(tl), 0, removeData, SALT);
+        assertFalse(tl.isOwner(b), "b must be removed");
+
+        // Add a fresh owner d through governance (a and c confirm).
+        address d = address(0xD4);
+        bytes memory addData = abi.encodeWithSelector(PerihelionTimelock.addOwner.selector, d);
+        bytes32 addId = tl.hashOperation(address(tl), 0, addData, SALT);
+        vm.prank(a);
+        tl.propose(address(tl), 0, addData, SALT);
+        vm.prank(c);
+        tl.confirm(addId);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        tl.execute(address(tl), 0, addData, SALT);
+        assertTrue(tl.isOwner(d), "d must be added");
+
+        // Current owner set is {a, c, d}. The pending op has only a's live
+        // confirmation (b's no longer counts). d confirms: live threshold met
+        // now, so the delay clock must start now, not earlier.
+        vm.prank(d);
+        tl.confirm(id);
+        (, uint64 readyAtAfter,,) = tl.operations(id);
+        assertEq(readyAtAfter, block.timestamp + DELAY, "clock starts when live set hits threshold");
+
+        // Immediately after the live threshold: not ready.
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.NotReady.selector);
+        tl.execute(address(target), 0, data, SALT);
+
+        // One second before the full delay has elapsed: still not ready.
+        vm.warp(readyAtAfter - 1);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.NotReady.selector);
+        tl.execute(address(target), 0, data, SALT);
+
+        // After the full delay since the live set reached threshold: executes.
+        vm.warp(readyAtAfter);
+        vm.prank(a);
+        tl.execute(address(target), 0, data, SALT);
+        assertEq(target.value(), 123);
+    }
+
+    // --- Cancel votes from removed owners & revokeCancel (issue #1057) ------
+
+    /// @notice AC (#1057): a cancel vote from an owner who has since been
+    ///         removed must not count towards the live cancel threshold.
+    function test_RemovedOwnerCancelVote_DoesNotCountTowardsThreshold() public {
+        // 3-of-4 timelock so removing one owner keeps the threshold reachable.
+        address d = address(0xD4);
+        address[] memory owners = new address[](4);
+        owners[0] = a;
+        owners[1] = b;
+        owners[2] = c;
+        owners[3] = d;
+        PerihelionTimelock t4 = new PerihelionTimelock(owners, 3, DELAY);
+
+        // Pending operation.
+        bytes memory data = _setValueData(55);
+        bytes32 id = t4.hashOperation(address(target), 0, data, SALT);
+        vm.prank(a);
+        t4.propose(address(target), 0, data, SALT);
+
+        // c (later removed) votes to cancel.
+        vm.prank(c);
+        t4.cancel(id);
+
+        // Remove c through governance (a, b, d confirm the removal).
+        bytes memory removeData = abi.encodeWithSelector(PerihelionTimelock.removeOwner.selector, c);
+        bytes32 removeId = t4.hashOperation(address(t4), 0, removeData, SALT);
+        vm.prank(a);
+        t4.propose(address(t4), 0, removeData, SALT);
+        vm.prank(b);
+        t4.confirm(removeId);
+        vm.prank(d);
+        t4.confirm(removeId);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(a);
+        t4.execute(address(t4), 0, removeData, SALT);
+        assertFalse(t4.isOwner(c), "c must be removed");
+
+        // Current set is {a, b, d} with threshold 3. c's stale vote must not
+        // count: two live votes are still below threshold.
+        vm.prank(a);
+        t4.cancel(id);
+        vm.prank(b);
+        t4.cancel(id);
+        (,,, bool exists) = t4.operations(id);
+        assertTrue(exists, "removed owner's cancel vote must not count");
+
+        // The third live vote reaches the live threshold and deletes the op.
+        vm.prank(d);
+        t4.cancel(id);
+        (,,, exists) = t4.operations(id);
+        assertFalse(exists, "live threshold of cancel votes deletes the operation");
+    }
+
+    /// @notice AC (#1057): an owner can withdraw a cancel vote via revokeCancel,
+    ///         which emits CancelRevoked and lowers the live cancel count.
+    function test_RevokeCancel_WithdrawsVoteAndEmitsEvent() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(31), SALT);
+
+        vm.prank(b);
+        tl.cancel(id);
+        assertEq(tl.cancelConfirmations(id), 1);
+        assertTrue(tl.cancelConfirmedBy(id, b));
+
+        vm.prank(b);
+        vm.expectEmit(true, true, false, true);
+        emit PerihelionTimelock.CancelRevoked(id, b, 0);
+        tl.revokeCancel(id);
+
+        assertEq(tl.cancelConfirmations(id), 0, "cancel count decremented");
+        assertFalse(tl.cancelConfirmedBy(id, b), "cancel flag cleared");
+
+        // The withdrawn vote no longer contributes: a single live vote is
+        // below threshold, so the operation survives.
+        vm.prank(a);
+        tl.cancel(id);
+        (,,, bool exists) = tl.operations(id);
+        assertTrue(exists, "operation must survive after a cancel vote is withdrawn");
+
+        // Revoking a vote that was never cast reverts.
+        vm.prank(c);
+        vm.expectRevert(PerihelionTimelock.NotCancelConfirmed.selector);
+        tl.revokeCancel(id);
+    }
+
+    // --- Expired operations can be re-proposed (issue #1058) ----------------
+
+    /// @notice AC (#1058): after an operation expires, the identical operation
+    ///         can be proposed again, resets confirmations/readyAt, and must go
+    ///         through the full delay again before it can execute.
+    function test_ExpiredOperation_CanBeReproposedAndGoesThroughFullDelay() public {
+        bytes memory data = _setValueData(64);
+        bytes32 id = tl.hashOperation(address(target), 0, data, SALT);
+
+        vm.prank(a);
+        bytes32 id1 = tl.propose(address(target), 0, data, SALT);
+        assertEq(id1, id);
+        vm.prank(b);
+        tl.confirm(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        // Let the operation expire.
+        vm.warp(readyAt + tl.GRACE_PERIOD() + 1);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.Expired.selector);
+        tl.execute(address(target), 0, data, SALT);
+
+        // Re-propose the identical operation: must succeed and reset state.
+        vm.prank(a);
+        bytes32 id2 = tl.propose(address(target), 0, data, SALT);
+        assertEq(id2, id, "identical parameters yield the same id");
+
+        (uint64 confs, uint64 readyAtReset,, bool exists) = tl.operations(id);
+        assertTrue(exists, "operation exists after re-propose");
+        assertEq(confs, 1, "confirmations reset to the proposer only");
+        assertEq(readyAtReset, 0, "readyAt reset on re-propose");
+        assertFalse(tl.confirmedBy(id, b), "stale confirmation cleared");
+
+        // The re-proposed operation must go through the full delay again.
+        vm.prank(b);
+        tl.confirm(id);
+        (, uint64 readyAtNew,,) = tl.operations(id);
+        assertEq(readyAtNew, block.timestamp + DELAY, "fresh delay clock");
+
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.NotReady.selector);
+        tl.execute(address(target), 0, data, SALT);
+
+        vm.warp(readyAtNew);
+        vm.prank(a);
+        tl.execute(address(target), 0, data, SALT);
+        assertEq(target.value(), 64);
+    }
+
     // --- End-to-end: timelock owns the escrow --------------------------------
 
     function test_TimelockOwnsAndGovernsEscrow() public {
