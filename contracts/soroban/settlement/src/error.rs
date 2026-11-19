@@ -99,6 +99,14 @@ pub enum PerihelionError {
     /// The supplied identifier is not a canonical `destAsset` (`native`,
     /// `CODE:ISSUER` or a `C...` contract strkey).
     InvalidDestAsset = 167,
+    /// Caller-supplied hash list exceeds `MAX_LIST_BATCH` in
+    /// `list_undispatched_intents` (issue #1075).
+    BatchTooLarge = 168,
+    /// A classic `CODE:ISSUER` destination asset has no deployed Stellar Asset
+    /// Contract instance. Returned by registration and `resolve_dest_asset` so
+    /// the intent is rejected terminally instead of registering an unfillable
+    /// intent (issue #1077).
+    DestAssetSacNotDeployed = 169,
 
     // --- Invariant / internal ---
     /// Arithmetic error that prior checks should have made unreachable.

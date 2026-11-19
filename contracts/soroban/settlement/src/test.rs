@@ -3142,6 +3142,52 @@ fn list_undispatched_intents_filters_correctly() {
     assert_eq!(undispatched.get(0), Some(h2), "h2 must be the result");
 }
 
+/// Issue #1075: `list_undispatched_intents` must reject an unbounded batch with
+/// a dedicated error instead of failing with an opaque budget error.
+#[test]
+fn list_undispatched_intents_rejects_oversized_batch() {
+    let s = setup();
+    let mut input = soroban_sdk::Vec::new(&s.env);
+    for i in 0..=MAX_LIST_BATCH {
+        input.push_back(hash(&s.env, (i % 251) as u8));
+    }
+    assert_eq!(input.len(), MAX_LIST_BATCH + 1);
+
+    let err = s
+        .client
+        .try_list_undispatched_intents(&input)
+        .expect_err("a batch above MAX_LIST_BATCH must be rejected")
+        .unwrap();
+    assert_eq!(err, PerihelionError::BatchTooLarge);
+}
+
+/// Issue #1075: exactly `MAX_LIST_BATCH` hashes is still accepted.
+#[test]
+fn list_undispatched_intents_accepts_batch_at_limit() {
+    let s = setup();
+    let mut input = soroban_sdk::Vec::new(&s.env);
+    for i in 0..MAX_LIST_BATCH {
+        input.push_back(hash(&s.env, (i % 251) as u8));
+    }
+    assert_eq!(input.len(), MAX_LIST_BATCH);
+
+    let undispatched = s.client.list_undispatched_intents(&input);
+    assert_eq!(undispatched.len(), 0, "no intent is registered");
+}
+
+/// Issue #1076: nonce-word pruning is permissionless housekeeping and must keep
+/// working while the contract is paused, so rent can be reclaimed during an
+/// incident.
+#[test]
+fn prune_nonce_words_works_while_paused() {
+    let s = setup();
+    s.client.pause();
+
+    // Pruning a word that was never written is a no-op, but must not revert.
+    s.client.prune_nonce_words(&s.src_eid, &0u32);
+    s.client.prune_nonce_words(&s.src_eid, &1u32);
+}
+
 /// AC6: After deliver_intent, cancel_expired_intent refuses to act (AlreadyFilled).
 /// The only recovery path is dispatch_confirmation, not cancellation.
 ///
@@ -3187,6 +3233,55 @@ fn cancel_expired_intent_blocked_after_deliver_intent() {
     s.env.ledger().with_mut(|li| li.timestamp = 1_000); // reset to before-deadline for dispatch
                                                         // (dispatch_confirmation has no deadline restriction — it's the recovery path)
     s.client.dispatch_confirmation(&keeper, &h, &0);
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+}
+
+// --- Issue #1078: deliver_intent dispatch-window guard ----------------------
+
+/// Issue #1078: `deliver_intent` must refuse when the remaining time before the
+/// deadline is too short to dispatch the confirmation, so the solver cannot
+/// lose principal by delivering into an unrecoverable window.
+#[test]
+fn deliver_intent_rejects_when_dispatch_window_is_infeasible() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let now = s.env.ledger().timestamp();
+    // One second short of the minimum feasible window.
+    let deadline = now + MIN_DISPATCH_WINDOW + SAFETY_MARGIN - 1;
+    let h = hash(&s.env, 0xD1);
+    register_intent(&s, &h, &recipient, 100_000, deadline, 1, None);
+
+    let err = s
+        .client
+        .try_deliver_intent(&solver, &evm_solver(&s.env, 0x11), &h, &100_000)
+        .expect_err("deliver_intent must reject an infeasible dispatch window")
+        .unwrap();
+    assert_eq!(err, PerihelionError::DispatchWindowTooShort);
+    assert_eq!(s.client.status(&h), Some(IntentStatus::Locked));
+}
+
+/// Issue #1078: exactly `now + MIN_DISPATCH_WINDOW + SAFETY_MARGIN` is feasible.
+#[test]
+fn deliver_intent_accepts_when_dispatch_window_is_exactly_feasible() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let now = s.env.ledger().timestamp();
+    let deadline = now + MIN_DISPATCH_WINDOW + SAFETY_MARGIN;
+    let h = hash(&s.env, 0xD2);
+    register_intent(&s, &h, &recipient, 100_000, deadline, 1, None);
+
+    s.client
+        .deliver_intent(&solver, &evm_solver(&s.env, 0x11), &h, &100_000);
+    assert_eq!(s.client.status(&h), Some(IntentStatus::Filled));
+
+    // The confirmation can still be dispatched inside the window.
+    s.client.dispatch_confirmation(&solver, &h, &0);
     assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
 }
 
@@ -3513,6 +3608,35 @@ fn classic_dest_asset_resolves_to_its_stellar_asset_contract() {
         token::Client::new(&s.env, &sac.address()).balance(&recipient),
         5_000
     );
+}
+
+/// Issue #1077: a classic `CODE:ISSUER` whose Stellar Asset Contract was never
+/// deployed must be rejected deterministically at registration time instead of
+/// registering an intent that can never be filled.
+#[test]
+fn classic_dest_asset_without_deployed_sac_is_rejected() {
+    let s = setup();
+    // An issuer account that exists but whose SAC has never been deployed.
+    let issuer = Address::generate(&s.env);
+    let mut id = std::vec::Vec::from(&b"zzz:"[..]);
+    id.extend_from_slice(&strkey_bytes(&issuer));
+
+    // The view exposes the same deterministic rejection.
+    assert_eq!(
+        s.client
+            .try_resolve_dest_asset(&Bytes::from_slice(&s.env, &id))
+            .err()
+            .map(|e| e.unwrap()),
+        Some(PerihelionError::DestAssetSacNotDeployed)
+    );
+
+    let h = hash(&s.env, 0xC7);
+    let recipient = Address::generate(&s.env);
+    assert_eq!(
+        try_deliver_fill_with_asset_id(&s, &h, &recipient, &id, 5_000, 1),
+        Err(PerihelionError::DestAssetSacNotDeployed)
+    );
+    assert!(s.client.get_intent(&h).is_none());
 }
 
 #[test]

@@ -145,6 +145,54 @@ refund fallback from the protocol's minimum `confirmationGrace` boundary.
 Treat this as a hard monitoring deadline: a late dispatch is futile and must not
 be retried as if it could still release the escrow.
 
+**The window is enforced at delivery time.** `deliver_intent` is a public,
+permissionless entrypoint that pays the user on Stellar and writes `Settled`
+without sending anything cross-chain; the cross-chain `FillConfirmed` is sent
+separately by `dispatch_confirmation`. If the dispatch is not executed before
+`deadline + MIN_DISPATCH_WINDOW`, `dispatch_confirmation` reverts with
+`IntentExpired` forever, the EVM escrow refunds the user through
+`cancelExpired`, and the solver absorbs the full fill amount (the user is paid
+twice). `cancel_expired_intent` also refuses `Settled` intents, so no
+`CancelIntent` can be sent either.
+
+To make this safe by construction, `deliver_intent` now refuses to run when the
+remaining window is infeasible: it requires
+
+```
+now + MIN_DISPATCH_WINDOW + SAFETY_MARGIN <= deadline
+```
+
+and returns `IntentExpired` otherwise. In other words, you must call
+`deliver_intent` at least `MIN_DISPATCH_WINDOW + SAFETY_MARGIN` before the
+intent's `deadline`, leaving enough time to land `dispatch_confirmation` before
+the escrow's refund path opens. If you are close to the deadline, skip the
+intent rather than delivering it.
+
+Even with the guard, the split path is a sharp edge: if your solver runs out of
+XLM, loses RPC connectivity, or the contract is paused between the two calls,
+the confirmation can still be missed. See
+[Filled-but-undispatched](#filled-but-undispatched-the-split-entrypoint-stall)
+for detection and recovery, and `docs/MONITORING.md` for the alert on a
+`Filled` intent without `ConfirmationSent`.
+
+### Classic assets require a deployed SAC
+
+Classic Stellar assets (`CODE:ISSUER`) are settled through their Stellar Asset
+Contract (SAC). The settlement contract derives the deterministic SAC address
+for a classic asset, but that address only works if the SAC has actually been
+deployed (wrapped) on-chain. Registering an intent for a classic asset whose SAC
+was never deployed would otherwise succeed and then make every `fill_intent` /
+`deliver_intent` fail at `TokenClient::transfer`.
+
+To prevent stuck intents, both intent registration and `resolve_dest_asset`
+verify that the SAC instance exists (via a cheap `decimals()` try-invoke). If it
+does not, they fail deterministically with `DestAssetSacNotDeployed` — a
+terminal policy rejection, not a transient error. Before accepting a classic
+asset in `PERIHELION_SUPPORTED_ASSETS`, confirm its SAC is deployed on the
+target network (e.g. `stellar contract id asset --asset CODE:ISSUER` and check
+the instance exists), and keep an allowlist of classic assets you have verified.
+=======
+
 ### Customization Points
 
 For production use, you likely need to customize:
@@ -434,9 +482,11 @@ currently stuck in `Filled`:
 
 ```typescript
 // Example using the Perihelion SDK / contract client
+const MAX_LIST_BATCH = 100; // contract-side cap on list_undispatched_intents
 const allHashes = await mempool.getAllKnownHashes();
-// Chunk to ≤50 hashes per call (instruction budget).
-const chunks = chunk(allHashes, 50);
+// Chunk to at most MAX_LIST_BATCH hashes per call. Larger batches are
+// rejected with `BatchTooLarge` instead of hitting simulation budget limits.
+const chunks = chunk(allHashes, MAX_LIST_BATCH);
 for (const batch of chunks) {
   const stuck = await settlementClient.list_undispatched_intents(batch);
   for (const hash of stuck) {
@@ -445,6 +495,11 @@ for (const batch of chunks) {
   }
 }
 ```
+
+`list_undispatched_intents` performs two persistent `has` lookups per hash and
+caps its input at `MAX_LIST_BATCH` (100) hashes. Passing more returns
+`BatchTooLarge`; chunk your backlog accordingly rather than sending the whole
+set in one call.
 
 Set up a cron or event-driven monitor that runs this query every few minutes
 (or on every confirmed `filled` event). Alert on any intent that has been in

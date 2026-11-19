@@ -183,6 +183,13 @@ pub const INSTANCE_TTL_EXTEND: u32 = 1_209_600;
 /// so the entrypoint stays within Soroban CPU/instruction limits regardless
 /// of how far the floor has fallen behind. Repeat calls advance further.
 pub const MAX_PRUNE_WORDS_PER_CALL: u32 = 256;
+
+/// Maximum number of intent hashes accepted by `list_undispatched_intents` in
+/// a single call (issue #1075). Each hash costs two persistent `has` lookups,
+/// so an unbounded input would exhaust the simulation instruction budget and
+/// fail with an opaque error. Callers batch their backlog in chunks of at most
+/// this many hashes; larger inputs are rejected with `BatchTooLarge`.
+pub const MAX_LIST_BATCH: u32 = 100;
 /// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
 /// absorb late confirmations and the refund window.
 const GRACE_LEDGERS: u32 = 120_960;
@@ -209,6 +216,14 @@ pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 /// to land before the deadline. Mirrors EVM's MIN_CONFIRMATION_GRACE (issue #293).
 /// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
 pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
+
+/// Extra safety margin (seconds) required on top of `MIN_DISPATCH_WINDOW` for
+/// the split `deliver_intent` → `dispatch_confirmation` path (issue #1078).
+/// `deliver_intent` refuses to run unless the intent's deadline is at least
+/// `MIN_DISPATCH_WINDOW + SAFETY_MARGIN` away, leaving headroom for the
+/// confirmation transaction to land (fee bumps, retries, RPC hiccups) before
+/// the source escrow's refund boundary. 10 minutes = 600 s.
+pub const SAFETY_MARGIN: u64 = 600;
 
 /// Ledgers a fill must stay unconfirmed before a third party may collect the
 /// dispatch keeper reward. About 30 minutes at ~5 second ledger close, matching
@@ -977,7 +992,13 @@ impl Perihelion {
     /// No-op (and no event) when nothing below the floor can be reclaimed.
     pub fn prune_nonce_words(env: Env, eid: u32) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
-        Self::require_not_paused(&env)?;
+        // Deliberately NOT gated on the pause flag (issue #1076). Pruning only
+        // deletes bitmap words that are fully consumed and strictly below the
+        // replay floor, and moves no funds: the floor check in `accept_nonce`
+        // rejects every nonce those words covered, so deleting them cannot
+        // re-open a replay. Keeping this permissionless during a pause lets
+        // keepers reclaim storage rent on dead words during long incidents,
+        // when rent otherwise keeps accruing on entries nothing can use.
 
         let instance = env.storage().instance();
         let floor: u64 = instance.get(&DataKey::InboundNonceFloor(eid)).unwrap_or(0);
@@ -1155,6 +1176,18 @@ impl Perihelion {
     /// records the fill, and durably marks the intent `Filled`. Does NOT dispatch the
     /// cross-chain FillConfirmed message; call `dispatch_confirmation` separately.
     /// This separation makes the messaging leg independently retriable (Issue #12).
+    ///
+    /// # WARNING — loss scenario (issue #1078)
+    /// This is a two-transaction path. The destination transfer to the user
+    /// happens here, but the solver is only repaid on the source chain once
+    /// `dispatch_confirmation` lands. If that second call does not execute
+    /// before `deadline + MIN_DISPATCH_WINDOW`, `dispatch_confirmation` reverts
+    /// with `IntentExpired` forever, the EVM escrow refunds the user through
+    /// `cancelExpired`, and the solver absorbs the full fill amount. Prefer the
+    /// atomic `fill_intent`. To make this path safe by construction, this
+    /// entrypoint refuses to run unless
+    /// `now + MIN_DISPATCH_WINDOW + SAFETY_MARGIN <= deadline`, guaranteeing a
+    /// window in which the confirmation can still be dispatched.
     pub fn deliver_intent(
         env: Env,
         solver: Address,
@@ -1167,6 +1200,21 @@ impl Perihelion {
 
         let (key, mut rec) =
             Self::validate_and_stage_fill(&env, &solver, &solver_evm, &intent_hash, fill_amount)?;
+
+        // Issue #1078: refuse to deliver into a window too short for the
+        // follow-up dispatch_confirmation to land before the source escrow's
+        // refund boundary. Without this guard the solver could pay the user
+        // here and then be unable to ever dispatch the confirmation, losing
+        // its principal to a double payout.
+        if env
+            .ledger()
+            .timestamp()
+            .saturating_add(MIN_DISPATCH_WINDOW)
+            .saturating_add(SAFETY_MARGIN)
+            > rec.deadline
+        {
+            return Err(PerihelionError::IntentExpired);
+        }
 
         // Effects before interactions: flip status, write the settled marker.
         rec.status = IntentStatus::Filled;
@@ -1640,14 +1688,22 @@ impl Perihelion {
     /// filters it down to those needing dispatch. This keeps the contract simple
     /// and resource-bounded while giving operators exactly the tool they need.
     ///
-    /// # Input limit
-    /// The `intent_hashes` vector is processed in-contract; very large inputs
-    /// will exhaust the instruction budget. Callers should batch in chunks of
-    /// at most 50 hashes per invocation.
+    /// # Input limit (issue #1075)
+    /// The `intent_hashes` vector is processed in-contract and each hash costs
+    /// two persistent `has` lookups, so the input is capped at `MAX_LIST_BATCH`
+    /// (100) hashes per invocation. A larger input is rejected with
+    /// `BatchTooLarge` instead of failing with an opaque instruction-budget
+    /// error. Callers batch their backlog in chunks of at most `MAX_LIST_BATCH`.
+    ///
+    /// # Errors
+    /// - `BatchTooLarge` if `intent_hashes.len() > MAX_LIST_BATCH`
     pub fn list_undispatched_intents(
         env: Env,
         intent_hashes: soroban_sdk::Vec<BytesN<32>>,
-    ) -> soroban_sdk::Vec<BytesN<32>> {
+    ) -> Result<soroban_sdk::Vec<BytesN<32>>, PerihelionError> {
+        if intent_hashes.len() > MAX_LIST_BATCH {
+            return Err(PerihelionError::BatchTooLarge);
+        }
         let p = env.storage().persistent();
         let mut out = soroban_sdk::Vec::new(&env);
         for h in intent_hashes.iter() {
@@ -1657,7 +1713,7 @@ impl Perihelion {
                 out.push_back(h);
             }
         }
-        out
+        Ok(out)
     }
 
     /// Quote the LayerZero native fee required to dispatch an outbound message
@@ -1905,10 +1961,24 @@ impl Perihelion {
                 .instance()
                 .get(&DataKey::NativeToken)
                 .ok_or(PerihelionError::NotInitialized),
-            asset::DestAsset::Classic { code, issuer } => Ok(env
-                .deployer()
-                .with_stellar_asset(asset::classic_asset_xdr(env, code, &issuer))
-                .deployed_address()),
+            asset::DestAsset::Classic { code, issuer } => {
+                // Issue #1077: `deployed_address()` derives the deterministic
+                // SAC address whether or not the Stellar Asset Contract has
+                // ever been deployed. Registering an intent against a
+                // non-existent SAC would succeed here and then make every
+                // fill/deliver fail at `TokenClient::transfer`, stranding the
+                // intent. Probe the contract with a cheap `decimals()` call so
+                // a missing SAC is rejected deterministically at registration
+                // (and by `resolve_dest_asset` pre-flight checks).
+                let sac = env
+                    .deployer()
+                    .with_stellar_asset(asset::classic_asset_xdr(env, code, &issuer))
+                    .deployed_address();
+                if token::TokenClient::new(env, &sac).try_decimals().is_err() {
+                    return Err(PerihelionError::DestAssetSacNotDeployed);
+                }
+                Ok(sac)
+            }
             asset::DestAsset::Contract => {
                 // `parse` validated the strkey, so this cannot trap.
                 let token = Address::from_string_bytes(asset_id);
