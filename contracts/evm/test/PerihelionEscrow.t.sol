@@ -98,14 +98,18 @@ contract NoReturnERC20 {
     function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
-        assembly { return(0, 0) } // no return data, mimicking USDT
+        assembly {
+            return(0, 0)
+        } // no return data, mimicking USDT
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
         allowance[from][msg.sender] -= amount;
         balanceOf[from] -= amount;
         balanceOf[to] += amount;
-        assembly { return(0, 0) } // no return data, mimicking USDT
+        assembly {
+            return(0, 0)
+        } // no return data, mimicking USDT
     }
 }
 
@@ -218,7 +222,7 @@ contract MockERC1271Wallet {
 /// @dev Records the last outbound LayerZero send and can replay inbound messages
 ///      back into the escrow as if it were the canonical endpoint.
 contract MockEndpoint is ILayerZeroEndpointV2 {
-    function setDelegate(address) external {}
+    function setDelegate(address) external { }
 
     uint32 public lastDstEid;
     bytes32 public lastReceiver;
@@ -227,7 +231,7 @@ contract MockEndpoint is ILayerZeroEndpointV2 {
     address public lastRefundAddress;
     uint256 public sendCount;
 
-    receive() external payable {}
+    receive() external payable { }
 
     /// @dev Fee returned by quote(); 0 means any msg.value >= 0 passes.
     uint256 public mockFee;
@@ -247,7 +251,11 @@ contract MockEndpoint is ILayerZeroEndpointV2 {
         lastNativeFee = msg.value;
         lastRefundAddress = refundAddress;
         sendCount++;
-        return MessagingReceipt({ guid: bytes32(uint256(0xABCD)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
+        return MessagingReceipt({
+            guid: bytes32(uint256(0xABCD)),
+            nonce: 0,
+            fee: MessagingFee({ nativeFee: msg.value, lzTokenFee: 0 })
+        });
     }
 
     function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {
@@ -449,7 +457,9 @@ contract PerihelionEscrowTest is Test {
             address lSolver,
             address lUser,
             address lAsset,
-            uint256 lAmount,,,
+            uint256 lAmount,
+            ,
+            ,
             bool released,
             bool refunded
         ) = escrow.locks(h);
@@ -514,7 +524,7 @@ contract PerihelionEscrowTest is Test {
         assertEq(token.balanceOf(address(escrow)), 100_000);
     }
 
-    function test_LockExactFeeSucceeds() public {
+    function test_LockBelowFeeReverts() public {
         PerihelionEscrow.Intent memory intent = _intent();
         bytes memory sig = _sign(intent);
 

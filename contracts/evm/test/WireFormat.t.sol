@@ -21,12 +21,12 @@ contract DecoderHarness is PerihelionEscrow {
     }
 
     /// @dev Expose _encodeFillInstruction for testing.
-    function encodeFillInstruction(bytes32 intentHash, Intent calldata intent)
-        external
-        view
-        returns (bytes memory)
-    {
-        return _encodeFillInstruction(intentHash, intent);
+    function encodeFillInstruction(
+        bytes32 intentHash,
+        Intent calldata intent,
+        address lockingSolver
+    ) external view returns (bytes memory) {
+        return _encodeFillInstruction(intentHash, intent, lockingSolver);
     }
 
     function fillInstructionLength() external pure returns (uint256) {
@@ -75,9 +75,11 @@ contract WireFormatConformanceTest is Test {
     bytes32 internal constant FI_INTENT_HASH =
         hex"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     // Recipient destination string: CC53XO53...WQD5 (strkey of [0xBB;32])
-    string internal constant FI_RECIPIENT_STR = "CC53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53WQD5";
+    string internal constant FI_RECIPIENT_STR =
+        "CC53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53WQD5";
     // dest_asset string: CDGMZTGM...ZLND (strkey of [0xCC;32])
-    string internal constant FI_DEST_ASSET_STR = "CDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZLND";
+    string internal constant FI_DEST_ASSET_STR =
+        "CDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZLND";
 
     function setUp() public {
         harness = new DecoderHarness(address(0x1), 30_316);
@@ -111,9 +113,9 @@ contract WireFormatConformanceTest is Test {
     ///      SDK helper to `_decodeFillConfirmed` and to the golden vector's
     ///      `solver_evm` word (bytes 34-65 of fill_confirmed.hex), preventing a
     ///      regression to the left-justified encoding the escrow rejects.
-    function test_SolverEvmEncodingDecodesOnEvm() public view {
+    function test_SolverEvmEncodingDecodesOnEvm() public {
         // Known solver address used by the SDK helper's test vector.
-        address solverAddr = address(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);
+        address solverAddr = address(uint160(0x00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa));
 
         // Mirror of @perihelion/sdk evmAddressToBytes32: left-pad into bytes 12-31.
         bytes32 solverWord = bytes32(uint256(uint160(solverAddr)));
@@ -124,7 +126,11 @@ contract WireFormatConformanceTest is Test {
         assembly {
             goldenSolverWord := mload(add(add(golden, 0x20), 34))
         }
-        assertEq(solverWord, goldenSolverWord, "SDK solver_evm word must match fill_confirmed.hex bytes 34-65");
+        assertEq(
+            solverWord,
+            goldenSolverWord,
+            "SDK solver_evm word must match fill_confirmed.hex bytes 34-65"
+        );
         assertEq(solverWord, FC_SOLVER_WORD);
 
         // Feed the SDK-encoded word through the EVM decoder.
@@ -164,25 +170,35 @@ contract WireFormatConformanceTest is Test {
     ///      LayerZero endpoint id), not the destination `stellarEid`.
     function test_FillInstructionVectorMatchesSolidityEncoder() public view {
         bytes memory golden = _readVector("fill_instruction.hex");
-        assertEq(golden.length, harness.fillInstructionLength(), "fill_instruction.hex has the wrong length");
+        assertEq(
+            golden.length,
+            harness.fillInstructionLength(),
+            "fill_instruction.hex has the wrong length"
+        );
 
         // Build the canonical intent using the same inputs as the Rust test.
         PerihelionEscrow.Intent memory intent = PerihelionEscrow.Intent({
             user: address(0xA1),
-            destination: FI_RECIPIENT_STR,          // strkey of [0xBB;32]
+            destination: FI_RECIPIENT_STR, // strkey of [0xBB;32]
             sourceChainId: block.chainid,
             sourceAsset: address(0xA2),
             sourceAmount: 0,
-            destAsset: FI_DEST_ASSET_STR,           // strkey of [0xCC;32]
+            destAsset: FI_DEST_ASSET_STR, // strkey of [0xCC;32]
             minDestAmount: 1_000_000_000,
             deadline: 9_999_999_999,
             nonce: 0,
-            preferredSolver: address(0)             // all-zeros = open
-        });
+            preferredSolver: address(0) // all-zeros = open
+         });
 
-        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent);
-        assertEq(encoded.length, harness.fillInstructionLength(), "encoder must produce the FillInstruction length");
-        assertEq(encoded, golden, "Solidity encoder output must match fill_instruction.hex golden vector");
+        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent, address(0));
+        assertEq(
+            encoded.length,
+            harness.fillInstructionLength(),
+            "encoder must produce the FillInstruction length"
+        );
+        assertEq(
+            encoded, golden, "Solidity encoder output must match fill_instruction.hex golden vector"
+        );
 
         // Issue #706: the src_eid slot (offset 34, 4 bytes) must be the source
         // eid — the escrow's own LayerZero endpoint id — not the destination
@@ -191,7 +207,9 @@ contract WireFormatConformanceTest is Test {
         assembly {
             encodedSrcEid := shr(224, mload(add(add(encoded, 0x20), 34)))
         }
-        assertEq(encodedSrcEid, 30_316, "offset 34 must encode the source eid, not the destination eid");
+        assertEq(
+            encodedSrcEid, 30_316, "offset 34 must encode the source eid, not the destination eid"
+        );
     }
 
     /// @dev The other two canonical destAsset forms (`native`, `CODE:ISSUER`)
@@ -205,7 +223,10 @@ contract WireFormatConformanceTest is Test {
         );
     }
 
-    function _assertFillInstructionVector(string memory name, string memory destAsset) internal view {
+    function _assertFillInstructionVector(string memory name, string memory destAsset)
+        internal
+        view
+    {
         PerihelionEscrow.Intent memory intent = PerihelionEscrow.Intent({
             user: address(0xA1),
             destination: FI_RECIPIENT_STR,
@@ -218,7 +239,7 @@ contract WireFormatConformanceTest is Test {
             nonce: 0,
             preferredSolver: address(0)
         });
-        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent);
+        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent, address(0));
         assertEq(encoded, _readVector(name), name);
     }
 
@@ -227,7 +248,11 @@ contract WireFormatConformanceTest is Test {
     /// a decode error in an unrelated test.
     function test_FillInstructionVectorLength() public view {
         bytes memory golden = _readVector("fill_instruction.hex");
-        assertEq(golden.length, harness.fillInstructionLength(), "fill_instruction.hex must be exactly FILL_INSTRUCTION_LENGTH bytes");
+        assertEq(
+            golden.length,
+            harness.fillInstructionLength(),
+            "fill_instruction.hex must be exactly FILL_INSTRUCTION_LENGTH bytes"
+        );
         assertEq(golden.length, 227, "fill_instruction.hex must be exactly 227 bytes");
     }
 
@@ -339,7 +364,8 @@ contract FillInstructionEncodeTest is Test {
     /// Encoded payload is exactly 227 bytes (expanded from the old 158 and including reservation_window).
     function test_EncodedPayloadIs227Bytes() public view {
         PerihelionEscrow.Intent memory intent = _baseIntent();
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        bytes memory encoded =
+            harness.encodeFillInstruction(bytes32(uint256(1)), intent, address(0));
         assertEq(encoded.length, 227);
     }
 
@@ -352,7 +378,8 @@ contract FillInstructionEncodeTest is Test {
         PerihelionEscrow.Intent memory intent = _baseIntent();
         intent.destAsset = fullAsset;
 
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        bytes memory encoded =
+            harness.encodeFillInstruction(bytes32(uint256(1)), intent, address(0));
         assertEq(encoded.length, 227);
 
         // Slice out the 69-byte dest_asset field at offset 94.
@@ -375,7 +402,8 @@ contract FillInstructionEncodeTest is Test {
         // A Stellar strkey is exactly 56 chars; trim/pad to 56 for test.
         PerihelionEscrow.Intent memory intent = _baseIntent();
         intent.destination = "GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 58 chars, will be clamped to 56
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        bytes memory encoded =
+            harness.encodeFillInstruction(bytes32(uint256(1)), intent, address(0));
         // Confirm recipient field occupies bytes [38, 94).
         assertEq(encoded.length, 227);
         // Byte at offset 94 is the start of dest_asset, not recipient overflow.
