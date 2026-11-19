@@ -42,14 +42,24 @@ contract ForkERC20 {
 
 /// @dev Mock endpoint for fork tests.
 contract ForkMockEndpoint is ILayerZeroEndpointV2 {
-    function setDelegate(address) external {}
+    function setDelegate(address) external { }
 
     uint256 public mockFee;
 
-    function setMockFee(uint256 fee) external { mockFee = fee; }
+    function setMockFee(uint256 fee) external {
+        mockFee = fee;
+    }
 
-    function send(MessagingParams calldata, address) external payable returns (MessagingReceipt memory receipt) {
-        return MessagingReceipt({ guid: bytes32(uint256(0xABCD)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
+    function send(MessagingParams calldata, address)
+        external
+        payable
+        returns (MessagingReceipt memory receipt)
+    {
+        return MessagingReceipt({
+            guid: bytes32(uint256(0xABCD)),
+            nonce: 0,
+            fee: MessagingFee({ nativeFee: msg.value, lzTokenFee: 0 })
+        });
     }
 
     function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {
@@ -60,7 +70,10 @@ contract ForkMockEndpoint is ILayerZeroEndpointV2 {
 /// @dev Target for timelock execution in fork tests.
 contract ForkTarget {
     uint256 public value;
-    function setValue(uint256 v) external { value = v; }
+
+    function setValue(uint256 v) external {
+        value = v;
+    }
 }
 
 /// @dev Fork conformance test — deploys and validates the full escrow + timelock
@@ -136,8 +149,9 @@ contract ForkTest is Test {
     /// @notice The escrow bytecode must match the known-good baseline.
     function test_ReproducibleBytecode_Escrow() public {
         bytes32 codehash;
+        address escrowAddr = address(escrow);
         assembly {
-            codehash := extcodehash(address(escrow))
+            codehash := extcodehash(escrowAddr)
         }
         // Log the actual codehash for baseline updates
         emit log_named_bytes32("Escrow codehash", codehash);
@@ -149,8 +163,9 @@ contract ForkTest is Test {
     /// @notice The timelock bytecode must match the known-good baseline.
     function test_ReproducibleBytecode_Timelock() public {
         bytes32 codehash;
+        address timelockAddr = address(timelock);
         assembly {
-            codehash := extcodehash(address(timelock))
+            codehash := extcodehash(timelockAddr)
         }
         emit log_named_bytes32("Timelock codehash", codehash);
         assertEq(codehash, codehash, "Timelock bytecode mismatch - update baseline");
@@ -197,14 +212,15 @@ contract ForkTest is Test {
 
         // Confirm via lzReceive
         bytes memory fillMsg = abi.encodePacked(
-            V, T_FILL_CONFIRMED, h,
-            bytes32(uint256(uint160(solver))),
-            uint128(100_000), uint64(42)
+            V, T_FILL_CONFIRMED, h, bytes32(uint256(uint160(solver))), uint128(100_000), uint64(42)
         );
         vm.prank(address(endpoint));
         escrow.lzReceive(
             Origin({ srcEid: STELLAR_EID, sender: STELLAR_PEER, nonce: 1 }),
-            bytes32(0), fillMsg, address(0), ""
+            bytes32(0),
+            fillMsg,
+            address(0),
+            ""
         );
 
         assertEq(token.balanceOf(solver), solverBefore + 100_000);
@@ -228,7 +244,10 @@ contract ForkTest is Test {
         vm.prank(address(endpoint));
         escrow.lzReceive(
             Origin({ srcEid: STELLAR_EID, sender: STELLAR_PEER, nonce: 1 }),
-            bytes32(0), cancelMsg, address(0), ""
+            bytes32(0),
+            cancelMsg,
+            address(0),
+            ""
         );
 
         assertEq(token.balanceOf(user), userBefore);

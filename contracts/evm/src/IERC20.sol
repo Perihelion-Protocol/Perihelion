@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @notice EIP-20 token interface. Covers the full ERC-20 spec including optional methods.
+/// @notice Minimal EIP-20 token interface: the required methods the escrow calls.
 interface IERC20 {
     // --- Events (required by EIP-20) ---
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -14,13 +14,6 @@ interface IERC20 {
     function approve(address spender, uint256 amount) external returns (bool);
     function allowance(address owner, address spender) external view returns (uint256);
 
-    // --- Optional functions (may revert if not implemented) ---
-    /// @dev Returns the number of decimals the token uses. Optional in EIP-20.
-    function decimals() external view returns (uint8);
-    /// @dev Returns the name of the token. Optional in EIP-20.
-    function name() external view returns (string memory);
-    /// @dev Returns the symbol of the token. Optional in EIP-20.
-    function symbol() external view returns (string memory);
-    /// @dev Returns the total supply of the token. Optional in EIP-20.
-    function totalSupply() external view returns (uint256);
+    // Optional EIP-20 metadata (name/symbol/decimals/totalSupply) is intentionally
+    // omitted: the escrow never calls it, and it may revert on some tokens.
 }
