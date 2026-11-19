@@ -561,6 +561,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Set the rolling-window cap for one allowlisted asset.
     ///         Window accounting is isolated by asset; amounts from another
     ///         token can never consume this asset's bucket.
+
     function setRollingWindowCapForAsset(address asset, uint256 _windowDuration, uint256 _cap)
         external
         onlyOwner
@@ -680,6 +681,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // (#857). Order of checks, effects and interactions is unchanged.
         bytes32 intentHash = _validateIntent(intent, signature);
         uint256 received = _pullFunds(intent);
+        // Cap breach: the latch is already persisted and msg.value refunded, so
+        // stop here. Continuing would record a zero-amount lock and dispatch a fill.
+        if (received == 0) return;
         _recordLock(intentHash, intent, received);
         _dispatchFillInstruction(intentHash, intent);
     }
@@ -729,7 +733,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
                 (bool refunded,) = msg.sender.call{ value: msg.value }("");
                 if (!refunded) revert NativeTransferFailed();
             }
-            return;
+            // Sentinel: 0 means the cap tripped and no funds were pulled. A real
+            // pull always yields a non-zero amount (see NothingReceived below).
+            return 0;
         }
 
         // Measured-delta accounting: store exactly what the escrow received, so
@@ -745,6 +751,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         // Commit the actual received amount to the rolling window accumulator.
         _commitValueCaps(intent.sourceAsset, received);
+    }
 
     /// @dev Persist the lock, bump the aggregate liability and emit {Locked}.
     function _recordLock(bytes32 intentHash, Intent calldata intent, uint256 received) private {
@@ -779,6 +786,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         );
     }
 
+    /// @dev Quote, send the FillInstruction over LayerZero and refund any
+    ///      excess `msg.value` to the caller.
+    function _dispatchFillInstruction(bytes32 intentHash, Intent calldata intent) private {
         bytes memory message = _encodeFillInstruction(intentHash, intent, msg.sender);
         // Quote with nativeFee=0, identical to quoteFee(), so the value a solver
         // sized off-chain via quoteFee is the same value compared against below.
@@ -792,7 +802,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         MessagingReceipt memory receipt = endpoint.send{ value: quoted }(params, msg.sender);
         // Touch every V2 receipt field so ABI decoding is explicit and future
         // endpoint upgrades cannot silently fall back to the legacy bytes32 ABI.
-        receipt.guid; receipt.nonce; receipt.fee.nativeFee; receipt.fee.lzTokenFee;
+        receipt.guid;
+        receipt.nonce;
+        receipt.fee.nativeFee;
+        receipt.fee.lzTokenFee;
         if (refundAmount > 0) {
             (bool ok,) = msg.sender.call{ value: refundAmount }("");
             if (!ok) revert NativeTransferFailed();
@@ -818,7 +831,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         }
         uint256 assetCap = rollingWindowCapPerAsset[asset];
         if (rollingWindowDuration > 0 && assetCap > 0) {
-
             // Calculate current window start. Each window spans [windowStart, windowStart + duration).
             uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
 
@@ -854,7 +866,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     // --- LayerZero inbound ---------------------------------------------------
- 
+
     /// @inheritdoc ILayerZeroReceiver
     /// @dev `lzReceive` is declared `payable` to satisfy the `ILayerZeroReceiver` interface.
     ///      The contract does not process native value on inbound messages; any native value
@@ -992,7 +1004,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @param intent Intent whose FillInstruction message size determines the fee.
     /// @param payer The address that will call lock (used for the quote context).
     /// @return nativeFee Estimated native token fee in wei.
-    function quoteFee(Intent calldata intent, address payer) public view returns (uint256 nativeFee) {
+    function quoteFee(Intent calldata intent, address payer)
+        public
+        view
+        returns (uint256 nativeFee)
+    {
         // Use a placeholder hash — the fee depends only on message size, not content.
         bytes memory message = _encodeFillInstruction(bytes32(0), intent, payer);
         MessagingParams memory params = _buildMessagingParams(message);
@@ -1064,8 +1080,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      messages that the executor cannot deliver.
     function _lzReceiveOptions() internal pure returns (bytes memory) {
         return abi.encodePacked(
-            bytes2(0x0003), bytes1(0x01), bytes1(0x01), bytes2(0x0011),
-            uint128(300_000), uint128(0)
+            bytes2(0x0003), bytes1(0x01), bytes1(0x01), bytes2(0x0011), uint128(300_000), uint128(0)
         );
     }
 
@@ -1106,47 +1121,42 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         bytes32 intentHash,
         Intent calldata intent,
         address lockingSolver
-    )
-        internal
-        view
-        returns (bytes memory)
-    {
-        // Encode destination as a fixed 56-byte field (right-zero-padded).
-        bytes memory destBytes = bytes(intent.destination);
-        bytes memory recipientField = new bytes(56);
-        uint256 dstCopy = destBytes.length < 56 ? destBytes.length : 56;
-        for (uint256 i = 0; i < dstCopy; i++) {
-            recipientField[i] = destBytes[i];
-        }
-
-        // Encode destAsset as a fixed 69-byte field (right-zero-padded).
-        // Using abi.encodePacked instead of a bare mload avoids truncating
+    ) internal view returns (bytes memory) {
+        // Split into two packs: a single abi.encodePacked over all ten fields
+        // exceeds the legacy codegen's stack limit ("stack too deep").
+        // Head: destination is a fixed 56-byte field and destAsset a fixed 69-byte
+        // field, both right-zero-padded. A 69-byte destAsset field avoids truncating
         // CODE:ISSUER assets whose ISSUER bytes extend past position 32.
-        bytes memory destAssetBytes = bytes(intent.destAsset);
-        bytes memory destAssetField = new bytes(69);
-        uint256 assetCopy = destAssetBytes.length < 69 ? destAssetBytes.length : 69;
-        for (uint256 i = 0; i < assetCopy; i++) {
-            destAssetField[i] = destAssetBytes[i];
-        }
-
-        // Encode the canonical locking solver, not the user preference. This field
-        // is the cross-chain exclusivity binding and is never an alias/payout field.
-        bytes32 solverWord = bytes32(uint256(uint160(lockingSolver)));
-
-        return abi.encodePacked(
-            PROTOCOL_VERSION,     // 1  byte  offset 0
+        bytes memory head = abi.encodePacked(
+            PROTOCOL_VERSION, // 1  byte  offset 0
             MSG_FILL_INSTRUCTION, // 1  byte  offset 1
-            intentHash,           // 32 bytes offset 2
-            uint32(stellarEid),   // 4  bytes offset 34
-            recipientField,       // 56 bytes offset 38
-            destAssetField,       // 69 bytes offset 94
-            uint128(intent.minDestAmount), // 16 bytes offset 163
-            uint64(intent.deadline),       // 8  bytes offset 179
-            solverWord,           // 32 bytes offset 187
-            uint64(0)              // 8 bytes offset 219; no reservation in legacy EVM intents
-            // reservation_window is explicit and zero until the signed EVM intent schema adds it.
-            //                                 total       227
+            intentHash, // 32 bytes offset 2
+            uint32(stellarEid), // 4  bytes offset 34
+            _padRight(bytes(intent.destination), 56), // 56 bytes offset 38
+            _padRight(bytes(intent.destAsset), 69) // 69 bytes offset 94
         );
+
+        // Tail. The locking solver (not the user preference) is encoded: it is the
+        // cross-chain exclusivity binding and is never an alias/payout field.
+        // reservation_window is explicit and zero until the signed EVM intent schema
+        // adds it.
+        return abi.encodePacked(
+            head,
+            uint128(intent.minDestAmount), // 16 bytes offset 163
+            uint64(intent.deadline), // 8  bytes offset 179
+            bytes32(uint256(uint160(lockingSolver))), // 32 bytes offset 187
+            uint64(0) // 8  bytes offset 219; total 227
+        );
+    }
+
+    /// @dev Copy `src` into a fresh `size`-byte buffer, right-zero-padded and
+    ///      truncated to `size` if longer. Used for fixed-width wire fields.
+    function _padRight(bytes memory src, uint256 size) private pure returns (bytes memory out) {
+        out = new bytes(size);
+        uint256 n = src.length < size ? src.length : size;
+        for (uint256 i = 0; i < n; i++) {
+            out[i] = src[i];
+        }
     }
 
     /// @dev Decode a 90-byte FillConfirmed:

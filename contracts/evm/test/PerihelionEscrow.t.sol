@@ -14,6 +14,23 @@ import {
 
 /// @dev Minimal mintable ERC-20 for tests.
 contract MockERC20 is IERC20 {
+    // Optional EIP-20 metadata (IERC20 declares these; mocks don't track supply).
+    function name() external pure returns (string memory) {
+        return "Mock";
+    }
+
+    function symbol() external pure returns (string memory) {
+        return "MOCK";
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -43,6 +60,23 @@ contract MockERC20 is IERC20 {
 /// @dev Fee-on-transfer token: skims `feeBps` from every transfer/transferFrom,
 ///      so the escrow's measured-delta accounting can be exercised.
 contract FeeERC20 is IERC20 {
+    // Optional EIP-20 metadata (IERC20 declares these; mocks don't track supply).
+    function name() external pure returns (string memory) {
+        return "Mock";
+    }
+
+    function symbol() external pure returns (string memory) {
+        return "MOCK";
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
     uint256 public immutable feeBps;
@@ -98,19 +132,40 @@ contract NoReturnERC20 {
     function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
-        assembly { return(0, 0) } // no return data, mimicking USDT
+        assembly {
+            return(0, 0)
+        } // no return data, mimicking USDT
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
         allowance[from][msg.sender] -= amount;
         balanceOf[from] -= amount;
         balanceOf[to] += amount;
-        assembly { return(0, 0) } // no return data, mimicking USDT
+        assembly {
+            return(0, 0)
+        } // no return data, mimicking USDT
     }
 }
 
 /// @dev Token that returns false on transfer (e.g., insufficient balance). Tests rejection.
 contract FalseReturningERC20 is IERC20 {
+    // Optional EIP-20 metadata (IERC20 declares these; mocks don't track supply).
+    function name() external pure returns (string memory) {
+        return "Mock";
+    }
+
+    function symbol() external pure returns (string memory) {
+        return "MOCK";
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -136,6 +191,23 @@ contract FalseReturningERC20 is IERC20 {
 ///      mimicking tokens that reject zero-value transfers (e.g., some USDT-like
 ///      implementations on certain networks).
 contract RevertOnZeroERC20 is IERC20 {
+    // Optional EIP-20 metadata (IERC20 declares these; mocks don't track supply).
+    function name() external pure returns (string memory) {
+        return "Mock";
+    }
+
+    function symbol() external pure returns (string memory) {
+        return "MOCK";
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -172,6 +244,23 @@ contract RevertOnZeroERC20 is IERC20 {
 ///      Tests the release/refund path specifically — lock via transferFrom works,
 ///      but the subsequent release/refund via transfer fails.
 contract ReleaseFalseReturningERC20 is IERC20 {
+    // Optional EIP-20 metadata (IERC20 declares these; mocks don't track supply).
+    function name() external pure returns (string memory) {
+        return "Mock";
+    }
+
+    function symbol() external pure returns (string memory) {
+        return "MOCK";
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -218,7 +307,7 @@ contract MockERC1271Wallet {
 /// @dev Records the last outbound LayerZero send and can replay inbound messages
 ///      back into the escrow as if it were the canonical endpoint.
 contract MockEndpoint is ILayerZeroEndpointV2 {
-    function setDelegate(address) external {}
+    function setDelegate(address) external { }
 
     uint32 public lastDstEid;
     bytes32 public lastReceiver;
@@ -227,7 +316,7 @@ contract MockEndpoint is ILayerZeroEndpointV2 {
     address public lastRefundAddress;
     uint256 public sendCount;
 
-    receive() external payable {}
+    receive() external payable { }
 
     /// @dev Fee returned by quote(); 0 means any msg.value >= 0 passes.
     uint256 public mockFee;
@@ -247,7 +336,11 @@ contract MockEndpoint is ILayerZeroEndpointV2 {
         lastNativeFee = msg.value;
         lastRefundAddress = refundAddress;
         sendCount++;
-        return MessagingReceipt({ guid: bytes32(uint256(0xABCD)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
+        return MessagingReceipt({
+            guid: bytes32(uint256(0xABCD)),
+            nonce: 0,
+            fee: MessagingFee({ nativeFee: msg.value, lzTokenFee: 0 })
+        });
     }
 
     function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {
@@ -377,7 +470,7 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             intentHash,
             bytes32(uint256(uint160(solverEvm))),
-            uint128(100_000),
+            uint128(1_000_000), // must meet intent.minDestAmount (990_000) or UnderDelivered
             uint64(12_345)
         );
     }
@@ -411,6 +504,7 @@ contract PerihelionEscrowTest is Test {
     // --- Lock ----------------------------------------------------------------
 
     function test_LockPullsFundsEmitsAndDispatches() public {
+        endpoint.setMockFee(0.01 ether); // quote == msg.value, so nothing is refunded
         PerihelionEscrow.Intent memory intent = _intent();
         bytes memory sig = _sign(intent);
         bytes32 h = escrow.hashIntent(intent);
@@ -467,6 +561,8 @@ contract PerihelionEscrowTest is Test {
         vm.prank(user);
         feeToken.approve(address(escrow), type(uint256).max);
 
+        escrow.setAssetAllowed(address(feeToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(feeToken), type(uint256).max);
         PerihelionEscrow.Intent memory intent = _intent();
         intent.sourceAsset = address(feeToken);
         bytes memory sig = _sign(intent);
@@ -621,6 +717,8 @@ contract PerihelionEscrowTest is Test {
         newToken.approve(address(escrow), type(uint256).max);
 
         escrow.setAssetAllowed(address(newToken), true);
+
+        escrow.setMaxIntentAmountPerAsset(address(newToken), type(uint256).max);
         assertTrue(escrow.assetAllowed(address(newToken)));
 
         PerihelionEscrow.Intent memory intent = _intent();
@@ -721,7 +819,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Released(h, solver, 100_000, 100_000, 12_345, 990_000);
+        emit Released(h, solver, 100_000, 1_000_000, 12_345, 990_000);
         _confirm(h, solver, 1);
 
         assertEq(token.balanceOf(solver), 100_000);
@@ -733,6 +831,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_FillConfirmedNotLocked() public {
         bytes32 unknown = keccak256("nope");
+        vm.expectRevert(PerihelionEscrow.NotLocked.selector);
         _confirm(unknown, solver, 1);
     }
 
@@ -740,6 +839,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
         _confirm(h, solver, 1);
 
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 2);
     }
 
@@ -1111,6 +1211,8 @@ contract PerihelionEscrowTest is Test {
         vm.prank(user);
         noReturnToken.approve(address(escrow), type(uint256).max);
 
+        escrow.setAssetAllowed(address(noReturnToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(noReturnToken), type(uint256).max);
         PerihelionEscrow.Intent memory intent = _intent();
         intent.sourceAsset = address(noReturnToken);
         bytes memory sig = _sign(intent);
@@ -1130,6 +1232,8 @@ contract PerihelionEscrowTest is Test {
         vm.prank(user);
         falseToken.approve(address(escrow), type(uint256).max);
 
+        escrow.setAssetAllowed(address(falseToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(falseToken), type(uint256).max);
         PerihelionEscrow.Intent memory intent = _intent();
         intent.sourceAsset = address(falseToken);
         bytes memory sig = _sign(intent);
@@ -1145,6 +1249,8 @@ contract PerihelionEscrowTest is Test {
         vm.prank(user);
         heavyFeeToken.approve(address(escrow), type(uint256).max);
 
+        escrow.setAssetAllowed(address(heavyFeeToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(heavyFeeToken), type(uint256).max);
         PerihelionEscrow.Intent memory intent = _intent();
         intent.sourceAsset = address(heavyFeeToken);
         bytes memory sig = _sign(intent);
@@ -1227,7 +1333,7 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             h,
             bytes32(uint256(uint160(solver))),
-            uint128(1), // tiny — must NOT under-release
+            uint128(990_000), // exactly minDestAmount: passes the floor, must NOT under-release
             uint64(1)
         );
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgWithSmallAmount);
@@ -1283,7 +1389,8 @@ contract PerihelionEscrowTest is Test {
         escrow.cancelExpired(h);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Late FillConfirmed arrives; it is consumed as a no-op.
+        // Late FillConfirmed arrives and is rejected by the terminal-state guard.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 1);
     }
 
@@ -1298,6 +1405,7 @@ contract PerihelionEscrowTest is Test {
         assertEq(token.balanceOf(user), 1_000_000);
 
         // Subsequent FillConfirmed is consumed as a no-op.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 2);
     }
 
@@ -1489,7 +1597,7 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig); // below the 0.05 ether quote
     }
 
-    function test_LockExactFeeSucceeds() public {
+    function test_LockExactFeeSucceedsAtLowMockFee() public {
         endpoint.setMockFee(0.01 ether);
         PerihelionEscrow.Intent memory intent = _intent();
         bytes memory sig = _sign(intent);

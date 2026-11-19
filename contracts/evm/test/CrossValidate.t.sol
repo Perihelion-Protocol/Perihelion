@@ -28,7 +28,7 @@ contract CrossValidateTest is Test {
     string internal corpusDir;
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), 30_316);
+        harness = new DecoderHarness(address(new CrossValidateNoopEndpoint()), 30_316);
         corpusDir = _resolveCorpusDir();
     }
 
@@ -176,6 +176,11 @@ contract CrossValidateTest is Test {
 }
 
 /// @dev Reuse the harness from DifferentialFuzz.t.sol
+/// @dev Endpoint stub: the escrow constructor calls `setDelegate` and needs code.
+contract CrossValidateNoopEndpoint {
+    function setDelegate(address) external { }
+}
+
 contract DecoderHarness is PerihelionEscrow {
     constructor(address endpoint_, uint32 eid_) PerihelionEscrow(endpoint_, eid_) { }
 
