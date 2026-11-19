@@ -4,6 +4,7 @@
 
 import type { ExecutorConfig } from "./executor.js";
 import { getAddress, isAddress, privateKeyToAccount, type Hex } from "viem";
+import { inclusionFeePolicyFromEnv, type InclusionFeePolicy } from "@perihelion/sdk";
 
 const EXECUTOR_ENV_KEYS = [
   "PERIHELION_EVM_RPC_URL",
@@ -131,6 +132,15 @@ export function loadExecutorConfig(
     );
   }
 
+  // Soroban inclusion-fee policy for fill_intent. Bad values are reported with
+  // the other configuration errors rather than thrown on their own.
+  let inclusionFee: InclusionFeePolicy = {};
+  try {
+    inclusionFee = inclusionFeePolicyFromEnv(env);
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
+  }
+
   // The solver address used for eligibility checks must match the key that
   // signs lock transactions, otherwise reserved intents are mis-attributed.
   const configuredSolverAddress = (env.PERIHELION_SOLVER_ADDRESS ?? "").trim();
@@ -172,6 +182,7 @@ export function loadExecutorConfig(
     sourceChainId,
     stellarNetwork,
     lzFeeBufferBps,
+    inclusionFee,
     registrationPollIntervalMs,
     minFillHeadroomSecs,
   };

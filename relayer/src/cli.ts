@@ -11,6 +11,7 @@
  * should import from `index.ts` instead, which has no side effects.
  */
 
+import { inclusionFeePolicyFromEnv } from "@perihelion/sdk";
 import { loadConfig } from "./config.js";
 import { Relayer } from "./relayer.js";
 import { EVMSourceWatcher } from "./evm-watcher.js";
@@ -95,6 +96,7 @@ async function main(): Promise<void> {
     signerSecret: config.signerSecret,
     escrowAddress: config.escrowAddress,
     timeoutSeconds: config.txTimeoutSeconds,
+    inclusionFee: inclusionFeePolicyFromEnv(process.env),
     logger: log,
   });
 

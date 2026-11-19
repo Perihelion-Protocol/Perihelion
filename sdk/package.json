@@ -37,6 +37,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@stellar/stellar-sdk": "^12.3.0",
     "viem": "^2.55.8"
   },
   "devDependencies": {

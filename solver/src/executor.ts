@@ -23,13 +23,17 @@ import {
   Keypair,
   Contract,
   nativeToScVal,
+  scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
 import {
   ESCROW_ABI,
   IntentStatus,
   decodeIntentStatus,
-  submitAndWait,
+  evmAddressToBytes32,
+  resolveInclusionFeePolicy,
+  submitWithFeeEscalation,
+  type InclusionFeePolicy,
 } from "@perihelion/sdk";
 import type { SignedIntent } from "@perihelion/sdk";
 
@@ -114,6 +118,11 @@ export interface ExecutorConfig {
    */
   readonly lzFeeBufferStroops?: bigint;
   /**
+   * Operator policy for the Soroban inclusion-fee bid on `fill_intent`: the
+   * `getFeeStats` percentile to follow, the floor, and the hard cap.
+   */
+  readonly inclusionFee?: InclusionFeePolicy;
+  /**
    * Number of source-chain confirmations to wait for after the EVM lock
    * before polling Stellar for intent registration. Defaults to 1.
    */
@@ -170,8 +179,6 @@ export interface FillFees {
  */
 const SOROBAN_MAX_POLL_ATTEMPTS = 30;
 const SOROBAN_POLL_INTERVAL_MS = 2_000;
-/** How many times to resubmit when the RPC answers TRY_AGAIN_LATER. */
-const SOROBAN_MAX_RESUBMIT_ATTEMPTS = 3;
 
 /**
  * Minimum headroom (in seconds) that must remain before the intent deadline
@@ -199,6 +206,7 @@ export class Executor {
   private readonly sourceChainId: number;
   private readonly stellarNetwork: string;
   private readonly lzFeeBufferStroops: bigint;
+  private readonly inclusionFee: Required<InclusionFeePolicy>;
   private readonly sourceConfirmations: number;
   private readonly persistStage?: (intentHash: Hex, stage: FillStage) => void | Promise<void>;
   private readonly loadStage?: (intentHash: Hex) => FillStage | undefined | Promise<FillStage | undefined>;
@@ -216,6 +224,10 @@ export class Executor {
     this.settlementContractId = config.settlementContractId;
     this.sourceChainId = config.sourceChainId;
     this.stellarNetwork = config.stellarNetwork;
+    // Validate the policy up front so a bad cap fails at startup, not mid-fill.
+    this.inclusionFee = resolveInclusionFeePolicy(config.inclusionFee);
+    this.lzFeeBufferStroops = config.lzFeeBufferStroops ?? 0n;
+    this.sourceConfirmations = config.sourceConfirmations ?? 1;
     this.logger = logger;
   }
 
@@ -603,36 +615,42 @@ export class Executor {
       nativeToScVal(lzFee, { type: "i128" }),       // lz_fee: i128 (quoted)
     ];
 
-    const tx = new TransactionBuilder(account, {
-      fee: "10000",
-      networkPassphrase: this.stellarNetwork,
-    })
-      .addOperation(contract.call("fill_intent", ...args))
-      .setTimeout(60)
-      .build();
+    // Each attempt is built and simulated at its own inclusion-fee bid. A
+    // TRY_AGAIN_LATER or an expiry escalates the bid within the operator's cap
+    // and resubmits with the same sequence number, so at most one attempt applies.
+    const landed = await submitWithFeeEscalation({
+      rpc,
+      signerPublicKey: keypair.publicKey(),
+      sequence: account.sequenceNumber(),
+      policy: this.inclusionFee,
+      logger: this.logger,
+      prepare: async (attemptAccount, inclusionFeeStroops) => {
+        const attempt = new TransactionBuilder(attemptAccount, {
+          fee: String(inclusionFeeStroops),
+          networkPassphrase: this.stellarNetwork,
+        })
+          .addOperation(contract.call("fill_intent", ...args))
+          .setTimeout(60)
+          .build();
 
-    // Simulate to obtain the resource fee and prepared transaction.
-    const simulated = await rpc.simulateTransaction(tx);
-    if (!SorobanRpc.Api.isSimulationSuccess(simulated)) {
-      // Simulation failure: the transaction was never submitted.
-      throw new DefiniteFailureError(
-        `fill_intent simulation failed: ${String((simulated).error)}`,
-      );
-    }
-
-    const prepared = SorobanRpc.assembleTransaction(tx, simulated).build();
-    prepared.sign(keypair);
-
-    // Submit and wait, failing fast on ERROR and backing off on
-    // TRY_AGAIN_LATER (shared with the relayer's delivery path).
-    const hash = await submitAndWait(rpc, prepared, {
-      maxPollAttempts: SOROBAN_MAX_POLL_ATTEMPTS,
-      pollIntervalMs: SOROBAN_POLL_INTERVAL_MS,
-      maxResubmitAttempts: SOROBAN_MAX_RESUBMIT_ATTEMPTS,
-      label: "fill_intent",
+        // Simulation failure: the transaction was never submitted.
+        const simulated = await rpc.simulateTransaction(attempt);
+        if (!SorobanRpc.Api.isSimulationSuccess(simulated)) {
+          throw new DefiniteFailureError(
+            `fill_intent simulation failed: ${String(simulated.error)}`,
+          );
+        }
+        return SorobanRpc.assembleTransaction(attempt, simulated).build();
+      },
+      sign: (transaction) => transaction.sign(keypair),
+      submitOptions: {
+        maxAttempts: SOROBAN_MAX_POLL_ATTEMPTS,
+        pollIntervalMs: SOROBAN_POLL_INTERVAL_MS,
+      },
     });
 
-    return hash as Hex;
+    // The fee is the one the ledger charged, so fee metrics reflect what was paid.
+    return { txHash: landed.hash as Hex, feeStroops: landed.feeChargedStroops };
   }
 
   /**

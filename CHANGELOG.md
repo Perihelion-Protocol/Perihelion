@@ -26,9 +26,28 @@ versioned independently.
 - `make sdk-abi` / `make sdk-abi-check`: `sdk/src/escrow-abi.ts` is now
   generated from the PerihelionEscrow Foundry build artefact, and CI fails if
   the committed file is stale.
+- **sdk**: `submitWithFeeEscalation`, `quoteInclusionFee` and `submitAndWait`
+  are the Soroban submission path shared by the relayer and the solver.
+  Operators set the inclusion-fee policy with
+  `PERIHELION_SOROBAN_INCLUSION_FEE_PERCENTILE` (50/70/90/95/99, default 90),
+  `PERIHELION_SOROBAN_MIN_INCLUSION_FEE` (default 10000 stroops) and
+  `PERIHELION_SOROBAN_MAX_INCLUSION_FEE` (default 1000000 stroops per operation).
 
 ### Fixed
 
+- **evm**: `PerihelionEscrow.sol` did not parse on `main` (the #857 stack-depth
+  refactor left `_pullFunds` unclosed and `_dispatchFillInstruction` without a
+  header), so no EVM build, test or fuzz job could run. It compiles again, the
+  Foundry suite passes, and the gas snapshot and pinned bytecode are regenerated.
+  (#1034)
+- **evm**: the differential fuzz harness is deployed against a no-op endpoint
+  stub, since the escrow constructor calls `setDelegate` on it. (#996)
+- **relayer, solver**: Soroban `lz_receive` and `fill_intent` no longer use a
+  fixed `10000`-stroop inclusion fee. Each submission bids a `getFeeStats`
+  percentile within an operator cap, and a `TRY_AGAIN_LATER` or an expired
+  attempt is resubmitted at a higher bid with the same sequence number. The
+  solver's stellar fee metric now records the fee the ledger charged rather than
+  zero. (#981)
 - **sdk**: `ESCROW_ABI` had drifted from `PerihelionEscrow.sol` — it declared a
   non-existent `getLock` function and a `PausedError` error.
   `PerihelionEscrowClient.getLock` now reads the contract's `locks(bytes32)`
