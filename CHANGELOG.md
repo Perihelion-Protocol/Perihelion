@@ -29,6 +29,25 @@ versioned independently.
 
 ### Fixed
 
+- **evm**: `PerihelionEscrow` builds again. `_pullFunds` and
+  `_dispatchFillInstruction` had lost their boundaries in the `lock()` refactor,
+  and the test suite referenced removed signatures. A rolling-window breach
+  again returns early, so a capped lock is neither recorded nor dispatched.
+- **evm**: `transferOwnership` reverts with `ZeroAddress` for `address(0)` and
+  with `TransferToCurrentOwner` for the current owner. A rejected call no longer
+  clears a pending handover; use `cancelOwnershipTransfer`.
+- **evm**: rotating the guardian with `setGuardian` clears the old key's pause
+  cooldown, so the new key can pause immediately. An active guardian pause becomes
+  an owner pause and no longer auto-expires. `setGuardian(owner)` reverts with
+  `GuardianIsOwner`. See `docs/incident-response.md`.
+- **evm**: the FillInstruction executor options were out of LayerZero's Type-3
+  layout and fixed in code. They are now stored in `enforcedOptions`, set by the
+  owner with `setEnforcedOptions` (validated, emits `EnforcedOptionsSet`), and used
+  by both `quoteFee` and `lock`. The default is the canonical lzReceive option
+  for 300 000 gas.
+- **evm**: removed the unused `SourceChainMismatch` and `RollingWindowCapExceeded`
+  errors. CI now fails on custom errors that are declared but never used
+  (`scripts/check-unused-errors.mjs`).
 - **sdk**: `ESCROW_ABI` had drifted from `PerihelionEscrow.sol` — it declared a
   non-existent `getLock` function and a `PausedError` error.
   `PerihelionEscrowClient.getLock` now reads the contract's `locks(bytes32)`
