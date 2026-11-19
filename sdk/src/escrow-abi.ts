@@ -266,6 +266,19 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "enforcedOptions",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "guardian",
     "inputs": [],
     "outputs": [
@@ -916,6 +929,19 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "setEnforcedOptions",
+    "inputs": [
+      {
+        "name": "options",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setGuardian",
     "inputs": [
       {
@@ -1171,6 +1197,19 @@ export const ESCROW_ABI = [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EnforcedOptionsSet",
+    "inputs": [
+      {
+        "name": "options",
+        "type": "bytes",
+        "indexed": false,
+        "internalType": "bytes"
       }
     ],
     "anonymous": false
@@ -1667,6 +1706,11 @@ export const ESCROW_ABI = [
   {
     "type": "error",
     "name": "InvalidDuration",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidOptions",
     "inputs": []
   },
   {
