@@ -375,6 +375,13 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
     }
 
+    /// @dev Allowlists `asset` with no per-asset cap, the configuration a deployment applies
+    ///      before the escrow accepts locks for it (see script/Deploy.s.sol).
+    function _allowAsset(address asset) internal {
+        escrow.setAssetAllowed(asset, true);
+        escrow.setMaxIntentAmountPerAsset(asset, type(uint256).max);
+    }
+
     function _fillConfirmed(bytes32 intentHash, address solverEvm)
         internal
         pure
@@ -385,7 +392,7 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             intentHash,
             bytes32(uint256(uint160(solverEvm))),
-            uint128(100_000),
+            uint128(990_000), // == _intent().minDestAmount
             uint64(12_345)
         );
     }
@@ -446,7 +453,8 @@ contract PerihelionEscrowTest is Test {
         assertEq(endpoint.sendCount(), 1);
         assertEq(endpoint.lastDstEid(), STELLAR_EID);
         assertEq(endpoint.lastReceiver(), STELLAR_PEER);
-        assertEq(endpoint.lastNativeFee(), 0.01 ether);
+        // The escrow forwards only the quoted fee (0 with the mock) and refunds the rest.
+        assertEq(endpoint.lastNativeFee(), 0);
         assertEq(endpoint.lastRefundAddress(), solver);
 
         bytes memory message = endpoint.lastMessage();
@@ -473,6 +481,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_LockMeasuredDeltaWithFeeOnTransfer() public {
         FeeERC20 feeToken = new FeeERC20(100); // 1% fee
+        _allowAsset(address(feeToken));
         feeToken.mint(user, 1_000_000);
         vm.prank(user);
         feeToken.approve(address(escrow), type(uint256).max);
@@ -630,7 +639,7 @@ contract PerihelionEscrowTest is Test {
         vm.prank(user);
         newToken.approve(address(escrow), type(uint256).max);
 
-        escrow.setAssetAllowed(address(newToken), true);
+        _allowAsset(address(newToken));
         assertTrue(escrow.assetAllowed(address(newToken)));
 
         PerihelionEscrow.Intent memory intent = _intent();
@@ -731,7 +740,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Released(h, solver, 100_000, 100_000, 12_345, 990_000);
+        emit Released(h, solver, 100_000, 990_000, 12_345, 990_000);
         _confirm(h, solver, 1);
 
         assertEq(token.balanceOf(solver), 100_000);
@@ -743,6 +752,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_FillConfirmedNotLocked() public {
         bytes32 unknown = keccak256("nope");
+        vm.expectRevert(PerihelionEscrow.NotLocked.selector);
         _confirm(unknown, solver, 1);
     }
 
@@ -750,6 +760,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
         _confirm(h, solver, 1);
 
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 2);
     }
 
@@ -1117,6 +1128,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_LockWithNoReturnToken() public {
         NoReturnERC20 noReturnToken = new NoReturnERC20();
+        _allowAsset(address(noReturnToken));
         noReturnToken.mint(user, 1_000_000);
         vm.prank(user);
         noReturnToken.approve(address(escrow), type(uint256).max);
@@ -1136,6 +1148,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_LockWithFalseReturningToken() public {
         FalseReturningERC20 falseToken = new FalseReturningERC20();
+        _allowAsset(address(falseToken));
         falseToken.mint(user, 1_000_000);
         vm.prank(user);
         falseToken.approve(address(escrow), type(uint256).max);
@@ -1151,6 +1164,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_LockTokenReceivesNothing() public {
         FeeERC20 heavyFeeToken = new FeeERC20(10_000); // 100% fee (receives 0)
+        _allowAsset(address(heavyFeeToken));
         heavyFeeToken.mint(user, 1_000_000);
         vm.prank(user);
         heavyFeeToken.approve(address(escrow), type(uint256).max);
@@ -1229,7 +1243,9 @@ contract PerihelionEscrowTest is Test {
     }
 
     /// @notice Symmetric: message amount smaller than locked still releases l.amount.
-    function test_FillConfirmedReleasesLockAmountWhenMessageAmountIsSmaller() public {
+    /// @notice A FillConfirmed reporting less than minDestAmount is rejected outright, so
+    ///         the lock can never be released for an under-delivered fill.
+    function test_RevertWhen_FillConfirmedAmountIsSmaller() public {
         bytes32 h = _lock(); // locks 100_000 tokens
 
         bytes memory msgWithSmallAmount = abi.encodePacked(
@@ -1237,13 +1253,14 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             h,
             bytes32(uint256(uint160(solver))),
-            uint128(1), // tiny — must NOT under-release
+            uint128(1), // tiny: must not release
             uint64(1)
         );
+        vm.expectRevert(PerihelionEscrow.UnderDelivered.selector);
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgWithSmallAmount);
 
-        assertEq(token.balanceOf(solver), 100_000);
-        assertEq(token.balanceOf(address(escrow)), 0);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
+        assertEq(token.balanceOf(solver), 0);
     }
 
     // --- FillConfirmed/CancelIntent codec: exact byte layout ----
@@ -1293,7 +1310,8 @@ contract PerihelionEscrowTest is Test {
         escrow.cancelExpired(h);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Late FillConfirmed arrives; it is consumed as a no-op.
+        // Late FillConfirmed arrives after the refund and reverts: the lock is finalized.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 1);
     }
 
@@ -1307,7 +1325,8 @@ contract PerihelionEscrowTest is Test {
         _cancel(h, 1);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Subsequent FillConfirmed is consumed as a no-op.
+        // Subsequent FillConfirmed reverts: the finalized lock is never released.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 2);
     }
 

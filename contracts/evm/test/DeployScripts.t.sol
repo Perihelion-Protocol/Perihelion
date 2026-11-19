@@ -58,6 +58,42 @@ contract DeployScriptsTest is Test {
         assertEq(escrow.pendingOwner(), address(0));
     }
 
+    /// @notice Acceptance criterion for #1047: a freshly deployed escrow accepts a lock with no
+    ///         further manual calls. The config alone supplies the peer, the allowlist, the
+    ///         per-asset cap and the rolling-window cap.
+    function test_Deploy_AcceptsLockWithoutFurtherCalls() public {
+        PerihelionEscrow escrow = _deploy("test/fixtures/deploy/full.json");
+
+        uint256 userPk = 0xB0B;
+        address user = vm.addr(userPk);
+        address solver = address(0x501E);
+        MockERC20 token = MockERC20(ASSET);
+        token.mint(user, 1_000_000);
+        vm.prank(user);
+        token.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = PerihelionEscrow.Intent({
+            user: user,
+            destination: "GUSERSTELLAR",
+            sourceChainId: block.chainid,
+            sourceAsset: ASSET,
+            sourceAmount: 100_000,
+            destAsset: "USDC:GA5Z",
+            minDestAmount: 99_000,
+            deadline: block.timestamp + 600,
+            nonce: 1,
+            preferredSolver: address(0)
+        });
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPk, escrow.hashIntent(intent));
+
+        vm.deal(solver, 1 ether);
+        vm.prank(solver);
+        escrow.lock{ value: 0 }(intent, abi.encodePacked(r, s, v));
+
+        assertEq(token.balanceOf(address(escrow)), 100_000);
+        assertEq(escrow.totalLocked(ASSET), 100_000);
+    }
+
     function test_Config_RevertsWhenPeerMissing() public {
         ConfigHarness harness = new ConfigHarness();
         vm.expectRevert(bytes("DeployConfig: missing peer"));

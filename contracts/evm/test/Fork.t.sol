@@ -129,6 +129,8 @@ contract ForkTest is Test {
         escrow = new PerihelionEscrow(address(endpoint), STELLAR_EID);
         escrow.setPeer(STELLAR_PEER);
         escrow.setConfirmationGrace(2 hours);
+        escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 
         // Deploy timelock (2-of-3)
         address[] memory owners = new address[](3);
@@ -370,6 +372,7 @@ contract ForkTest is Test {
         // Ready at block.timestamp + 1 day. Grace period = 14 days.
         // After readyAt + 14 days + 1 second — must be expired.
         vm.warp(readyAt + tl.GRACE_PERIOD() + 1);
+        vm.prank(owners[0]);
         vm.expectRevert(PerihelionTimelock.Expired.selector);
         tl.execute(address(target), 0, data, SALT);
     }

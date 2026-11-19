@@ -31,6 +31,7 @@ contract PerihelionEscrowFuzzTest is Test {
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
         escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
         vm.deal(solver, 100 ether);
     }
 
@@ -72,7 +73,7 @@ contract PerihelionEscrowFuzzTest is Test {
 
     /// The escrow records and holds exactly the amount pulled, for any amount.
     function testFuzz_LockHoldsExactAmount(uint128 amount) public {
-        amount = uint128(bound(amount, 1, type(uint128).max));
+        amount = uint128(bound(amount, 1, type(uint128).max >> 1));
         PerihelionEscrow.Intent memory intent = _intent(amount, block.timestamp + 600);
         bytes memory sig = _sign(userPk, intent);
         bytes32 h = escrow.hashIntent(intent);
@@ -100,7 +101,7 @@ contract PerihelionEscrowFuzzTest is Test {
 
     /// Tampering with the amount after signing always invalidates the signature.
     function testFuzz_TamperedAmountRejected(uint128 signedAmount, uint128 sentAmount) public {
-        signedAmount = uint128(bound(signedAmount, 1, type(uint128).max - 1));
+        signedAmount = uint128(bound(signedAmount, 1, (type(uint128).max >> 1) - 1));
         sentAmount = uint128(bound(sentAmount, 1, type(uint128).max));
         vm.assume(signedAmount != sentAmount);
 
@@ -166,13 +167,8 @@ contract PerihelionEscrowFuzzTest is Test {
         uint128 amount,
         uint64 ledger
     ) public {
-        bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02),
-            intentHash,
-            solverWord,
-            amount,
-            ledger
-        );
+        bytes memory message =
+            abi.encodePacked(bytes1(0x01), bytes1(0x02), intentHash, solverWord, amount, ledger);
 
         // Call lzReceive from a random non-endpoint address — must revert NotEndpoint
         vm.prank(address(0xDEAD));
@@ -198,8 +194,12 @@ contract PerihelionEscrowFuzzTest is Test {
 
         // Build a minimal message with version, type, and hash
         bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(address(0)))), uint128(0), uint64(0)
+            bytes1(0x01),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(address(0)))),
+            uint128(0),
+            uint64(0)
         );
 
         vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
@@ -209,8 +209,12 @@ contract PerihelionEscrowFuzzTest is Test {
     /// @dev lzReceive with a stale nonce (zero) must revert StaleNonce.
     function testFuzz_LzReceive_ZeroNonceRejected(bytes32 intentHash) public {
         bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(address(0)))), uint128(0), uint64(0)
+            bytes1(0x01),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(address(0)))),
+            uint128(0),
+            uint64(0)
         );
 
         vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
@@ -242,8 +246,8 @@ contract PerihelionEscrowFuzzTest is Test {
     /// @dev Two intents with the same fields but different nonces produce distinct
     ///      intent hashes, so they can both be locked without collision.
     function testFuzz_NonceDifferentiatesIntents(uint128 amountA, uint128 amountB) public {
-        amountA = uint128(bound(amountA, 1, type(uint128).max - 1));
-        amountB = uint128(bound(amountB, 1, type(uint128).max));
+        amountA = uint128(bound(amountA, 1, (type(uint128).max >> 1) - 1));
+        amountB = uint128(bound(amountB, 1, type(uint128).max >> 1));
         vm.assume(amountA != amountB);
 
         uint256 deadline = block.timestamp + 600;
@@ -298,11 +302,11 @@ contract PerihelionEscrowFuzzTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
 
         // Confirm with nonce=1 (first delivery)
-        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, _fillConfirmed(h));
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, _fillConfirmed(h, 100_000));
 
         // Replay same nonce=1 — must revert StaleNonce
         vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
-        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, _fillConfirmed(h));
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, _fillConfirmed(h, 100_000));
     }
 
     /// @dev Out-of-order delivery: nonce 5 lands before nonce 3; 3 must still be
@@ -316,7 +320,7 @@ contract PerihelionEscrowFuzzTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
 
         // Deliver nonce=5 first (unordered)
-        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 5, _fillConfirmed(h));
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 5, _fillConfirmed(h, 100_000));
 
         // Nonce=3 is still new — need a second lock to confirm
         PerihelionEscrow.Intent memory intent2 = _intent(200_000, block.timestamp + 600, 2);
@@ -325,16 +329,16 @@ contract PerihelionEscrowFuzzTest is Test {
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent2, sig2);
 
-        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 3, _fillConfirmed(h2));
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 3, _fillConfirmed(h2, 200_000));
 
         // Replay nonce=5 — must revert StaleNonce
         vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
-        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 5, _fillConfirmed(h));
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 5, _fillConfirmed(h, 100_000));
     }
 
     // --- Helpers -------------------------------------------------------------
 
-    function _fillConfirmed(bytes32 intentHash)
+    function _fillConfirmed(bytes32 intentHash, uint128 fillAmount)
         internal
         pure
         returns (bytes memory)
@@ -344,7 +348,7 @@ contract PerihelionEscrowFuzzTest is Test {
             bytes1(0x02), // T_FILL_CONFIRMED
             intentHash,
             bytes32(uint256(uint160(address(0x5012E5)))), // solver
-            uint128(100_000),
+            fillAmount, // must be >= the intent's minDestAmount
             uint64(12_345)
         );
     }
