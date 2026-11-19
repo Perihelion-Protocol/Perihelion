@@ -367,15 +367,131 @@ test("GET /intents?chainId=<invalid> returns the documented 400", async () => {
   );
 });
 
-test("GET /info matches the documented MempoolInfo schema and reflects the configured domain", async () => {
+test("GET /info matches the documented InfoResponse schema and reflects the configured domain", async () => {
   const res = await fetch(`${BASE}/info`);
   assert.equal(res.status, 200);
   const body = await res.json();
   assertMatchesSchema(responseSchema("/info", "get", "200"), body, "GET /info 200 body");
   assert.deepEqual(body, {
-    name: "Perihelion",
-    version: "1",
     chainId: CHAIN_ID,
     verifyingContract: ESCROW,
+    domain: perihelionDomain(CHAIN_ID, ESCROW),
   });
+});
+
+test("PATCH /intents/:hash/status 200 response is the updated IntentRecord", async () => {
+  const { hash } = (await (await submitSignedIntent()).json()) as { hash: string };
+  const res = await fetch(`${BASE}/intents/${hash}/status`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "filled" }),
+  });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { hash: string; status: string };
+  assertMatchesSchema(
+    responseSchema("/intents/{hash}/status", "patch", "200"),
+    body,
+    "PATCH status 200 body",
+  );
+  assert.equal(body.hash, hash);
+  assert.equal(body.status, "filled");
+});
+
+test("an unresolvable cursor returns the documented 400 with code unresolvable_cursor", async () => {
+  const res = await fetch(`${BASE}/intents?cursor=0x${"00".repeat(32)}`);
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assertMatchesSchema(responseSchema("/intents", "get", "400"), body, "unresolvable cursor 400 body");
+  assert.equal((body as { code?: string }).code, "unresolvable_cursor");
+});
+
+test("a malformed cursor returns 400 without a code", async () => {
+  const res = await fetch(`${BASE}/intents?cursor=not-a-cursor`);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string; code?: string };
+  assert.equal(typeof body.error, "string");
+  assert.equal(body.code, undefined);
+});
+
+test("a cursor whose record left the status filter is unresolvable", async () => {
+  await submitSignedIntent();
+  await submitSignedIntent();
+  // Pending records are listed one at a time, so the page-1 record becomes the cursor.
+  const page1 = (await (await fetch(`${BASE}/intents?status=pending&limit=1`)).json()) as {
+    records: Array<{ hash: string }>;
+    nextCursor?: string;
+  };
+  assert.ok(page1.nextCursor, "a second pending record must exist to produce a cursor");
+
+  // Move the cursor's record out of the pending set, then resume paging with it.
+  const moved = await fetch(`${BASE}/intents/${page1.nextCursor}/status`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "filled" }),
+  });
+  assert.equal(moved.status, 200);
+
+  const res = await fetch(`${BASE}/intents?status=pending&limit=1&cursor=${page1.nextCursor}`);
+  assert.equal(res.status, 400);
+  assert.equal(((await res.json()) as { code?: string }).code, "unresolvable_cursor");
+});
+
+test("GET /healthz and GET /readyz match their documented schemas", async () => {
+  const health = await fetch(`${BASE}/healthz`);
+  assert.equal(health.status, 200);
+  assertMatchesSchema(responseSchema("/healthz", "get", "200"), await health.json(), "GET /healthz 200 body");
+
+  const ready = await fetch(`${BASE}/readyz`);
+  assert.equal(ready.status, 200);
+  assertMatchesSchema(responseSchema("/readyz", "get", "200"), await ready.json(), "GET /readyz 200 body");
+});
+
+test("GET /metrics is documented as Prometheus text and exposes the documented gauges", async () => {
+  const res = await fetch(`${BASE}/metrics`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /text\/plain/);
+  const text = await res.text();
+  assert.match(text, /^mempool_store_size \d+$/m);
+  assert.match(text, /^# TYPE mempool_submissions_accepted_total counter$/m);
+});
+
+test("GET /metrics with metricsToken configured returns the documented 401 and 200", async () => {
+  const token = "contract-metrics-token";
+  const secured = new MempoolServer({
+    port: 3993,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    metricsToken: token,
+  });
+  await secured.start();
+  try {
+    const denied = await fetch("http://localhost:3993/metrics");
+    assert.equal(denied.status, 401);
+    assertMatchesSchema(responseSchema("/metrics", "get", "401"), await denied.json(), "GET /metrics 401 body");
+
+    const allowed = await fetch("http://localhost:3993/metrics", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(allowed.status, 200);
+  } finally {
+    await secured.stop();
+  }
+});
+
+test("a rate-limited request returns the documented 429 ErrorResponse", async () => {
+  const limited = new MempoolServer({
+    port: 3994,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    readRateLimit: 1,
+  });
+  await limited.start();
+  try {
+    assert.equal((await fetch("http://localhost:3994/info")).status, 200);
+    const res = await fetch("http://localhost:3994/info");
+    assert.equal(res.status, 429);
+    assertMatchesSchema({ $ref: "#/components/schemas/ErrorResponse" }, await res.json(), "429 body");
+  } finally {
+    await limited.stop();
+  }
 });

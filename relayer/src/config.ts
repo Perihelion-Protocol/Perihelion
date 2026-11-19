@@ -77,7 +77,6 @@ export const PUBNET_PASSPHRASE = "Public Global Stellar Network ; September 2015
 
 /** Accepted truthy values for boolean environment flags. */
 const TRUTHY_RE = /^(1|true|yes|on)$/i;
-=======
 
 /** 0x-prefixed 20-byte EVM address. */
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;

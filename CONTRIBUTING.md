@@ -317,10 +317,12 @@ Additional required settings:
 ## Security review policy
 
 Changes to the following paths carry heightened risk and require at least one
-approval from **`@Perihelion-Protocol/security-reviewers`** in addition to the
-normal package-owner review. This is enforced via CODEOWNERS and branch
-protection (`Require review from Code Owners` must be enabled in Settings →
-Branches → Protection rules for `main`).
+approval from **`@Perihelion-Protocol/maintainers`**, the code owners of every
+path in the repository (see [`.github/CODEOWNERS`](./.github/CODEOWNERS)). This is
+enforced via CODEOWNERS and branch protection (`Require review from Code Owners`
+must be enabled in Settings → Branches → Protection rules for `main`). A separate
+security-reviewers group is not currently assigned; if one is created, add it to
+the paths listed below in CODEOWNERS and update this section.
 
 | Path | Why it is sensitive |
 | ---- | ------------------- |

@@ -80,12 +80,22 @@ function submit(intent: unknown, signature: string) {
   });
 }
 
+/** Report a status transition over HTTP. The shared `server` has no statusToken, so no auth header is needed. */
+function patchStatus(target: MempoolServer, hash: string, status: string) {
+  const port = target === server ? PORT : STATUS_PORT;
+  return fetch(`http://localhost:${port}/intents/${hash}/status`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+}
+
 test("accepts an intent signed with the server's configured domain", async () => {
   const intent = sampleIntent();
   const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
 
   const res = await submit(intent, signature);
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 201);
   const body = (await res.json()) as { hash: string };
   assert.match(body.hash, /^0x[0-9a-f]{64}$/);
 });
@@ -98,7 +108,7 @@ test("rejects an intent signed under a mismatched chainId", async () => {
   const res = await submit(intent, signature);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.equal(body.error, "Invalid signature");
+  assert.equal(body.error, "Signature verification failed");
 });
 
 test("rejects an intent signed under a mismatched verifyingContract", async () => {
@@ -109,7 +119,7 @@ test("rejects an intent signed under a mismatched verifyingContract", async () =
   const res = await submit(intent, signature);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.equal(body.error, "Invalid signature");
+  assert.equal(body.error, "Signature verification failed");
 });
 
 // ─── Issue 348: path/query parameter validation on GET /intents ────────────
@@ -150,7 +160,7 @@ test("GET /intents?status=<invalid> returns 400", async () => {
   const res = await fetch(`${BASE}/intents?status=not-a-real-status`);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.match(body.error, /status must be one of/);
+  assert.match(body.error, /Invalid status filter/);
 });
 
 test("GET /intents?status=<repeated> returns 400 instead of silently comparing an array", async () => {
@@ -175,7 +185,7 @@ test("GET /intents paginates with nextCursor and round-trips without overlap or 
     const intent = { ...sampleIntent(), sourceAmount: String(10_000_000 + i) };
     const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
     const res = await submit(intent, signature);
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 201);
     const { hash } = (await res.json()) as { hash: string };
     submitted.push(hash);
   }
@@ -242,39 +252,41 @@ test("rejects an intent whose deadline has already passed", async () => {
   const res = await submit(intent, signature);
   assert.equal(res.status, 400);
   const body = (await res.json()) as { error: string };
-  assert.equal(body.error, "Intent deadline has passed");
+  assert.equal(body.error, "Intent has expired");
 });
 
-test("duplicate submission is rejected with 409 and does not reset a settled intent's status", async () => {
+// Duplicate submissions are documented as last-write-wins returning 201, not a
+// 409 (see docs/api/mempool-api.yaml and the closed #320). Pinned here so the
+// behaviour cannot drift silently.
+test("duplicate submission returns 201 and overwrites the stored record, as documented", async () => {
   const intent = sampleIntent();
   const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
 
   const first = await submit(intent, signature);
-  assert.equal(first.status, 200);
+  assert.equal(first.status, 201);
   const { hash } = (await first.json()) as { hash: `0x${string}` };
 
-  assert.equal(server.updateStatus(hash, "settled"), true);
+  await patchStatus(server, hash, "filled");
 
   const dup = await submit(intent, signature);
-  assert.equal(dup.status, 409);
-  const dupBody = (await dup.json()) as { status: string };
-  assert.equal(dupBody.status, "settled");
+  assert.equal(dup.status, 201);
+  assert.equal(((await dup.json()) as { hash: string }).hash, hash);
 
-  const record = await (await fetch(`${BASE}/intents/${hash}`)).json();
-  assert.equal(record.status, "settled");
+  const record = (await (await fetch(`${BASE}/intents/${hash}`)).json()) as { status: string };
+  assert.equal(record.status, "pending", "a resubmission resets the stored record");
 });
 
-test("terminal statuses are final: updateStatus cannot move a settled intent backwards", async () => {
+test("terminal statuses are final: a settled intent cannot move backwards", async () => {
   const intent = sampleIntent();
   const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
 
   const res = await submit(intent, signature);
   const { hash } = (await res.json()) as { hash: `0x${string}` };
 
-  assert.equal(server.updateStatus(hash, "settled"), true);
-  assert.equal(server.updateStatus(hash, "pending"), false);
+  assert.equal((await patchStatus(server, hash, "settled")).status, 200);
+  assert.equal((await patchStatus(server, hash, "pending")).status, 404);
 
-  const record = await (await fetch(`${BASE}/intents/${hash}`)).json();
+  const record = (await (await fetch(`${BASE}/intents/${hash}`)).json()) as { status: string };
   assert.equal(record.status, "settled");
 });
 
@@ -350,7 +362,7 @@ test("abusive client remains throttled for entire window (#738)", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ intent: intent1, signature: sig1 }),
     });
-    assert.equal(res1.status, 200, "first request should succeed");
+    assert.equal(res1.status, 201, "first request should succeed");
 
     const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
     const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
@@ -401,7 +413,7 @@ test("rate limiting keys on req.ip and ignores X-Forwarded-For without trustProx
       },
       body: JSON.stringify({ intent: intent1, signature: sig1 }),
     });
-    assert.equal(res1.status, 200, "first request should succeed");
+    assert.equal(res1.status, 201, "first request should succeed");
 
     const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
     const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));
@@ -446,7 +458,7 @@ test("multiple forged X-Forwarded-For entries do not bypass rate limiting (#739)
       },
       body: JSON.stringify({ intent: intent1, signature: sig1 }),
     });
-    assert.equal(res1.status, 200, "first request should succeed");
+    assert.equal(res1.status, 201, "first request should succeed");
 
     const intent2 = { ...sampleIntent(), sourceAmount: "100000000" };
     const sig2 = await sign(intent2, perihelionDomain(CHAIN_ID, ESCROW));

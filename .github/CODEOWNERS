@@ -25,14 +25,8 @@
 # ── EVM (Solidity) contracts ─────────────────────────────────────────────────
 /contracts/evm/                                     @Perihelion-Protocol/maintainers
 
-# ── Shared cross-chain artifacts ─────────────────────────────────────────────
-/contracts/shared/                                  @Perihelion-Protocol/maintainers
-
 # ── Documentation & specifications ───────────────────────────────────────────
 /docs/                                              @Perihelion-Protocol/maintainers
-
-# ── CI/CD workflows ──────────────────────────────────────────────────────────
-/.github/workflows/                                 @Perihelion-Protocol/maintainers
 
 # ── Security-sensitive meta files ─────────────────────────────────────────────
 /SECURITY.md                                        @Perihelion-Protocol/maintainers
