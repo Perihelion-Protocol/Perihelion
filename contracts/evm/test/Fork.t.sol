@@ -176,11 +176,11 @@ contract ForkTest is Test {
     function _intent(uint256 nonce_) internal view returns (PerihelionEscrow.Intent memory) {
         return PerihelionEscrow.Intent({
             user: user,
-            destination: "GUSERSTELLAR",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(token),
             sourceAmount: 100_000,
-            destAsset: "USDC:GA5Z",
+            destAsset: "USDC:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             minDestAmount: 99_000,
             deadline: block.timestamp + 600,
             nonce: nonce_,

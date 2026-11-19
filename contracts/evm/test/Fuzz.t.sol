@@ -41,11 +41,11 @@ contract PerihelionEscrowFuzzTest is Test {
     {
         return PerihelionEscrow.Intent({
             user: user,
-            destination: "GUSERSTELLAR",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(token),
             sourceAmount: amount,
-            destAsset: "USDC:GA5Z",
+            destAsset: "USDC:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             minDestAmount: amount,
             deadline: deadline,
             nonce: nonce,
@@ -166,13 +166,8 @@ contract PerihelionEscrowFuzzTest is Test {
         uint128 amount,
         uint64 ledger
     ) public {
-        bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02),
-            intentHash,
-            solverWord,
-            amount,
-            ledger
-        );
+        bytes memory message =
+            abi.encodePacked(bytes1(0x01), bytes1(0x02), intentHash, solverWord, amount, ledger);
 
         // Call lzReceive from a random non-endpoint address — must revert NotEndpoint
         vm.prank(address(0xDEAD));
@@ -198,8 +193,12 @@ contract PerihelionEscrowFuzzTest is Test {
 
         // Build a minimal message with version, type, and hash
         bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(address(0)))), uint128(0), uint64(0)
+            bytes1(0x01),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(address(0)))),
+            uint128(0),
+            uint64(0)
         );
 
         vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
@@ -209,8 +208,12 @@ contract PerihelionEscrowFuzzTest is Test {
     /// @dev lzReceive with a stale nonce (zero) must revert StaleNonce.
     function testFuzz_LzReceive_ZeroNonceRejected(bytes32 intentHash) public {
         bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(address(0)))), uint128(0), uint64(0)
+            bytes1(0x01),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(address(0)))),
+            uint128(0),
+            uint64(0)
         );
 
         vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
@@ -334,11 +337,7 @@ contract PerihelionEscrowFuzzTest is Test {
 
     // --- Helpers -------------------------------------------------------------
 
-    function _fillConfirmed(bytes32 intentHash)
-        internal
-        pure
-        returns (bytes memory)
-    {
+    function _fillConfirmed(bytes32 intentHash) internal pure returns (bytes memory) {
         return abi.encodePacked(
             bytes1(0x01), // V = PROTOCOL_VERSION
             bytes1(0x02), // T_FILL_CONFIRMED

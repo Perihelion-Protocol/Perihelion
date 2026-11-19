@@ -43,7 +43,7 @@ contract GasSnapshotERC20 is IERC20 {
 
 /// @dev Mock endpoint for gas snapshot tests.
 contract GasSnapshotEndpoint is ILayerZeroEndpointV2 {
-    function setDelegate(address) external {}
+    function setDelegate(address) external { }
 
     uint256 public mockFee;
 
@@ -51,8 +51,16 @@ contract GasSnapshotEndpoint is ILayerZeroEndpointV2 {
         mockFee = fee;
     }
 
-    function send(MessagingParams calldata, address) external payable returns (MessagingReceipt memory receipt) {
-        return MessagingReceipt({ guid: bytes32(uint256(0xABCD)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
+    function send(MessagingParams calldata, address)
+        external
+        payable
+        returns (MessagingReceipt memory receipt)
+    {
+        return MessagingReceipt({
+            guid: bytes32(uint256(0xABCD)),
+            nonce: 0,
+            fee: MessagingFee({ nativeFee: msg.value, lzTokenFee: 0 })
+        });
     }
 
     function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {
@@ -114,11 +122,11 @@ contract GasSnapshotTest is Test {
     function _intent() internal view returns (PerihelionEscrow.Intent memory) {
         return PerihelionEscrow.Intent({
             user: user,
-            destination: "GUSERSTELLAR",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(token),
             sourceAmount: 100_000,
-            destAsset: "USDC:GA5Z",
+            destAsset: "USDC:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             minDestAmount: 99_000,
             deadline: block.timestamp + 600,
             nonce: 1,

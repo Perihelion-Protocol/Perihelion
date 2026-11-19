@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { IERC20 } from "./IERC20.sol";
+import { StellarStrKey } from "./StellarStrKey.sol";
 import {
     Origin,
     MessagingParams,
@@ -379,6 +380,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error ZeroAddress();
     error SourceChainMismatch();
     error StringFieldEmpty();
+    /// @dev `destination` is not a valid 56-char G.../C... strkey (#1052).
+    error MalformedDestination();
+    /// @dev `destAsset` is not `native`, `CODE:G...` or a `C...` strkey (#1052).
+    error MalformedDestAsset();
     error StringFieldTooLong();
     error GuardianCooldown();
     error PauseNotGuardianInitiated();
@@ -713,6 +718,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         uint256 assetLen = bytes(intent.destAsset).length;
         if (assetLen == 0) revert StringFieldEmpty();
         if (assetLen > MAX_DEST_ASSET_LEN) revert StringFieldTooLong();
+        // Full strkey and asset-form validation, mirroring the Soroban decoder. Without
+        // it a malformed intent is accepted here, the fee is paid, and the Soroban side
+        // rejects the FillInstruction permanently while the user's funds stay locked.
+        if (!StellarStrKey.isValidStrKey(bytes(intent.destination))) revert MalformedDestination();
+        if (!StellarStrKey.isValidDestAsset(bytes(intent.destAsset))) revert MalformedDestAsset();
 
         if (!assetAllowed[intent.sourceAsset]) revert AssetNotAllowed();
 

@@ -349,11 +349,11 @@ contract PerihelionEscrowTest is Test {
     function _intent() internal view returns (PerihelionEscrow.Intent memory) {
         return PerihelionEscrow.Intent({
             user: user,
-            destination: "GUSERSTELLAR",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(token),
             sourceAmount: 100_000,
-            destAsset: "USDC:GA5Z",
+            destAsset: "USDC:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             minDestAmount: 990_000,
             deadline: block.timestamp + 600,
             nonce: 1,
@@ -711,15 +711,58 @@ contract PerihelionEscrowTest is Test {
 
     function test_LockAtMaxDestinationLength() public {
         PerihelionEscrow.Intent memory intent = _intent();
-        intent.destination = _str(escrow.MAX_DESTINATION_LEN()); // exactly 56 bytes
+        intent.destination = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"; // exactly 56 chars, a valid strkey
         bytes memory sig = _sign(intent);
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig); // must not revert
     }
 
+    // --- Destination / asset strkey validation (#1052) -----------------------
+
+    function test_RevertWhen_DestinationIsNotAStrkey() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destination = "GUSERSTELLAR";
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.MalformedDestination.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_RevertWhen_DestinationChecksumIsBad() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destination = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHE";
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.MalformedDestination.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_RevertWhen_DestAssetIsNotCanonical() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destAsset = "XLM"; // must be `native`
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.MalformedDestAsset.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    /// @dev A malformed intent must be refused before any LayerZero fee is paid: the
+    ///      solver is not charged and no FillInstruction is dispatched.
+    function test_MalformedIntentPaysNoFee() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destination = "GUSERSTELLAR";
+        bytes memory sig = _sign(intent);
+        uint256 solverBefore = solver.balance;
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.MalformedDestination.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(solver.balance, solverBefore);
+        assertEq(endpoint.sendCount(), 0);
+    }
+
     function test_LockAtMaxDestAssetLength() public {
         PerihelionEscrow.Intent memory intent = _intent();
-        intent.destAsset = _str(escrow.MAX_DEST_ASSET_LEN()); // exactly 69 bytes
+        intent.destAsset = "ABCDEFGHIJKL:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"; // exactly 69 bytes: 12-char code + issuer
         bytes memory sig = _sign(intent);
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig); // must not revert

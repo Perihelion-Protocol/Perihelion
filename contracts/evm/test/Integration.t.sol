@@ -23,7 +23,7 @@ import { MockERC20 } from "./PerihelionEscrow.t.sol";
 ///      receive legs, peer/nonce authentication, and the terminal-state guards
 ///      are all exercised against a counterparty that speaks the pinned protocol.
 contract StellarRelay is ILayerZeroEndpointV2 {
-    function setDelegate(address) external {}
+    function setDelegate(address) external { }
 
     bytes1 private constant VERSION = 0x01;
     bytes1 private constant T_FILL_INSTRUCTION = 0x01;
@@ -51,7 +51,11 @@ contract StellarRelay is ILayerZeroEndpointV2 {
 
     /// @inheritdoc ILayerZeroEndpointV2
     /// @dev Captures the escrow's outbound FillInstruction (the source->Stellar leg).
-    function send(MessagingParams calldata params, address) external payable returns (MessagingReceipt memory receipt) {
+    function send(MessagingParams calldata params, address)
+        external
+        payable
+        returns (MessagingReceipt memory receipt)
+    {
         bytes calldata m = params.message;
         require(m.length >= 34, "relay: short message");
         require(m[0] == VERSION && m[1] == T_FILL_INSTRUCTION, "relay: not FillInstruction");
@@ -62,7 +66,11 @@ contract StellarRelay is ILayerZeroEndpointV2 {
         }
         lastFillIntentHash = h;
         fillInstructionCount++;
-        return MessagingReceipt({ guid: bytes32(uint256(0xA11CE)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
+        return MessagingReceipt({
+            guid: bytes32(uint256(0xA11CE)),
+            nonce: 0,
+            fee: MessagingFee({ nativeFee: msg.value, lzTokenFee: 0 })
+        });
     }
 
     /// @dev Stellar settled: deliver a FillConfirmed authorizing the solver payout.
@@ -131,11 +139,11 @@ contract IntegrationTest is Test {
     function _intent(uint256 nonce) internal view returns (PerihelionEscrow.Intent memory) {
         return PerihelionEscrow.Intent({
             user: user,
-            destination: "GUSERSTELLAR",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(token),
             sourceAmount: 100_000,
-            destAsset: "USDC:GA5Z",
+            destAsset: "USDC:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             minDestAmount: 990_000,
             deadline: block.timestamp + 600,
             nonce: nonce,

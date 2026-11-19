@@ -115,6 +115,40 @@ mod test {
         assert!(parse(&id).is_some());
     }
 
+    /// The shared strkey vectors (`contracts/shared/wire-vectors/strkey`) are also run
+    /// by the EVM escrow's `StellarStrKey.t.sol`. Both sides must agree on every case,
+    /// so a value the escrow accepts always decodes here (#1052).
+    #[test]
+    fn shared_vectors_agree_with_the_evm_validator() {
+        const DEST_VALID: &str =
+            include_str!("../../../shared/wire-vectors/strkey/destination-valid.txt");
+        const DEST_INVALID: &str =
+            include_str!("../../../shared/wire-vectors/strkey/destination-invalid.txt");
+        const ASSET_VALID: &str =
+            include_str!("../../../shared/wire-vectors/strkey/dest-asset-valid.txt");
+        const ASSET_INVALID: &str =
+            include_str!("../../../shared/wire-vectors/strkey/dest-asset-invalid.txt");
+
+        for line in DEST_VALID.lines() {
+            assert!(
+                strkey::is_valid_strkey(line.as_bytes()),
+                "destination {line:?}"
+            );
+        }
+        for line in DEST_INVALID.lines() {
+            assert!(
+                !strkey::is_valid_strkey(line.as_bytes()),
+                "destination {line:?}"
+            );
+        }
+        for line in ASSET_VALID.lines() {
+            assert!(parse(line.as_bytes()).is_some(), "dest_asset {line:?}");
+        }
+        for line in ASSET_INVALID.lines() {
+            assert!(parse(line.as_bytes()).is_none(), "dest_asset {line:?}");
+        }
+    }
+
     #[test]
     fn rejects_malformed_identifiers() {
         let with = |prefix: &[u8], key: &[u8]| {
