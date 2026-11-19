@@ -368,6 +368,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error NotPendingOwner();
     /// @dev `cancelOwnershipTransfer` was called while no handover is pending.
     error NoPendingOwner();
+    /// @dev `transferOwnership` was called with the current owner as the nominee.
+    error TransferToCurrentOwner();
     /// @dev An address expected to be a contract (e.g. an allowlisted asset) has no code.
     error NotAContract();
     error NotAuthorized();
@@ -593,11 +595,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Begin a two-step ownership handover. `newOwner` must call
-    ///         {acceptOwnership} to take effect. To cancel a pending handover
-    ///         with a clear event, use {cancelOwnershipTransfer} instead of
-    ///         passing `address(0)`.
+    ///         {acceptOwnership} to take effect. Cancel a pending handover with
+    ///         {cancelOwnershipTransfer}; this function never clears it.
+    /// @dev Reverts with {ZeroAddress} for `address(0)` and with
+    ///      {TransferToCurrentOwner} for the current owner. A rejected call leaves
+    ///      any pending handover untouched.
     /// @param newOwner Address to propose as the new owner.
     function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert ZeroAddress();
+        if (newOwner == owner) revert TransferToCurrentOwner();
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
     }

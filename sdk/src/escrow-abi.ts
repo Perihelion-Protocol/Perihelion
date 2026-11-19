@@ -1771,6 +1771,11 @@ export const ESCROW_ABI = [
   },
   {
     "type": "error",
+    "name": "TransferToCurrentOwner",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "UnderDelivered",
     "inputs": []
   },

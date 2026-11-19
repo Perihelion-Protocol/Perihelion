@@ -1173,12 +1173,32 @@ contract PerihelionEscrowTest is Test {
     function test_OldOwnerKeepsControlUntilAccepted() public {
         escrow.transferOwnership(solver);
         // Old owner can still act, and can even cancel the handover.
-        escrow.transferOwnership(address(0));
+        escrow.cancelOwnershipTransfer();
         assertEq(escrow.pendingOwner(), address(0));
 
         vm.prank(solver);
         vm.expectRevert(PerihelionEscrow.NotPendingOwner.selector);
         escrow.acceptOwnership();
+    }
+
+    function test_RevertWhen_TransferOwnershipToZero() public {
+        vm.expectRevert(PerihelionEscrow.ZeroAddress.selector);
+        escrow.transferOwnership(address(0));
+    }
+
+    /// @dev A zero-address proposal must not clear a live handover; only
+    ///      cancelOwnershipTransfer does that.
+    function test_RevertWhen_ZeroTransferKeepsPendingOwner() public {
+        escrow.transferOwnership(solver);
+        vm.expectRevert(PerihelionEscrow.ZeroAddress.selector);
+        escrow.transferOwnership(address(0));
+        assertEq(escrow.pendingOwner(), solver);
+    }
+
+    function test_RevertWhen_TransferOwnershipToCurrentOwner() public {
+        vm.expectRevert(PerihelionEscrow.TransferToCurrentOwner.selector);
+        escrow.transferOwnership(owner);
+        assertEq(escrow.pendingOwner(), address(0));
     }
 
     function test_RevertWhen_TransferOwnershipNotOwner() public {
