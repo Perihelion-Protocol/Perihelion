@@ -25,7 +25,7 @@ use soroban_sdk::{
 };
 
 // Re-use test harness from main test module
-use crate::test::{evm_solver, hash, register_intent, setup, Setup};
+use crate::test::{evm_solver, hash, register_intent, setup};
 
 /// Advance the ledger by `ledgers` ledgers, incrementing both sequence and timestamp.
 /// Assumes a 5-second ledger close time for timestamp progression.

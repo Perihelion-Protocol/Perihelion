@@ -228,7 +228,7 @@ fn fill_instruction_matches_golden_vector() {
         expected.len()
     );
     for (i, b) in expected.iter().enumerate() {
-        assert_eq!(encoded.get(i as u32).unwrap(), *b, "byte {} mismatch", i);
+        assert_eq!(encoded.get(i as u32).unwrap(), *b, "byte {i} mismatch");
     }
 }
 
@@ -418,7 +418,7 @@ fn export_to_corpus(name: &str, payload: &Bytes) {
         hex.push_str(&format!("{:02x}", payload.get(i).unwrap()));
     }
 
-    let file_path = corpus_dir.join(format!("{}.hex", name));
+    let file_path = corpus_dir.join(format!("{name}.hex"));
     fs::write(&file_path, hex).expect("Failed to write corpus file");
 }
 

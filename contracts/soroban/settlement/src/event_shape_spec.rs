@@ -151,8 +151,7 @@ fn assert_event_shape(env: &Env, expected_topic: &str, expected_topic_count: u32
     });
     assert!(
         found,
-        "expected an event with topic '{}' and {} topic(s), none found",
-        expected_topic, expected_topic_count
+        "expected an event with topic '{expected_topic}' and {expected_topic_count} topic(s), none found"
     );
 }
 

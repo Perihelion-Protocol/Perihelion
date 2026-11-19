@@ -33,7 +33,7 @@ use soroban_sdk::{Address, Bytes, BytesN, Env};
 use crate::strkey;
 use crate::types::{
     CancelInstruction, FillInstruction, CANCEL_INTENT_LENGTH, CANCEL_REASON_ADMIN,
-    CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID, FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH,
+    CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID, FILL_INSTRUCTION_LENGTH,
     MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
 };
 
@@ -406,7 +406,7 @@ fn trimmed_len(padded: &[u8]) -> usize {
 fn strkey_field<const N: usize>(addr: &Address) -> [u8; N] {
     let s = addr.to_string();
     let len = s.len() as usize;
-    assert!(len <= N, "strkey does not fit the {}-byte wire field", N);
+    assert!(len <= N, "strkey does not fit the {N}-byte wire field");
     let mut out = [0u8; N];
     s.copy_into_slice(&mut out[..len]);
     out

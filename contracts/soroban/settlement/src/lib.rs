@@ -467,7 +467,7 @@ impl Perihelion {
     ) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
-        if delay < MIN_PEER_CHANGE_DELAY || delay > MAX_PEER_CHANGE_DELAY {
+        if !(MIN_PEER_CHANGE_DELAY..=MAX_PEER_CHANGE_DELAY).contains(&delay) {
             return Err(PerihelionError::InvalidDelay);
         }
 
@@ -931,7 +931,7 @@ impl Perihelion {
     pub fn set_max_ttl(env: Env, max_ttl: u32) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
-        if max_ttl < MIN_MAX_TTL || max_ttl > MAX_TTL_CEILING {
+        if !(MIN_MAX_TTL..=MAX_TTL_CEILING).contains(&max_ttl) {
             return Err(PerihelionError::InvalidAmount);
         }
         let old: u32 = env

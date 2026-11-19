@@ -688,8 +688,7 @@ fn nonce_unbounded_replay_returns_stale_nonce() {
             .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
         assert!(
             result.is_err(),
-            "re-delivery of nonce {} must be rejected as StaleNonce",
-            n
+            "re-delivery of nonce {n} must be rejected as StaleNonce"
         );
     }
 }
@@ -756,8 +755,7 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
         let h = BytesN::from_array(&s.env, &hash_bytes);
         assert!(
             s.client.get_intent(&h).is_some(),
-            "intent for nonce {} was silently dropped",
-            n
+            "intent for nonce {n} was silently dropped"
         );
     }
 
@@ -786,7 +784,7 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
         let result = s
             .client
             .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
-        assert!(result.is_err(), "replay of nonce {} must be rejected", n);
+        assert!(result.is_err(), "replay of nonce {n} must be rejected");
     }
 }
 
@@ -1295,7 +1293,7 @@ fn assert_event_with_symbol(
                 .unwrap_or(false)
         })
     });
-    assert!(found, "event '{}' not found", expected_sym);
+    assert!(found, "event '{expected_sym}' not found");
 }
 
 /// Assert `registered` event: topics = ("registered", intent_hash), data = (src_eid, deadline)
@@ -1993,7 +1991,7 @@ fn nibble(c: u8) -> u8 {
 fn assert_bytes_eq(actual: &soroban_sdk::Bytes, expected: &[u8]) {
     assert_eq!(actual.len(), expected.len() as u32, "length");
     for (i, b) in expected.iter().enumerate() {
-        assert_eq!(actual.get(i as u32).unwrap(), *b, "byte {}", i);
+        assert_eq!(actual.get(i as u32).unwrap(), *b, "byte {i}");
     }
 }
 
@@ -2054,8 +2052,8 @@ fn fill_dispatches_evm_decodable_confirmation() {
     let sb = solver_evm.to_array();
     for (i, (hbyte, sbyte)) in hb.iter().zip(sb.iter()).enumerate() {
         let off = i as u32;
-        assert_eq!(msg.get(2 + off).unwrap(), *hbyte, "intent_hash byte {}", i);
-        assert_eq!(msg.get(34 + off).unwrap(), *sbyte, "solver_evm byte {}", i);
+        assert_eq!(msg.get(2 + off).unwrap(), *hbyte, "intent_hash byte {i}");
+        assert_eq!(msg.get(34 + off).unwrap(), *sbyte, "solver_evm byte {i}");
     }
 }
 
@@ -2079,8 +2077,7 @@ fn cancel_dispatches_evm_decodable_cancel() {
         assert_eq!(
             msg.get(2 + i as u32).unwrap(),
             *hbyte,
-            "intent_hash byte {}",
-            i
+            "intent_hash byte {i}"
         );
     }
     assert_eq!(msg.get(34).unwrap(), CANCEL_REASON_EXPIRED);
@@ -2620,8 +2617,8 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         let fill = s
             .client
             .try_fill_intent(&solver, &solver_evm, h, &amount, &0);
-        assert_eq!(deliver, Err(Ok(expected)), "{}: deliver_intent", case);
-        assert_eq!(fill, Err(Ok(expected)), "{}: fill_intent", case);
+        assert_eq!(deliver, Err(Ok(expected)), "{case}: deliver_intent");
+        assert_eq!(fill, Err(Ok(expected)), "{case}: fill_intent");
     };
 
     // Test 1: expired intent
