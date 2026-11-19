@@ -1,5 +1,10 @@
 # Architecture
 
+> **Short orientation.** This page is the high-level overview only. The full
+> specification (contract interfaces, wire format, threat matrix, and timing) is in
+> [TECHNICAL-ARCHITECTURE.md](./TECHNICAL-ARCHITECTURE.md). Where the two differ,
+> `TECHNICAL-ARCHITECTURE.md` is authoritative.
+
 Perihelion is an **intent + solver** bridge. Users express _what_ they want;
 a competitive solver network figures out _how_ to deliver it, and the protocol
 guarantees that settlement is atomic — the user is made whole or refunded, never

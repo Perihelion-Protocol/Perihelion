@@ -7,7 +7,6 @@ scopeable issues that contributors at every level can meaningfully tackle.
 This file is the quick-start. The full contributor playbook — issue taxonomy by
 skill and Wave cycle, PR review process, and the path from first-time
 contributor to maintainer — lives in
-[`docs/CONTRIBUTING.md`](./docs/CONTRIBUTING.md) and
 [the architecture spec, §9](./docs/TECHNICAL-ARCHITECTURE.md#9-contribution-guide-for-drips-wave).
 
 ## Code of Conduct

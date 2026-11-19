@@ -182,6 +182,6 @@ The following are explicitly out of scope for this audit:
 
 - Threat model: `docs/threat-model.md`
 - Technical architecture: `docs/TECHNICAL-ARCHITECTURE.md`
-- Protocol specification: `docs/protocol-spec.md`
+- Protocol specification: `docs/TECHNICAL-ARCHITECTURE.md` (§2 state machine, §3 cross-chain wire format)
 - Audit engagement letter: (link TBD)
 - Auditor contact: (TBD)

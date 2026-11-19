@@ -193,5 +193,5 @@ includes two **specification-derived** tests that close part of that gap:
 
 - Golden vectors: `contracts/shared/wire-vectors/README.md`
 - Fixed conformance tests: `contracts/evm/test/WireFormat.t.sol`
-- Wire format spec: `docs/protocol-spec.md` §3.3
+- Wire format spec: `docs/TECHNICAL-ARCHITECTURE.md` §3.3
 - Anti-replay architecture: `docs/TECHNICAL-ARCHITECTURE.md` §11
