@@ -7,6 +7,7 @@
 | [TECHNICAL-ARCHITECTURE.md](./TECHNICAL-ARCHITECTURE.md) | Full production spec: Soroban + EVM contracts, LayerZero V2, solver economics, threat matrix, testing, rollout |
 | [architecture.md](./architecture.md)                    | High-level settlement flow and trust model (orientation)       |
 | [intent-spec.md](./intent-spec.md)                      | The signable intent format and EIP-712 encoding                |
+| [clock-and-deadline-analysis.md](./clock-and-deadline-analysis.md) | Reconciles the EVM, Stellar and SDK clocks; derives the `confirmationGrace` minimum and the solver time-before-deadline guard |
 | [assets.md](./assets.md)                                | Canonical asset decimals, corridor conversion, and max amounts |
 
 ## Security, Monitoring & Operations
