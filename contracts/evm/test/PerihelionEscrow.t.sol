@@ -632,6 +632,18 @@ contract PerihelionEscrowTest is Test {
         assertEq(token.balanceOf(address(escrow)), 0);
     }
 
+    /// @notice The protocol-wide `setRollingWindowCap` was removed (#1040). A call to its
+    ///         selector must revert and must not change any rolling-window state.
+    function test_RemovedProtocolWideRollingCapSetterReverts() public {
+        uint256 durationBefore = escrow.rollingWindowDuration();
+
+        (bool ok,) = address(escrow).call(
+            abi.encodeWithSignature("setRollingWindowCap(uint256,uint256)", 1 days, 1_000_000e6)
+        );
+        assertFalse(ok);
+        assertEq(escrow.rollingWindowDuration(), durationBefore);
+    }
+
     function test_SetAssetAllowed() public {
         MockERC20 newToken = new MockERC20();
         newToken.mint(user, 1_000_000);

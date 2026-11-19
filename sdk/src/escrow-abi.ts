@@ -788,19 +788,6 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
-    "name": "rollingWindowCap",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "rollingWindowCapPerAsset",
     "inputs": [
       {
@@ -953,24 +940,6 @@ export const ESCROW_ABI = [
         "name": "peer",
         "type": "bytes32",
         "internalType": "bytes32"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setRollingWindowCap",
-    "inputs": [
-      {
-        "name": "_windowDuration",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_cap",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "outputs": [],
@@ -1485,25 +1454,6 @@ export const ESCROW_ABI = [
     "type": "event",
     "name": "RollingWindowCapReset",
     "inputs": [],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "RollingWindowCapSet",
-    "inputs": [
-      {
-        "name": "duration",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "cap",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
     "anonymous": false
   },
   {
