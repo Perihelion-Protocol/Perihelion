@@ -65,6 +65,8 @@ versioned independently.
 
 ### Changed
 
+- **evm, soroban**: removed the post-reservation open-fill fallback. Only the locking solver can complete a fill, at any point before the confirmation grace expires. The fallback was unreachable: the EVM sends a zero `reservation_window`, and Soroban stops accepting fills 30 minutes before the deadline, so no second solver could fill inside that window. A user whose locking solver goes offline recovers funds through `cancelExpired`. Restoring a liveness fallback needs a signed `reservationWindow` in the intent, a breaking typehash change (#1048).
+
 - **Breaking (Soroban events):** every settlement-contract event topic is now
   the event's full documented name — e.g. `admin_transfer_started` (was
   `adm_start`), `confirmation_sent` (was `confirmed`), `cancelled_inbound`

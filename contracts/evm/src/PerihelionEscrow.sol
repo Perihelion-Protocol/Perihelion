@@ -919,20 +919,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @dev `solverEvm` is the canonical solver identity carried by the FillInstruction
-    ///      that was locked on the source chain. It must match the locking solver
-    ///      during the lock's exclusivity window; after the deadline, another solver
-    ///      may complete the fill before the confirmation grace period expires.
+    ///      that was locked on the source chain. It must always match the locking solver.
+    ///      There is no post-deadline open-fill fallback: the Stellar settlement rejects
+    ///      fills inside its dispatch window before the deadline, so a second solver could
+    ///      never legitimately complete a fill. Strict exclusivity is the only reachable
+    ///      behaviour, and this function enforces it explicitly (issue #1048).
     function _onFillConfirmed(bytes calldata message) internal {
         (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger) =
             _decodeFillConfirmed(message);
         Lock storage l = locks[intentHash];
         if (l.user == address(0)) revert NotLocked();
-        // Exclusivity invariant: before expiry, only the EVM address that called
-        // lock may receive the release. After expiry, the reservation is open to
-        // another solver until cancelExpired reaches the confirmation-grace edge.
-        if (solverEvm != l.solver && block.timestamp < l.deadline) {
-            revert ReservedForSolver();
-        }
+        // Strict exclusivity: only the EVM address that called lock may receive the
+        // release. A late fill by another solver is refused and the refund path
+        // (cancelExpired after the confirmation grace) remains the only recourse.
+        if (solverEvm != l.solver) revert ReservedForSolver();
         if (l.released || l.refunded) revert AlreadyFinalized();
         if (fillAmount < l.minDestAmount) revert UnderDelivered();
 
