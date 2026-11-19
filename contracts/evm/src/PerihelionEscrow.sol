@@ -881,18 +881,32 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      that was locked on the source chain. It must match the locking solver
     ///      during the lock's exclusivity window; after the deadline, another solver
     ///      may complete the fill before the confirmation grace period expires.
+    /// @dev Benign late deliveries are consumed as no-ops, mirroring {_onCancelIntent}
+    ///      (#926): the nonce is already spent by lzReceive and no funds move, so the
+    ///      packet is not left as a permanently failing payload. A FillConfirmed for an
+    ///      unknown lock, or for a lock already released or refunded (for example after a
+    ///      permissionless {cancelExpired}), emits {FillConfirmedIgnored}.
+    ///      Reserved-solver violations and under-delivery stay as reverts so they surface
+    ///      in the failed-message queue for operator review; they are not benign races.
+    ///      Transport-level problems (endpoint, peer, nonce, payload) revert as before.
     function _onFillConfirmed(bytes calldata message) internal {
         (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger) =
             _decodeFillConfirmed(message);
         Lock storage l = locks[intentHash];
-        if (l.user == address(0)) revert NotLocked();
+        if (l.user == address(0)) {
+            emit FillConfirmedIgnored(intentHash, IGNORE_UNKNOWN_LOCK);
+            return;
+        }
+        if (l.released || l.refunded) {
+            emit FillConfirmedIgnored(intentHash, IGNORE_ALREADY_FINALIZED);
+            return;
+        }
         // Exclusivity invariant: before expiry, only the EVM address that called
         // lock may receive the release. After expiry, the reservation is open to
         // another solver until cancelExpired reaches the confirmation-grace edge.
         if (solverEvm != l.solver && block.timestamp < l.deadline) {
             revert ReservedForSolver();
         }
-        if (l.released || l.refunded) revert AlreadyFinalized();
         if (fillAmount < l.minDestAmount) revert UnderDelivered();
 
         l.released = true; // effect before interaction (race guard)

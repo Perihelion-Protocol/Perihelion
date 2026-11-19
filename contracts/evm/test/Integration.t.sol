@@ -102,6 +102,8 @@ contract StellarRelay is ILayerZeroEndpointV2 {
 }
 
 contract IntegrationTest is Test {
+    event FillConfirmedIgnored(bytes32 indexed intentHash, uint8 reason);
+
     PerihelionEscrow internal escrow;
     StellarRelay internal relay;
     MockERC20 internal token;
@@ -208,9 +210,13 @@ contract IntegrationTest is Test {
         escrow.cancelExpired(h);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // The relay's late settlement reverts inside lzReceive.
-        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
+        // The relay's late settlement is consumed as a no-op inside lzReceive (#1041):
+        // the lock stays refunded and no payout is made.
+        vm.expectEmit(true, false, false, true);
+        emit FillConfirmedIgnored(h, 0x02); // IGNORE_ALREADY_FINALIZED
         relay.deliverFillConfirmed(h, solver, 990_000, 99);
+        assertEq(token.balanceOf(solver), 0);
+        assertEq(token.balanceOf(user), 1_000_000);
     }
 
     /// Two concurrent intents resolve independently, and value is conserved.

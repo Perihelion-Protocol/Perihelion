@@ -299,6 +299,8 @@ contract PerihelionEscrowTest is Test {
         uint128 minDestAmount,
         uint64 deadline
     );
+    event FillConfirmedIgnored(bytes32 indexed intentHash, uint8 reason);
+
     event Released(
         bytes32 indexed intentHash,
         address indexed solver,
@@ -762,16 +764,33 @@ contract PerihelionEscrowTest is Test {
         assertTrue(released);
     }
 
-    function test_RevertWhen_FillConfirmedNotLocked() public {
+    /// @notice A FillConfirmed for a lock that does not exist is consumed as a no-op
+    ///         (#1041): no revert, no funds move, and the nonce is spent.
+    function test_FillConfirmedForUnknownLockIsIgnored() public {
         bytes32 unknown = keccak256("nope");
+
+        vm.expectEmit(true, false, false, true);
+        emit FillConfirmedIgnored(unknown, 0x01); // IGNORE_UNKNOWN_LOCK
+        _confirm(unknown, solver, 1);
+
+        assertEq(token.balanceOf(solver), 0);
+        assertEq(token.balanceOf(address(escrow)), 0);
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
         _confirm(unknown, solver, 1);
     }
 
-    function test_RevertWhen_FillConfirmedTwice() public {
+    /// @notice A second FillConfirmed after release is a no-op, not a double payout (#1041).
+    function test_FillConfirmedAfterReleaseIsIgnored() public {
         bytes32 h = _lock();
         _confirm(h, solver, 1);
+        assertEq(token.balanceOf(solver), 100_000);
 
+        vm.expectEmit(true, false, false, true);
+        emit FillConfirmedIgnored(h, 0x02); // IGNORE_ALREADY_FINALIZED
         _confirm(h, solver, 2);
+
+        assertEq(token.balanceOf(solver), 100_000);
+        assertEq(token.balanceOf(address(escrow)), 0);
     }
 
     // --- Inbound: CancelIntent ----------------------------------------------
@@ -1321,7 +1340,15 @@ contract PerihelionEscrowTest is Test {
         escrow.cancelExpired(h);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Late FillConfirmed arrives; it is consumed as a no-op.
+        // Late FillConfirmed arrives; it is consumed as a no-op (#1041): the event is
+        // emitted, no funds move, and the nonce is spent.
+        vm.expectEmit(true, false, false, true);
+        emit FillConfirmedIgnored(h, 0x02); // IGNORE_ALREADY_FINALIZED
+        _confirm(h, solver, 1);
+
+        assertEq(token.balanceOf(solver), 0);
+        assertEq(token.balanceOf(user), 1_000_000);
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
         _confirm(h, solver, 1);
     }
 
@@ -1335,8 +1362,11 @@ contract PerihelionEscrowTest is Test {
         _cancel(h, 1);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Subsequent FillConfirmed is consumed as a no-op.
+        // Subsequent FillConfirmed is consumed as a no-op (#1041).
+        vm.expectEmit(true, false, false, true);
+        emit FillConfirmedIgnored(h, 0x02); // IGNORE_ALREADY_FINALIZED
         _confirm(h, solver, 2);
+        assertEq(token.balanceOf(solver), 0);
     }
 
     /// @notice Second ordering: confirm wins, then local refund is attempted.
