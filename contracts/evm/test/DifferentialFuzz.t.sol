@@ -30,7 +30,7 @@ contract DifferentialFuzzTest is Test {
     string internal constant CORPUS_DIR = "../shared/wire-vectors/fuzz-corpus/";
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), 30_316);
+        harness = new DecoderHarness(address(new StubEndpoint()), 30_316);
     }
 
     // -------------------------------------------------------------------------
@@ -210,7 +210,9 @@ contract DifferentialFuzzTest is Test {
     }
 
     /// @dev Mutation: reject unknown reason codes (outside [0, 2]).
-    function testFuzz_CancelIntentRejectsUnknownReason(bytes32 intentHash, uint8 badReason) public {
+    function testFuzz_CancelIntentRejectsUnknownReason(bytes32 intentHash, uint8 badReason)
+        public
+    {
         vm.assume(badReason > 2); // Valid: 0x00, 0x01, 0x02
 
         bytes memory payload = abi.encodePacked(bytes1(0x01), bytes1(0x03), intentHash, badReason);
@@ -314,4 +316,9 @@ contract DecoderHarness is PerihelionEscrow {
             revert UnknownMessageType();
         }
     }
+}
+
+/// @dev No-op LayerZero endpoint: the escrow constructor calls setDelegate on it.
+contract StubEndpoint {
+    function setDelegate(address) external { }
 }

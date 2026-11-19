@@ -28,7 +28,7 @@ contract CrossValidateTest is Test {
     string internal corpusDir;
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), 30_316);
+        harness = new DecoderHarness(address(new StubEndpoint()), 30_316);
         corpusDir = _resolveCorpusDir();
     }
 
@@ -202,4 +202,9 @@ contract DecoderHarness is PerihelionEscrow {
             revert UnknownMessageType();
         }
     }
+}
+
+/// @dev No-op LayerZero endpoint: the escrow constructor calls setDelegate on it.
+contract StubEndpoint {
+    function setDelegate(address) external { }
 }

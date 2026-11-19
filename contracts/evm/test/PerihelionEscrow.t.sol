@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
+import { Vm } from "forge-std/Vm.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 import { IERC20 } from "../src/IERC20.sol";
 import {
@@ -13,7 +14,7 @@ import {
 } from "../src/interfaces/ILayerZero.sol";
 
 /// @dev Minimal mintable ERC-20 for tests.
-contract MockERC20 is IERC20 {
+contract MockERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -42,7 +43,7 @@ contract MockERC20 is IERC20 {
 
 /// @dev Fee-on-transfer token: skims `feeBps` from every transfer/transferFrom,
 ///      so the escrow's measured-delta accounting can be exercised.
-contract FeeERC20 is IERC20 {
+contract FeeERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
     uint256 public immutable feeBps;
@@ -98,19 +99,23 @@ contract NoReturnERC20 {
     function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
-        assembly { return(0, 0) } // no return data, mimicking USDT
+        assembly {
+            return(0, 0)
+        } // no return data, mimicking USDT
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
         allowance[from][msg.sender] -= amount;
         balanceOf[from] -= amount;
         balanceOf[to] += amount;
-        assembly { return(0, 0) } // no return data, mimicking USDT
+        assembly {
+            return(0, 0)
+        } // no return data, mimicking USDT
     }
 }
 
 /// @dev Token that returns false on transfer (e.g., insufficient balance). Tests rejection.
-contract FalseReturningERC20 is IERC20 {
+contract FalseReturningERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -135,7 +140,7 @@ contract FalseReturningERC20 is IERC20 {
 /// @dev RevertOnZeroERC20: reverts on transfer/transferFrom when amount == 0,
 ///      mimicking tokens that reject zero-value transfers (e.g., some USDT-like
 ///      implementations on certain networks).
-contract RevertOnZeroERC20 is IERC20 {
+contract RevertOnZeroERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -171,7 +176,7 @@ contract RevertOnZeroERC20 is IERC20 {
 /// @dev Token that returns false on transfer but succeeds on transferFrom.
 ///      Tests the release/refund path specifically — lock via transferFrom works,
 ///      but the subsequent release/refund via transfer fails.
-contract ReleaseFalseReturningERC20 is IERC20 {
+contract ReleaseFalseReturningERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -218,7 +223,7 @@ contract MockERC1271Wallet {
 /// @dev Records the last outbound LayerZero send and can replay inbound messages
 ///      back into the escrow as if it were the canonical endpoint.
 contract MockEndpoint is ILayerZeroEndpointV2 {
-    function setDelegate(address) external {}
+    function setDelegate(address) external { }
 
     uint32 public lastDstEid;
     bytes32 public lastReceiver;
@@ -227,7 +232,7 @@ contract MockEndpoint is ILayerZeroEndpointV2 {
     address public lastRefundAddress;
     uint256 public sendCount;
 
-    receive() external payable {}
+    receive() external payable { }
 
     /// @dev Fee returned by quote(); 0 means any msg.value >= 0 passes.
     uint256 public mockFee;
@@ -247,7 +252,11 @@ contract MockEndpoint is ILayerZeroEndpointV2 {
         lastNativeFee = msg.value;
         lastRefundAddress = refundAddress;
         sendCount++;
-        return MessagingReceipt({ guid: bytes32(uint256(0xABCD)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
+        return MessagingReceipt({
+            guid: bytes32(uint256(0xABCD)),
+            nonce: 0,
+            fee: MessagingFee({ nativeFee: msg.value, lzTokenFee: 0 })
+        });
     }
 
     function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {
@@ -377,7 +386,7 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             intentHash,
             bytes32(uint256(uint160(solverEvm))),
-            uint128(100_000),
+            uint128(990_000),
             uint64(12_345)
         );
     }
@@ -438,7 +447,9 @@ contract PerihelionEscrowTest is Test {
         assertEq(endpoint.sendCount(), 1);
         assertEq(endpoint.lastDstEid(), STELLAR_EID);
         assertEq(endpoint.lastReceiver(), STELLAR_PEER);
-        assertEq(endpoint.lastNativeFee(), 0.01 ether);
+        // Only the quoted fee is forwarded to the endpoint; the mock quotes 0, so the
+        // whole msg.value is refunded to the solver (see test_LockExactQuotedFeeNonZero).
+        assertEq(endpoint.lastNativeFee(), 0);
         assertEq(endpoint.lastRefundAddress(), solver);
 
         bytes memory message = endpoint.lastMessage();
@@ -449,7 +460,9 @@ contract PerihelionEscrowTest is Test {
             address lSolver,
             address lUser,
             address lAsset,
-            uint256 lAmount,,,
+            uint256 lAmount,
+            ,
+            ,
             bool released,
             bool refunded
         ) = escrow.locks(h);
@@ -463,6 +476,8 @@ contract PerihelionEscrowTest is Test {
 
     function test_LockMeasuredDeltaWithFeeOnTransfer() public {
         FeeERC20 feeToken = new FeeERC20(100); // 1% fee
+        escrow.setAssetAllowed(address(feeToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(feeToken), type(uint256).max);
         feeToken.mint(user, 1_000_000);
         vm.prank(user);
         feeToken.approve(address(escrow), type(uint256).max);
@@ -621,6 +636,7 @@ contract PerihelionEscrowTest is Test {
         newToken.approve(address(escrow), type(uint256).max);
 
         escrow.setAssetAllowed(address(newToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(newToken), type(uint256).max);
         assertTrue(escrow.assetAllowed(address(newToken)));
 
         PerihelionEscrow.Intent memory intent = _intent();
@@ -721,7 +737,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Released(h, solver, 100_000, 100_000, 12_345, 990_000);
+        emit Released(h, solver, 100_000, 990_000, 12_345, 990_000);
         _confirm(h, solver, 1);
 
         assertEq(token.balanceOf(solver), 100_000);
@@ -733,6 +749,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_FillConfirmedNotLocked() public {
         bytes32 unknown = keccak256("nope");
+        vm.expectRevert(PerihelionEscrow.NotLocked.selector);
         _confirm(unknown, solver, 1);
     }
 
@@ -740,6 +757,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
         _confirm(h, solver, 1);
 
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 2);
     }
 
@@ -1107,6 +1125,8 @@ contract PerihelionEscrowTest is Test {
 
     function test_LockWithNoReturnToken() public {
         NoReturnERC20 noReturnToken = new NoReturnERC20();
+        escrow.setAssetAllowed(address(noReturnToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(noReturnToken), type(uint256).max);
         noReturnToken.mint(user, 1_000_000);
         vm.prank(user);
         noReturnToken.approve(address(escrow), type(uint256).max);
@@ -1126,6 +1146,8 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_LockWithFalseReturningToken() public {
         FalseReturningERC20 falseToken = new FalseReturningERC20();
+        escrow.setAssetAllowed(address(falseToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(falseToken), type(uint256).max);
         falseToken.mint(user, 1_000_000);
         vm.prank(user);
         falseToken.approve(address(escrow), type(uint256).max);
@@ -1141,6 +1163,8 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_LockTokenReceivesNothing() public {
         FeeERC20 heavyFeeToken = new FeeERC20(10_000); // 100% fee (receives 0)
+        escrow.setAssetAllowed(address(heavyFeeToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(heavyFeeToken), type(uint256).max);
         heavyFeeToken.mint(user, 1_000_000);
         vm.prank(user);
         heavyFeeToken.approve(address(escrow), type(uint256).max);
@@ -1220,14 +1244,21 @@ contract PerihelionEscrowTest is Test {
 
     /// @notice Symmetric: message amount smaller than locked still releases l.amount.
     function test_FillConfirmedReleasesLockAmountWhenMessageAmountIsSmaller() public {
-        bytes32 h = _lock(); // locks 100_000 tokens
+        // minDestAmount lowered so a fill can sit below the 100_000 locked amount
+        // while still clearing the UnderDelivered floor.
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.minDestAmount = 50_000;
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
 
         bytes memory msgWithSmallAmount = abi.encodePacked(
             V,
             T_FILL_CONFIRMED,
             h,
             bytes32(uint256(uint160(solver))),
-            uint128(1), // tiny — must NOT under-release
+            uint128(60_000), // informational fill: >= minDest, < locked amount
             uint64(1)
         );
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgWithSmallAmount);
@@ -1283,7 +1314,8 @@ contract PerihelionEscrowTest is Test {
         escrow.cancelExpired(h);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Late FillConfirmed arrives; it is consumed as a no-op.
+        // Late FillConfirmed arrives after the refund and is rejected by the guard.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 1);
     }
 
@@ -1297,7 +1329,8 @@ contract PerihelionEscrowTest is Test {
         _cancel(h, 1);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Subsequent FillConfirmed is consumed as a no-op.
+        // Subsequent FillConfirmed is rejected by the AlreadyFinalized guard.
+        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 2);
     }
 
@@ -1489,7 +1522,7 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig); // below the 0.05 ether quote
     }
 
-    function test_LockExactFeeSucceeds() public {
+    function test_LockExactQuotedFeeNonZero() public {
         endpoint.setMockFee(0.01 ether);
         PerihelionEscrow.Intent memory intent = _intent();
         bytes memory sig = _sign(intent);
@@ -1497,6 +1530,59 @@ contract PerihelionEscrowTest is Test {
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig);
         assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    // --- Rolling-window breaker (#1035) --------------------------------------
+
+    event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
+
+    /// @notice A breaching lock latches the breaker, refunds msg.value once, records
+    ///         no lock and dispatches no FillInstruction. The same signed intent then
+    ///         locks successfully after resetRollingWindowCap.
+    function test_RollingWindowBreach_RecordsNothingAndRefundsOnce() public {
+        bytes32 lockedTopic = keccak256(
+            "Locked(bytes32,address,address,address,uint256,string,string,uint128,uint64)"
+        );
+        vm.warp(1_000_000); // window duration must not exceed block.timestamp
+        escrow.setRollingWindowCapForAsset(address(token), 1 days, 150_000);
+        _lock(); // nonce 1: 100_000 <= 150_000, accepted
+
+        PerihelionEscrow.Intent memory second = _intent();
+        second.nonce = 2; // 100_000 + 100_000 > 150_000: breaches
+        second.deadline = block.timestamp + 3 days;
+        bytes memory sig = _sign(second);
+        bytes32 h = escrow.hashIntent(second);
+
+        uint256 sendsBefore = endpoint.sendCount();
+        uint256 solverBefore = solver.balance;
+        uint256 userBefore = token.balanceOf(user);
+
+        vm.recordLogs();
+        vm.expectEmit(false, false, false, false);
+        emit RollingWindowCapTriggered(0, 0);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(second, sig);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertTrue(escrow.rollingWindowTriggered());
+        (, address lockUser,,,,,,) = escrow.locks(h);
+        assertEq(lockUser, address(0), "no lock recorded for the breaching intent");
+        assertEq(escrow.totalLocked(address(token)), 100_000, "only the first lock is a liability");
+        assertEq(endpoint.sendCount(), sendsBefore, "no FillInstruction dispatched");
+        assertEq(token.balanceOf(user), userBefore, "user funds not pulled");
+        assertEq(solver.balance, solverBefore, "msg.value refunded exactly once");
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != lockedTopic, "no Locked event on breach");
+        }
+
+        // Reset after the window elapses; the same intent now locks.
+        vm.warp(block.timestamp + 1 days);
+        escrow.resetRollingWindowCap();
+        assertFalse(escrow.rollingWindowTriggered());
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(second, sig);
+        (, lockUser,,,,,,) = escrow.locks(h);
+        assertEq(lockUser, user, "intent locks after reset");
     }
 
     // --- Guardian pause DoS mitigation (T11) ---------------------------------

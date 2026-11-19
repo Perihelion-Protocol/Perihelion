@@ -50,7 +50,7 @@ contract AmountBoundaryTest is Test {
     AmountBoundaryHarness internal harness;
 
     function setUp() public {
-        harness = new AmountBoundaryHarness(address(0x1), 30_316);
+        harness = new AmountBoundaryHarness(address(new StubEndpoint()), 30_316);
     }
 
     // -----------------------------------------------------------------------
@@ -173,4 +173,9 @@ contract AmountBoundaryTest is Test {
         b.sourceAmount = 2;
         assertNotEq(harness.exposedHashIntent(a), harness.exposedHashIntent(b));
     }
+}
+
+/// @dev No-op LayerZero endpoint: the escrow constructor calls setDelegate on it.
+contract StubEndpoint {
+    function setDelegate(address) external { }
 }
