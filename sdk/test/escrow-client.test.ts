@@ -271,11 +271,16 @@ async function withAnvilEscrow(fn: (env: AnvilEscrow) => Promise<void>): Promise
       }
     }
 
+    // The constructor calls `endpoint.setDelegate`, so the endpoint needs code. A
+    // bare STOP accepts any call with no return data, which is all this needs:
+    // the paths under test never touch LayerZero.
+    const endpoint = "0x000000000000000000000000000000000000dEaD";
+    await rpc("anvil_setCode", [endpoint, "0x00"]);
+
     const deployHash = await walletClient.deployContract({
       abi: ESCROW_ABI,
       bytecode,
-      // Any non-zero endpoint: the paths under test never touch LayerZero.
-      args: ["0x000000000000000000000000000000000000dEaD", 30148],
+      args: [endpoint, 30148],
     });
     const { contractAddress: escrow } = await publicClient.waitForTransactionReceipt({ hash: deployHash });
     assert.ok(escrow);
