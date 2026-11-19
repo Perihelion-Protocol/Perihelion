@@ -1565,6 +1565,70 @@ contract PerihelionEscrowTest is Test {
         escrow.setDelegate(address(0));
     }
 
+    // --- Per-asset rolling window duration (#1037) ---------------------------
+
+    function _intentFor(address asset, uint256 amount, uint256 nonce)
+        internal
+        view
+        returns (PerihelionEscrow.Intent memory it)
+    {
+        it = _intent();
+        it.sourceAsset = asset;
+        it.sourceAmount = amount;
+        it.nonce = nonce;
+        it.deadline = block.timestamp + 3 days;
+    }
+
+    function _lockIntent(PerihelionEscrow.Intent memory it) internal {
+        bytes memory sig = _sign(it);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(it, sig);
+    }
+
+    function _allowSecondToken() internal returns (MockERC20 tokenB) {
+        tokenB = new MockERC20();
+        tokenB.mint(user, 1_000_000);
+        vm.prank(user);
+        tokenB.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(tokenB), true);
+        escrow.setMaxIntentAmountPerAsset(address(tokenB), type(uint256).max);
+    }
+
+    /// @notice Each asset's window advances on its own schedule: a 1-hour window on
+    ///         asset B must not shorten asset A's 1-day window.
+    function test_RollingWindowDurationIsPerAsset() public {
+        vm.warp(1_000_000);
+        MockERC20 tokenB = _allowSecondToken();
+        escrow.setRollingWindowCapForAsset(address(token), 1 days, 150_000);
+        escrow.setRollingWindowCapForAsset(address(tokenB), 1 hours, 150_000);
+        assertEq(escrow.rollingWindowDurationPerAsset(address(token)), 1 days);
+        assertEq(escrow.rollingWindowDurationPerAsset(address(tokenB)), 1 hours);
+
+        _lockIntent(_intentFor(address(token), 100_000, 1)); // A: 100k in the day window
+        vm.warp(block.timestamp + 1 hours);
+
+        // B's hourly window has rolled over, so its bucket is fresh and 100k fits.
+        _lockIntent(_intentFor(address(tokenB), 100_000, 2));
+        assertFalse(escrow.rollingWindowTriggered());
+
+        // A's day window has not rolled over: 100k + 100k > 150k must breach.
+        _lockIntent(_intentFor(address(token), 100_000, 3));
+        assertTrue(escrow.rollingWindowTriggered());
+    }
+
+    /// @notice Disabling one asset's window (duration 0, cap 0) must leave another
+    ///         asset's cap enforced.
+    function test_ZeroDurationOnOneAssetDoesNotDisableAnother() public {
+        vm.warp(1_000_000);
+        MockERC20 tokenB = _allowSecondToken();
+        escrow.setRollingWindowCapForAsset(address(token), 1 days, 150_000);
+        escrow.setRollingWindowCapForAsset(address(tokenB), 0, 0);
+
+        _lockIntent(_intentFor(address(token), 100_000, 1));
+        _lockIntent(_intentFor(address(token), 100_000, 2));
+        assertTrue(escrow.rollingWindowTriggered());
+    }
+
     // --- Rolling-window breaker (#1035) --------------------------------------
 
     event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
