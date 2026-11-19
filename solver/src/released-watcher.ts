@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // solver/src/released-watcher.ts
 //
 // Watches the source-chain (EVM) PerihelionEscrow contract for `Released`
