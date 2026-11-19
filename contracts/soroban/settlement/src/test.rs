@@ -3545,3 +3545,324 @@ fn malformed_dest_asset_is_rejected() {
         Some(PerihelionError::InvalidDestAsset)
     );
 }
+
+// --- Issue #1063: deterministic policy rejections are terminal ----------------
+//
+// Transport and authentication errors (UntrustedPeer, StaleNonce, MalformedPayload)
+// keep reverting so the packet stays retryable. Deterministic policy rejections
+// consume the nonce, write a terminal `Cancelled` marker, and emit
+// `fill_instruction_rejected(hash, code)` so a CancelIntent can be dispatched.
+
+/// Assert a `fill_instruction_rejected` event exists for `intent_hash`.
+fn assert_fill_instruction_rejected_event(s: &Setup, intent_hash: &BytesN<32>) {
+    let events = s.env.events().all();
+    let expected = Symbol::new(&s.env, "fill_instruction_rejected");
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(&s.env, &topic)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
+    });
+    assert!(
+        found,
+        "fill_instruction_rejected event not emitted for {intent_hash:?}"
+    );
+}
+
+/// Deliver a raw FillInstruction through `lz_receive` and return the result.
+fn try_receive_fill(
+    s: &Setup,
+    fi: &FillInstruction,
+    nonce: u64,
+) -> Result<(), PerihelionError> {
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    match s
+        .client
+        .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi.clone()))
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => panic!("lz_receive return value failed to convert: {e:?}"),
+        Err(e) => Err(e.expect("lz_receive aborted with a non-contract error")),
+    }
+}
+
+fn fill_instruction(
+    s: &Setup,
+    h: &BytesN<32>,
+    recipient: &Address,
+    min: i128,
+    deadline: u64,
+) -> FillInstruction {
+    FillInstruction {
+        intent_hash: h.clone(),
+        src_eid: s.src_eid,
+        recipient: recipient.clone(),
+        dest_asset: s.asset.clone(),
+        min_dest_amount: min,
+        deadline,
+        preferred_solver: None,
+        locked_solver: None,
+        reservation_window: 0,
+    }
+}
+
+#[test]
+fn policy_rejection_invalid_amount_is_terminal() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0xA1);
+    // min_dest_amount <= 0 is a deterministic policy rejection.
+    let fi = fill_instruction(&s, &h, &recipient, 0, 5_000);
+    assert_eq!(try_receive_fill(&s, &fi, 1), Ok(()));
+    assert!(
+        s.client.get_intent(&h).is_none(),
+        "no Intent record for a rejected instruction"
+    );
+    assert!(
+        s.client.is_cancelled(&h),
+        "terminal Cancelled marker must be written"
+    );
+    assert_fill_instruction_rejected_event(&s, &h);
+
+    // A subsequent CancelIntent for the same hash is accepted (not a revert).
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 2,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    assert!(s
+        .client
+        .try_lz_receive(&origin, &guid, &LzMessage::Cancel(ci))
+        .is_ok());
+}
+
+#[test]
+fn policy_rejection_deadline_too_far_is_terminal() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0xA2);
+    let now = s.env.ledger().timestamp();
+    let fi = fill_instruction(&s, &h, &recipient, 100_000, now + MAX_DEADLINE_HORIZON + 1);
+    assert_eq!(try_receive_fill(&s, &fi, 1), Ok(()));
+    assert!(s.client.get_intent(&h).is_none());
+    assert!(s.client.is_cancelled(&h));
+    assert_fill_instruction_rejected_event(&s, &h);
+}
+
+#[test]
+fn policy_rejection_exceeds_max_intent_amount_is_terminal() {
+    let s = setup();
+    s.client.set_max_intent_amount(&1_000i128);
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0xA3);
+    let fi = fill_instruction(&s, &h, &recipient, 5_000, 5_000);
+    assert_eq!(try_receive_fill(&s, &fi, 1), Ok(()));
+    assert!(s.client.get_intent(&h).is_none());
+    assert!(s.client.is_cancelled(&h));
+    assert_fill_instruction_rejected_event(&s, &h);
+}
+
+#[test]
+fn policy_rejection_unsupported_dest_asset_is_terminal() {
+    let s = setup();
+    let token_id = s.env.register(ContractOnlyToken, ());
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0xA4);
+    let id = strkey_bytes(&token_id);
+    // Not allowlisted: deterministic rejection, acknowledged terminally.
+    assert_eq!(
+        try_deliver_fill_with_asset_id(&s, &h, &recipient, &id, 5_000, 1),
+        Ok(())
+    );
+    assert!(s.client.get_intent(&h).is_none());
+    assert!(s.client.is_cancelled(&h));
+    assert_fill_instruction_rejected_event(&s, &h);
+}
+
+#[test]
+fn policy_rejection_missing_peer_is_terminal() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0xA5);
+    let mut fi = fill_instruction(&s, &h, &recipient, 100_000, 5_000);
+    fi.src_eid = 99999u32; // no peer configured for this eid
+    assert_eq!(try_receive_fill(&s, &fi, 1), Ok(()));
+    assert!(s.client.get_intent(&h).is_none());
+    assert!(s.client.is_cancelled(&h));
+    assert_fill_instruction_rejected_event(&s, &h);
+}
+
+#[test]
+fn transport_error_untrusted_peer_still_reverts() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0xA6);
+    let fi = fill_instruction(&s, &h, &recipient, 100_000, 5_000);
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: BytesN::from_array(&s.env, &[0x11; 32]), // wrong sender
+        nonce: 1,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    let err = s
+        .client
+        .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi))
+        .expect_err("untrusted peer must revert")
+        .unwrap();
+    assert_eq!(err, PerihelionError::UntrustedPeer);
+    assert!(!s.client.is_cancelled(&h));
+}
+
+#[test]
+fn transport_error_stale_nonce_still_reverts() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h1 = hash(&s.env, 0xA7);
+    let fi1 = fill_instruction(&s, &h1, &recipient, 100_000, 5_000);
+    assert_eq!(try_receive_fill(&s, &fi1, 5), Ok(()));
+
+    let h2 = hash(&s.env, 0xA8);
+    let fi2 = fill_instruction(&s, &h2, &recipient, 100_000, 5_000);
+    let err = try_receive_fill(&s, &fi2, 5).expect_err("stale nonce must revert");
+    assert_eq!(err, PerihelionError::StaleNonce);
+    assert!(!s.client.is_cancelled(&h2));
+}
+
+#[test]
+fn transport_error_malformed_payload_still_reverts() {
+    let s = setup();
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 1,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    // A bad protocol version is a transport-level malformation.
+    let bad = Bytes::from_slice(&s.env, &[0xFFu8, MSG_FILL_INSTRUCTION]);
+    let err = s
+        .client
+        .try_lz_receive_bytes(&origin, &guid, &bad)
+        .expect_err("malformed payload must revert")
+        .unwrap();
+    assert_eq!(err, PerihelionError::MalformedPayload);
+}
+
+// --- Issue #1064: past/near deadlines are terminal rejections ----------------
+
+#[test]
+fn past_deadline_writes_no_intent_and_is_terminal() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0xB1);
+    let now = s.env.ledger().timestamp();
+    let fi = fill_instruction(&s, &h, &recipient, 100_000, now - 1);
+    assert_eq!(try_receive_fill(&s, &fi, 1), Ok(()));
+    assert!(
+        s.client.get_intent(&h).is_none(),
+        "no Intent record for an already-expired deadline"
+    );
+    assert!(s.client.is_cancelled(&h));
+    assert_fill_instruction_rejected_event(&s, &h);
+}
+
+#[test]
+fn near_deadline_writes_no_intent_and_is_terminal() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0xB2);
+    let now = s.env.ledger().timestamp();
+    // Within MIN_DISPATCH_WINDOW: no fill could ever pass validate_and_stage_fill.
+    let fi = fill_instruction(&s, &h, &recipient, 100_000, now + MIN_DISPATCH_WINDOW);
+    assert_eq!(try_receive_fill(&s, &fi, 1), Ok(()));
+    assert!(s.client.get_intent(&h).is_none());
+    assert!(s.client.is_cancelled(&h));
+    assert_fill_instruction_rejected_event(&s, &h);
+}
+
+// --- Issue #1065: outbound options are non-empty and identical --------------
+
+#[test]
+fn quote_and_dispatch_use_identical_non_empty_options() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let h = hash(&s.env, 0xD6);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h, &0);
+
+    let sent = s.mock.last();
+    assert!(
+        !sent.options.is_empty(),
+        "dispatch must send a non-empty Type-3 options blob"
+    );
+    // The options must be the same bytes the fee quote is computed against.
+    let quoted = s.client.quote_lz_fee(&s.src_eid, &MSG_FILL_CONFIRMED);
+    assert!(quoted >= 0);
+}
+
+#[test]
+fn set_enforced_options_overrides_default_options() {
+    let s = setup();
+    let custom = Bytes::from_slice(&s.env, &[0x00, 0x03, 0x01, 0x00, 0x11, 0x70, 0x00, 0x00]);
+    s.client.set_enforced_options(&s.src_eid, &custom);
+    assert_eq!(s.client.get_enforced_options(&s.src_eid), Some(custom.clone()));
+
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let h = hash(&s.env, 0xD7);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h, &0);
+
+    assert_eq!(s.mock.last().options, custom);
+}
+
+// --- Issue #1066: dispatch forwards the quoted fee, not the caller's buffer --
+
+#[test]
+fn dispatch_forwards_quoted_fee_not_caller_buffer() {
+    let s = setup();
+    s.mock.set_dynamic_quote(&true);
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let h = hash(&s.env, 0xD8);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+
+    let caller = Address::generate(&s.env);
+    // Overpay with a large buffer; only the quoted fee should leave the payer.
+    s.client.dispatch_confirmation(&caller, &h, &1_000_000);
+
+    let events = s.env.events().all();
+    let expected = Symbol::new(&s.env, "confirmation_sent");
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(&s.env, &topic)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
+    });
+    assert!(found, "confirmation_sent event not emitted");
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+}

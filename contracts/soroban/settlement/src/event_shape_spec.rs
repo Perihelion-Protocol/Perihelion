@@ -374,3 +374,31 @@ fn registered_topic() {
     deliver_fill_instruction(&s, &h, &recipient, &dest_asset, 5_000, 1);
     assert_event_shape(&s.env, "registered", 2);
 }
+
+// --- Documented as `fill_instruction_rejected` (issues #1063, #1064) ---------
+
+#[test]
+fn fill_instruction_rejected_topic() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let dest_issuer = Address::generate(&s.env);
+    let dest_asset = s
+        .env
+        .register_stellar_asset_contract_v2(dest_issuer)
+        .address();
+    let h = hash(&s.env, 6);
+    // Deadline already in the past: a deterministic policy rejection that is
+    // acknowledged with a terminal marker instead of reverting.
+    deliver_fill_instruction(&s, &h, &recipient, &dest_asset, 500, 1);
+    assert_event_shape(&s.env, "fill_instruction_rejected", 2);
+}
+
+// --- Documented as `enforced_options_set` (issue #1065) ----------------------
+
+#[test]
+fn enforced_options_set_topic() {
+    let s = setup();
+    let options = Bytes::from_array(&s.env, &[0x00, 0x03, 0x01, 0x00, 0x00]);
+    s.client.set_enforced_options(&s.src_eid, &options);
+    assert_event_shape(&s.env, "enforced_options_set", 1);
+}

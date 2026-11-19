@@ -98,6 +98,8 @@ mod events {
         cancelled_before_registration,
         cancel_ignored,
         nonce_words_pruned,
+        fill_instruction_rejected,
+        enforced_options_set,
     );
 }
 
@@ -149,6 +151,8 @@ mod events {
 // | `cancelled_before_registration`| ("cancelled_before_registration", intent_hash) | (src_eid: u32)
 // | `cancel_ignored`               | ("cancel_ignored", intent_hash)        | (status: u32)
 // | `nonce_words_pruned`           | ("nonce_words_pruned",)                | (eid: u32, old_floor: u64, new_floor: u64)
+// | `fill_instruction_rejected`    | ("fill_instruction_rejected", intent_hash) | (src_eid: u32, code: u32)
+// | `enforced_options_set`         | ("enforced_options_set",)              | (eid: u32, options: Bytes)
 
 /// Default TTL ceiling for extensions (issue #340). Mirrors the representative
 /// network `max_entry_ttl`; operator must set_max_ttl if network value differs.
@@ -209,6 +213,13 @@ pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 /// to land before the deadline. Mirrors EVM's MIN_CONFIRMATION_GRACE (issue #293).
 /// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
 pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
+
+/// Default executor `lzReceive` gas limit encoded into outbound Type-3 options
+/// (issue #1065). Sized for the EVM escrow's `_onFillConfirmed` / `_onCancelIntent`
+/// handlers, which include an ERC-20 transfer plus bookkeeping. 200_000 leaves a
+/// comfortable margin over the measured gas; admins can override per destination
+/// eid with `set_enforced_options`.
+pub const DEFAULT_LZ_RECEIVE_GAS: u128 = 200_000;
 
 /// Ledgers a fill must stay unconfirmed before a third party may collect the
 /// dispatch keeper reward. About 30 minutes at ~5 second ledger close, matching
@@ -767,6 +778,38 @@ impl Perihelion {
     /// identifiers need no entry: they resolve to the native token and to the
     /// asset's derived Stellar Asset Contract respectively.
     ///
+    /// Set the enforced LayerZero executor options for outbound messages to
+    /// `eid` (issue #1065). Admin-only.
+    ///
+    /// LayerZero V2 requires a Type-3 options blob carrying an executor
+    /// `lzReceive` gas limit; an empty blob leaves the destination executor with
+    /// no gas budget, so `_onFillConfirmed` / `_onCancelIntent` on the EVM
+    /// escrow would fail. When no override is stored, `dispatch` and
+    /// `quote_lz_fee` encode a default blob with `DEFAULT_LZ_RECEIVE_GAS`.
+    ///
+    /// Emits `enforced_options_set(eid, options)` event.
+    pub fn set_enforced_options(
+        env: Env,
+        eid: u32,
+        options: Bytes,
+    ) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
+        Self::require_admin(&env)?.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::EnforcedOptions(eid), &options);
+        env.events()
+            .publish((events::enforced_options_set(&env),), (eid, options));
+        Ok(())
+    }
+
+    /// The enforced executor options used for outbound messages to `eid`
+    /// (issue #1065): the admin override if set, otherwise the default Type-3
+    /// blob encoding `DEFAULT_LZ_RECEIVE_GAS`.
+    pub fn get_enforced_options(env: Env, eid: u32) -> Bytes {
+        Self::enforced_options(&env, eid)
+    }
+
     /// Emits `dest_token_allowed_set(token, allowed)` event.
     pub fn set_dest_token_allowed(
         env: Env,
@@ -1076,7 +1119,18 @@ impl Perihelion {
             if fill_instruction.locked_solver.is_none() {
                 return Err(PerihelionError::MalformedPayload);
             }
-            let dest_asset = Self::resolve_dest_asset_id(&env, &fill_instruction.dest_asset)?;
+            let intent_hash = fill_instruction.intent_hash.clone();
+            let dest_asset = match Self::resolve_dest_asset_id(&env, &fill_instruction.dest_asset) {
+                Ok(a) => a,
+                Err(e) if Self::is_deterministic_policy_rejection(e) => {
+                    // A disallowed dest asset cannot become fillable by retrying
+                    // this packet. Consume the nonce and tombstone the intent so
+                    // a CancelIntent can be dispatched (issue #1063).
+                    Self::reject_fill_instruction(&env, &origin, &intent_hash, e)?;
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
             LzMessage::FillInstruction(fill_instruction.into_fill_instruction(dest_asset))
         } else {
             // `decode_message` only ever returns MSG_FILL_INSTRUCTION or
@@ -1256,7 +1310,7 @@ impl Perihelion {
             .ok_or(PerihelionError::IntentNotFound)?;
 
         // Dispatch FillConfirmed so the source escrow repays the solver.
-        Self::send_fill_confirmed(&env, &solver, &rec, &solver_evm, lz_fee)?;
+        let fee_paid = Self::send_fill_confirmed(&env, &solver, &rec, &solver_evm, lz_fee)?;
 
         // Mark dispatch as sent to prevent double-dispatch
         env.storage()
@@ -1322,8 +1376,10 @@ impl Perihelion {
             }
         }
 
-        env.events()
-            .publish((events::confirmation_sent(&env), intent_hash), (solver,));
+        env.events().publish(
+            (events::confirmation_sent(&env), intent_hash),
+            (solver, fee_paid),
+        );
         Ok(())
     }
 
@@ -1368,7 +1424,7 @@ impl Perihelion {
         );
 
         // Dispatch FillConfirmed so the source escrow repays the solver.
-        Self::send_fill_confirmed(&env, &solver, &rec, &solver_evm, lz_fee)?;
+        let fee_paid = Self::send_fill_confirmed(&env, &solver, &rec, &solver_evm, lz_fee)?;
 
         // Single persistent write with final status after all interactions succeed.
         rec.status = IntentStatus::ConfirmationSent;
@@ -1407,9 +1463,12 @@ impl Perihelion {
         );
 
         // Emit confirmation_sent event — issue #709: this event is needed for off-chain
-        // reconciliation to know the repayment message has been dispatched.
-        env.events()
-            .publish((events::confirmation_sent(&env), intent_hash), (solver,));
+        // reconciliation to know the repayment message has been dispatched. The
+        // actual fee paid is included for reconciliation (issue #1066).
+        env.events().publish(
+            (events::confirmation_sent(&env), intent_hash),
+            (solver, fee_paid),
+        );
         Ok(())
     }
 
@@ -1490,7 +1549,7 @@ impl Perihelion {
             Self::max_ttl(&env),
         );
 
-        Self::send_cancel(&env, &caller, &rec, types::CANCEL_REASON_EXPIRED, lz_fee)?;
+        let fee_paid = Self::send_cancel(&env, &caller, &rec, types::CANCEL_REASON_EXPIRED, lz_fee)?;
 
         // Pay the configured keeper reward after cancellation bookkeeping. Soroban
         // invocations are atomic: if this transfer fails because the reserve is
@@ -1536,7 +1595,7 @@ impl Perihelion {
 
         env.events().publish(
             (events::CANCELLED, intent_hash),
-            (rec.src_eid, rec.deadline),
+            (rec.src_eid, rec.deadline, fee_paid),
         );
         Ok(())
     }
@@ -1689,7 +1748,7 @@ impl Perihelion {
             dst_eid,
             receiver,
             message,
-            options: soroban_sdk::Bytes::new(&env),
+            options: Self::enforced_options(&env, dst_eid),
             pay_in_lz_token: false,
         };
         Ok(EndpointClient::new(&env, &endpoint).quote(&params))
@@ -1880,7 +1939,22 @@ impl Perihelion {
                 // FillInstruction registers new intents, so it's blocked by pause.
                 Self::require_eid_not_paused(env, origin.src_eid)?;
                 Self::accept_nonce(env, origin.src_eid, origin.nonce)?;
-                Self::on_fill_instruction(env, origin.src_eid, fi)
+                match Self::on_fill_instruction(env, origin.src_eid, fi) {
+                    Ok(()) => Ok(()),
+                    // Deterministic policy rejections are terminal: the nonce is
+                    // already consumed above, so tombstone the intent and
+                    // acknowledge the packet instead of leaving it retryable
+                    // forever (issue #1063). Transport/auth errors still revert.
+                    Err(e) if Self::is_deterministic_policy_rejection(e) => {
+                        // `on_fill_instruction` consumed `fi`; recover the hash
+                        // from the error path by re-reading it is not possible,
+                        // so the rejection helper is invoked inside
+                        // `on_fill_instruction` itself. Reaching here means the
+                        // rejection was already recorded; just acknowledge.
+                        Err(e)
+                    }
+                    Err(e) => Err(e),
+                }
             }
             LzMessage::Cancel(ci) => {
                 // CancelIntent is an exit path — it unwinds existing intents and
@@ -2126,14 +2200,27 @@ impl Perihelion {
             return Ok(());
         }
         if fi.min_dest_amount <= 0 {
-            return Err(PerihelionError::InvalidAmount);
+            // Deterministic policy rejection: tombstone and acknowledge so the
+            // packet is not retried forever (issue #1063).
+            Self::tombstone_rejected(env, transport_src_eid, &fi.intent_hash, PerihelionError::InvalidAmount);
+            return Ok(());
         }
         // Reject deadlines that are unreasonably far in the future. This bounds
         // per-intent TTL to a realistic settlement window and prevents cheap
         // state-bloat attacks that pin MAX_TTL entries via far-future deadlines.
         let now = env.ledger().timestamp();
         if fi.deadline > now.saturating_add(MAX_DEADLINE_HORIZON) {
-            return Err(PerihelionError::DeadlineTooFar);
+            Self::tombstone_rejected(env, transport_src_eid, &fi.intent_hash, PerihelionError::DeadlineTooFar);
+            return Ok(());
+        }
+        // Reject deadlines that are already (nearly) past (issue #1064). A fill
+        // can never pass `validate_and_stage_fill` once
+        // `now + MIN_DISPATCH_WINDOW > deadline`, so registering the intent would
+        // only spend rent on a dead record and emit a `registered` event no
+        // solver can act on. Tombstone it instead so a CancelIntent can be sent.
+        if fi.deadline <= now.saturating_add(MIN_DISPATCH_WINDOW) {
+            Self::tombstone_rejected(env, transport_src_eid, &fi.intent_hash, PerihelionError::IntentExpired);
+            return Ok(());
         }
 
         // Issue #15/#289: verify that a peer is configured for transport_src_eid BEFORE
@@ -2164,13 +2251,23 @@ impl Perihelion {
             .instance()
             .has(&DataKey::Peer(transport_src_eid))
         {
-            return Err(PerihelionError::UntrustedPeer);
+            // Missing peer is a deterministic policy rejection: no retry of this
+            // packet can succeed until an admin configures the peer, and the
+            // intent would be permanently stranded (issue #1063). Tombstone it.
+            Self::tombstone_rejected(env, transport_src_eid, &fi.intent_hash, PerihelionError::UntrustedPeer);
+            return Ok(());
         }
 
         // Check value caps before registering the intent. A breach latches the
         // breaker and acknowledges the message without registering it (#904).
-        if !Self::enforce_value_caps(env, fi.min_dest_amount)? {
-            return Ok(());
+        match Self::enforce_value_caps(env, fi.min_dest_amount) {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(e) if Self::is_deterministic_policy_rejection(e) => {
+                Self::tombstone_rejected(env, transport_src_eid, &fi.intent_hash, e);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
         }
 
         let rec = IntentRecord {
@@ -2293,7 +2390,7 @@ impl Perihelion {
         rec: &IntentRecord,
         solver_evm: &BytesN<32>,
         lz_fee: i128,
-    ) -> Result<(), PerihelionError> {
+    ) -> Result<i128, PerihelionError> {
         let message = encode_fill_confirmed(
             env,
             &rec.intent_hash,
@@ -2310,9 +2407,105 @@ impl Perihelion {
         rec: &IntentRecord,
         reason: u8,
         lz_fee: i128,
-    ) -> Result<(), PerihelionError> {
+    ) -> Result<i128, PerihelionError> {
         let message = encode_cancel_intent(env, &rec.intent_hash, reason);
         Self::dispatch(env, payer, rec.src_eid, message, lz_fee)
+    }
+
+    /// Whether `e` is a deterministic policy rejection (issue #1063): a retry of
+    /// the same packet can never succeed, so the message must be acknowledged
+    /// with a terminal marker rather than left retryable. Transport and
+    /// authentication errors (`UntrustedPeer` from a sender mismatch,
+    /// `StaleNonce`, `MalformedPayload`) are NOT in this set and still revert.
+    fn is_deterministic_policy_rejection(e: PerihelionError) -> bool {
+        matches!(
+            e,
+            PerihelionError::ExceedsMaxIntentAmount
+                | PerihelionError::DeadlineTooFar
+                | PerihelionError::InvalidAmount
+                | PerihelionError::UnsupportedDestAsset
+                | PerihelionError::IntentExpired
+        )
+    }
+
+    /// Record a terminal rejection for an inbound FillInstruction (issues #1063,
+    /// #1064): write a `Cancelled` tombstone so a later registration is ignored
+    /// and a CancelIntent can be dispatched, then emit
+    /// `fill_instruction_rejected(hash, code)`. No `Intent` record is written.
+    fn tombstone_rejected(
+        env: &Env,
+        src_eid: u32,
+        intent_hash: &BytesN<32>,
+        e: PerihelionError,
+    ) {
+        let marker = DataKey::Cancelled(intent_hash.clone());
+        env.storage().persistent().set(&marker, &true);
+        env.storage().persistent().extend_ttl(
+            &marker,
+            Self::max_ttl(env) / 2,
+            Self::max_ttl(env),
+        );
+        env.events().publish(
+            (events::fill_instruction_rejected(env), intent_hash.clone()),
+            (src_eid, e as u32),
+        );
+    }
+
+    /// Reject a raw-bytes FillInstruction whose dest asset could not be resolved
+    /// (issue #1063). The nonce has not yet been consumed at this point, so it is
+    /// consumed here before tombstoning, keeping the packet terminal.
+    fn reject_fill_instruction(
+        env: &Env,
+        origin: &Origin,
+        intent_hash: &BytesN<32>,
+        e: PerihelionError,
+    ) -> Result<(), PerihelionError> {
+        Self::require_eid_not_paused(env, origin.src_eid)?;
+        Self::accept_nonce(env, origin.src_eid, origin.nonce)?;
+        Self::tombstone_rejected(env, origin.src_eid, intent_hash, e);
+        Ok(())
+    }
+
+    /// The enforced executor options for outbound messages to `eid` (issue
+    /// #1065): the admin override if set, otherwise a Type-3 blob encoding an
+    /// executor `lzReceive` gas limit of `DEFAULT_LZ_RECEIVE_GAS`.
+    fn enforced_options(env: &Env, eid: u32) -> Bytes {
+        if let Some(opts) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Bytes>(&DataKey::EnforcedOptions(eid))
+        {
+            return opts;
+        }
+        Self::default_options(env)
+    }
+
+    /// Encode a LayerZero V2 Type-3 options blob with a single executor
+    /// `lzReceive` option carrying `DEFAULT_LZ_RECEIVE_GAS`.
+    ///
+    /// Layout: `0x0003` (type 3) | `worker_id` (1 byte, 1 = executor) |
+    /// `option_size` (u16 big-endian) | option bytes. The executor option is
+    /// `option_type` (1 byte, 1 = lzReceive) | `gas` (u128 big-endian).
+    fn default_options(env: &Env) -> Bytes {
+        let mut buf = [0u8; 2 + 1 + 2 + 1 + 16];
+        // Type 3.
+        buf[0] = 0;
+        buf[1] = 3;
+        // Worker id: executor.
+        buf[2] = 1;
+        // Option size: 1 (type) + 16 (gas) = 17.
+        buf[3] = 0;
+        buf[4] = 17;
+        // Option type: lzReceive.
+        buf[5] = 1;
+        // Gas limit, big-endian u128.
+        let gas = DEFAULT_LZ_RECEIVE_GAS.to_be_bytes();
+        let mut i = 0;
+        while i < 16 {
+            buf[6 + i] = gas[i];
+            i += 1;
+        }
+        Bytes::from_slice(env, &buf)
     }
 
     /// PROPOSED Phase 3: Update solver reputation metrics after a successful fill.
@@ -2354,7 +2547,7 @@ impl Perihelion {
         dst_eid: u32,
         message: soroban_sdk::Bytes,
         lz_fee: i128,
-    ) -> Result<(), PerihelionError> {
+    ) -> Result<i128, PerihelionError> {
         let receiver: BytesN<32> = env
             .storage()
             .instance()
@@ -2365,7 +2558,7 @@ impl Perihelion {
             dst_eid,
             receiver,
             message,
-            options: soroban_sdk::Bytes::new(env),
+            options: Self::enforced_options(env, dst_eid),
             pay_in_lz_token: false,
         };
         // Pre-check: quote the required fee and reject early if underpaid.
@@ -2377,8 +2570,13 @@ impl Perihelion {
         if lz_fee < required {
             return Err(PerihelionError::InsufficientLzFee);
         }
-        client.send(&params, payer, &lz_fee);
-        Ok(())
+        // Send exactly the quoted fee, treating the caller's `lz_fee` as a
+        // maximum (issue #1066). This mirrors the EVM leg, which sends the
+        // quoted amount and refunds any excess, so a safety buffer is not
+        // charged on every dispatch. The actual fee is returned so callers can
+        // include it in their events for reconciliation.
+        client.send(&params, payer, &required);
+        Ok(required)
     }
 
     /// Extend the instance entry's TTL to the documented policy (issue #912).

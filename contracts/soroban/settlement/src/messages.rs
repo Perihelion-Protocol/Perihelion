@@ -145,6 +145,55 @@ pub fn encode_cancel_intent(env: &Env, intent_hash: &BytesN<32>, reason: u8) -> 
     b
 }
 
+/// Default executor `lzReceive` gas limit requested for EVM delivery.
+///
+/// Both outbound message types (`FillConfirmed` and `CancelIntent`) are handled
+/// on the EVM escrow by `_onFillConfirmed` / `_onCancelIntent`, each of which
+/// performs an ERC-20 `transfer` (plus event emission and bookkeeping). A
+/// measured budget for those handlers is on the order of ~80k gas; this default
+/// requests 200,000 gas, leaving a >2x safety margin for cold storage slots,
+/// non-standard token implementations and future handler changes. Operators can
+/// override it per destination eid via the admin `set_enforced_options` path.
+pub const DEFAULT_LZ_RECEIVE_GAS: u64 = 200_000;
+
+/// LayerZero V2 options container type: Type 3 (the only type accepted by
+/// endpoint v2; Type 1/2 are legacy).
+const OPTIONS_TYPE_3: u8 = 0x0003;
+/// Executor worker id in the options blob.
+const WORKER_ID_EXECUTOR: u8 = 0x01;
+/// Option type `lzReceive` (option type 1) for the executor worker.
+const OPTION_TYPE_LZ_RECEIVE: u8 = 0x01;
+
+/// Encode a LayerZero V2 Type-3 options blob requesting `gas` for the executor's
+/// `lzReceive` on the destination chain.
+///
+/// Layout (big-endian, matching `@layerzerolabs/lz-v2-utilities`):
+///
+/// ```text
+/// 0003            options type (uint16, Type 3)
+/// 01              worker id (uint8, executor)
+/// 0011            option size (uint16, 17 bytes)
+/// 01              option type (uint8, lzReceive)
+/// 0000000000030d40  gas (uint128, 200_000 in the example)
+/// ```
+///
+/// The same bytes must be used for both `quote_lz_fee` and `dispatch` so the
+/// quoted fee matches what is actually sent (issue #1065).
+pub fn encode_executor_lz_receive_options(env: &Env, gas: u64) -> Bytes {
+    let mut b = Bytes::new(env);
+    // Options container type: Type 3.
+    b.append(&Bytes::from_array(env, &(OPTIONS_TYPE_3 as u16).to_be_bytes()));
+    // Worker id: executor.
+    b.push_back(WORKER_ID_EXECUTOR);
+    // Option size: 1 byte option type + 16 bytes gas = 17 bytes.
+    b.append(&Bytes::from_array(env, &17u16.to_be_bytes()));
+    // Option type: lzReceive.
+    b.push_back(OPTION_TYPE_LZ_RECEIVE);
+    // Gas limit as a big-endian uint128.
+    b.append(&Bytes::from_array(env, &(gas as u128).to_be_bytes()));
+    b
+}
+
 /// Read a fixed-size big-endian field out of `message` at `offset`.
 fn read_field<const N: usize>(
     message: &Bytes,
@@ -785,6 +834,37 @@ mod tests {
             assert_eq!(fi.dest_asset, Bytes::from_slice(&env, id));
             assert_eq!(fi.min_dest_amount, 1_000_000_000);
         }
+    }
+
+    /// The Type-3 executor `lzReceive` options blob has the exact documented
+    /// layout for the default gas budget (issue #1065).
+    #[test]
+    fn test_encode_executor_lz_receive_options_default_gas() {
+        let env = Env::default();
+        let opts = encode_executor_lz_receive_options(&env, DEFAULT_LZ_RECEIVE_GAS);
+
+        let mut expected = [0u8; 21];
+        expected[0..2].copy_from_slice(&[0x00, 0x03]); // Type 3
+        expected[2] = 0x01; // executor worker id
+        expected[3..5].copy_from_slice(&[0x00, 0x11]); // option size = 17
+        expected[5] = 0x01; // lzReceive option type
+        expected[6..22 - 1].copy_from_slice(&(DEFAULT_LZ_RECEIVE_GAS as u128).to_be_bytes());
+
+        assert_eq!(opts.len(), 21);
+        for (i, byte) in expected.iter().enumerate() {
+            assert_eq!(opts.get(i as u32), Some(*byte), "byte {} mismatch", i);
+        }
+        // 200_000 == 0x00030d40, encoded as a 16-byte big-endian uint128.
+        assert_eq!(
+            opts,
+            Bytes::from_array(
+                &env,
+                &[
+                    0x00, 0x03, 0x01, 0x00, 0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x0d, 0x40,
+                ]
+            )
+        );
     }
 
     /// A `G...` account strkey is a valid strkey but not an asset identifier.

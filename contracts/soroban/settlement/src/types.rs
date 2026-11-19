@@ -22,6 +22,50 @@ pub const CANCEL_REASON_EXPIRED: u8 = 0x00;
 pub const CANCEL_REASON_ADMIN: u8 = 0x01;
 pub const CANCEL_REASON_INVALID: u8 = 0x02;
 
+/// Deterministic policy rejection codes emitted in `fill_instruction_rejected`
+/// (issues #1063, #1064). These are terminal: the transport nonce is consumed
+/// and a `RejectedIntent` tombstone is written so the packet is not retried.
+/// Transport/authentication failures (untrusted peer, stale nonce, malformed
+/// payload) are NOT represented here and continue to revert.
+pub const REJECTION_INVALID_AMOUNT: u32 = 0x00;
+pub const REJECTION_DEADLINE_TOO_FAR: u32 = 0x01;
+pub const REJECTION_DEADLINE_TOO_SOON: u32 = 0x02;
+pub const REJECTION_EXCEEDS_MAX_INTENT_AMOUNT: u32 = 0x03;
+pub const REJECTION_UNSUPPORTED_DEST_ASSET: u32 = 0x04;
+pub const REJECTION_MISSING_PEER: u32 = 0x05;
+
+/// Deterministic policy rejection classification for inbound FillInstructions.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RejectionCode {
+    /// `min_dest_amount` is non-positive or otherwise invalid.
+    InvalidAmount = 0,
+    /// `deadline` exceeds the maximum allowed horizon.
+    DeadlineTooFar = 1,
+    /// `deadline` is already past or too close to allow any fill (issue #1064).
+    DeadlineTooSoon = 2,
+    /// `min_dest_amount` exceeds the configured per-intent cap.
+    ExceedsMaxIntentAmount = 3,
+    /// `dest_asset` is not an allowlisted / resolvable destination asset.
+    UnsupportedDestAsset = 4,
+    /// No trusted peer is configured for the source eid.
+    MissingPeer = 5,
+}
+
+impl RejectionCode {
+    /// Numeric code carried in the `fill_instruction_rejected` event.
+    pub fn as_u32(self) -> u32 {
+        match self {
+            RejectionCode::InvalidAmount => REJECTION_INVALID_AMOUNT,
+            RejectionCode::DeadlineTooFar => REJECTION_DEADLINE_TOO_FAR,
+            RejectionCode::DeadlineTooSoon => REJECTION_DEADLINE_TOO_SOON,
+            RejectionCode::ExceedsMaxIntentAmount => REJECTION_EXCEEDS_MAX_INTENT_AMOUNT,
+            RejectionCode::UnsupportedDestAsset => REJECTION_UNSUPPORTED_DEST_ASSET,
+            RejectionCode::MissingPeer => REJECTION_MISSING_PEER,
+        }
+    }
+}
+
 /// Persistent/instance storage keys. See the architecture spec §1.1–1.2 for the
 /// tier rationale of each.
 #[contracttype]
@@ -64,6 +108,11 @@ pub enum DataKey {
     /// Configurable maximum TTL for TTL extensions (issue #340).
     /// If unset, defaults to MAX_TTL_DEFAULT. Settable by admin.
     MaxTtl,
+    /// Admin-configured Type-3 LayerZero executor options blob for outbound
+    /// messages to a destination eid (issue #1065). Used verbatim for both
+    /// `quote_lz_fee` and `dispatch` so quotes match sends. When unset, a
+    /// default executor `lzReceive` gas limit is encoded.
+    EnforcedOptions(u32),
 
     // Instance tier (value caps, issue #145).
     /// Maximum amount a single intent can register (0 = unlimited).
@@ -96,6 +145,11 @@ pub enum DataKey {
     Settled(BytesN<32>),
     /// Terminal idempotency marker: set iff the intent was cancelled.
     Cancelled(BytesN<32>),
+    /// Terminal rejection tombstone (issues #1063, #1064): set iff an inbound
+    /// FillInstruction was deterministically rejected by policy. Consumes the
+    /// transport nonce and prevents re-registration; a CancelIntent may then be
+    /// dispatched. Value is the `RejectionCode` that caused the rejection.
+    RejectedIntent(BytesN<32>),
     /// Idempotency marker: set once FillConfirmed has been dispatched for this intent.
     ConfirmationSent(BytesN<32>),
 

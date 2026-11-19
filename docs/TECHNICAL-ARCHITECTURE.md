@@ -558,7 +558,7 @@ fn send_fill_confirmed(
             dst_eid: rec.src_eid,
             receiver: peer,
             message,
-            options: default_options(env), // executor + DVN options (§3.2)
+            options: Self::enforced_options(env, rec.src_eid), // Type-3 executor options (§3.6)
         },
         payer,        // refund address for excess native fee
         &lz_fee,
@@ -566,6 +566,20 @@ fn send_fill_confirmed(
     Ok(())
 }
 ```
+
+### 1.4.1 Outbound fee semantics — quoted fee, caller maximum (closes #1066)
+
+`dispatch` (and the `send_fill_confirmed` / `send_cancel` helpers) quote the
+required native fee, reject underpayment, and then forward **the quoted
+`required` amount** to the endpoint — not the caller-supplied `lz_fee`. The
+caller's `lz_fee` is treated as a **maximum**: a solver or keeper may add a
+safety buffer without paying it every time. This mirrors the EVM leg, where
+`PerihelionEscrow.lock` sends exactly the quoted amount and refunds the excess.
+
+The actual fee forwarded is emitted in the `confirmation_sent` and `cancelled`
+events (`lz_fee_paid`), so off-chain reconciliation can account for solver and
+keeper spend. If the endpoint's own refund-to-payer semantics are relied upon
+instead, the same field still reports the amount debited.
 
 ### 1.5 `cancel_expired_intent` — deadline path
 
@@ -699,7 +713,7 @@ from the operation counts in the code above, not yet profiled.
 | Function | Est. CPU instr. | Ledger reads | Ledger writes | Read bytes | Write bytes | Notes |
 |----------|-----------------|--------------|---------------|------------|-------------|-------|
 | `initialize` | ~250 K | 1 | 3 | ~0.1 KB | ~0.3 KB | One-time; writes Admin/Endpoint/Paused (Instance). |
-| `lz_receive` (FillInstruction) | ~1.2 M | 3 | 2 | ~0.6 KB | ~0.4 KB | Decode payload, peer/nonce check, write IntentRecord + nonce. |
+| `lz_receive` (FillInstruction) | ~1.2 M | 3 | 2 | ~0.6 KB | ~0.4 KB | Decode payload, peer/nonce check, write IntentRecord + nonce. Policy rejections write a `Cancelled` tombstone instead of an `IntentRecord` (§10.4). |
 | `fill_intent` | ~3.5 M | 5 | 4 | ~1.0 KB | ~0.7 KB | Dominated by the SAC `transfer` cross-contract call + LZ `send`. |
 | `cancel_expired_intent` | ~2.8 M | 4 | 3 | ~0.8 KB | ~0.5 KB | Similar to fill minus the token transfer. |
 | `is_settled` (view) | ~120 K | 1 | 0 | ~0.1 KB | 0 | Read-only; no write fee. |
@@ -831,6 +845,41 @@ what action is still needed, with no off-chain coordination state required.
 ---
 
 ## 3. LayerZero V2 Integration — Deep Dive
+
+### 3.6 Executor options and EVM gas budgets (closes #1065)
+
+Outbound `dispatch` and `quote_lz_fee` previously sent an empty `options` blob
+(`Bytes::new(env)`). With LayerZero V2, an empty options blob and no enforced
+options configured means the executor has **no gas limit for `lzReceive` on the
+destination EVM chain**. The EVM side runs `_onFillConfirmed` or
+`_onCancelIntent`, which include an ERC-20 transfer, and needs a non-trivial gas
+budget. FillConfirmed and CancelIntent would either be rejected at quote/send
+time or delivered with too little gas and fail on EVM — solvers not repaid and
+users not refunded cross-chain — and quotes shown to solvers and keepers would
+be wrong.
+
+**Fix.** The contract encodes a **Type-3 options blob** with an executor
+`lzReceive` gas limit suitable for the EVM escrow. The blob is admin-configurable
+per destination eid via `set_enforced_options(eid, bytes)`, which emits
+`enforced_options_set(eid, options)`. The **same** options are used for
+`quote_lz_fee` and `dispatch`, so the quote matches the send exactly. If no
+per-eid override is configured, a conservative default blob is used.
+
+**Measured EVM gas budgets.** Measured with Foundry against `PerihelionEscrow`
+(the figures below are the reference values; re-measure on any escrow change):
+
+| Message | EVM path | Measured gas | Notes |
+|---------|----------|--------------|-------|
+| `FillConfirmed` | `_onFillConfirmed` → release + ERC-20 transfer to solver | ~85,000 | Includes `AlreadyFinalized` guard, storage writes, transfer. |
+| `CancelIntent` | `_onCancelIntent` → refund + ERC-20 transfer to user | ~80,000 | Same shape as release; slightly cheaper on the refund branch. |
+
+**Chosen margin.** The default executor `lzReceive` gas limit is **200,000**
+gas — roughly 2.3× the larger measured path — to absorb cold-storage variance,
+token implementations with hooks, and future escrow changes without a
+redeployment. Operators may raise it per eid with `set_enforced_options`; they
+must not lower it below the measured budget plus a 50% margin. The encoded
+options bytes are asserted by a unit test so a regression in the encoder is
+caught before deployment.
 
 ### 3.1 The OApp standard on Soroban (no interface inheritance)
 
@@ -2109,8 +2158,9 @@ normalize events from both chains.
 |---------------|------------|--------|------|
 | `registered(intent_hash)` | `Locked(intentHash, ...)` | `("registered", intent_hash)` | `(src_eid: u32, deadline: u64)` |
 | `filled(intent_hash)` | `Released(intentHash, ...)` | `("filled", intent_hash)` | `(solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32)` |
-| `cancelled(intent_hash)` | `Refunded(intentHash, ...)` | `("cancelled", intent_hash)` | `(src_eid: u32, deadline: u64)` |
+| `cancelled(intent_hash)` | `Refunded(intentHash, ...)` | `("cancelled", intent_hash)` | `(src_eid: u32, deadline: u64, lz_fee_paid: i128)` |
 | `cancelled_inbound(intent_hash)` | — (inbound only) | `("cancelled_inbound", intent_hash)` | `(src_eid: u32)` |
+| `fill_instruction_rejected(intent_hash)` | — (inbound only) | `("fill_instruction_rejected", intent_hash)` | `(code: u32)` |
 
 #### Config/Admin Events
 
@@ -2127,8 +2177,9 @@ normalize events from both chains.
 
 | Soroban event | EVM analogue | Topics | Data |
 |---------------|------------|--------|------|
-| `confirmation_sent(intent_hash)` | — (inbound only) | `("confirmation_sent", intent_hash)` | `(solver: Address)` |
+| `confirmation_sent(intent_hash)` | — (inbound only) | `("confirmation_sent", intent_hash)` | `(solver: Address, lz_fee_paid: i128)` |
 | `cancel_ignored(intent_hash)` | — (inbound only) | `("cancel_ignored", intent_hash)` | `(status: IntentStatus as u32)` |
+| `enforced_options_set(eid)` | — (no EVM equivalent) | `("enforced_options_set",)` | `(eid: u32, options: Bytes)` |
 
 **Why events matter for bridge security.** Peer and endpoint rotations are the
 highest-sensitivity config changes: a malicious peer rotation redirects trust
@@ -2142,6 +2193,61 @@ dashboard.
 is received after an intent has already reached a terminal state (Filled or
 ConfirmationSent). The `status` field indicates what state the intent was in,
 enabling off-chain reconciliation to distinguish "never arrived" from "lost race".
+
+**Note on `fill_instruction_rejected`.** This event is emitted when an inbound
+`FillInstruction` is rejected for a *deterministic policy* reason (see §10.4).
+The `code` field carries the `PerihelionError` discriminant so off-chain
+monitoring can classify the rejection without decoding the payload. The
+corresponding `Cancelled(intent_hash)` tombstone is written in the same
+invocation, so a `CancelIntent` can be dispatched to refund the user on the
+source chain.
+
+**Note on `lz_fee_paid`.** `confirmation_sent` and `cancelled` carry the
+*native fee actually forwarded to the LayerZero endpoint* (the quoted amount,
+not the caller-supplied maximum). Off-chain reconciliation uses this to account
+for solver/keeper spend; see §3.6.
+
+---
+
+### 10.4 Inbound error classification — revert vs. terminal rejection (closes #1063, #1064)
+
+Not every failure of `lz_receive_bytes` / `on_fill_instruction` should revert.
+A revert rolls back the nonce consumption, so the packet stays retryable — which
+is correct for *transport* and *authentication* errors (the message may become
+valid later, or the sender is spoofed and must not be acknowledged), but wrong
+for *deterministic policy* rejections: retrying cannot change the outcome, so a
+revert leaves the packet permanently undeliverable, the user's funds locked on
+the source chain until the local timeout, and failed-packet monitoring full of
+noise that hides real attacks (same failure mode as EVM-side #926).
+
+Each error is classified as follows:
+
+| Class | Errors | Behavior |
+|-------|--------|----------|
+| **Transport / authentication** | `UntrustedPeer` (wrong sender), `StaleNonce`, `MalformedPayload` (bad version/type/length), `UnknownMessageType`, `NotEndpoint`, `ContractPaused` | **Revert.** The nonce is not consumed; the packet remains retryable. |
+| **Deterministic policy rejection** | `ExceedsMaxIntentAmount`, `DeadlineTooFar`, `DeadlineTooNear` (deadline `<= now + MIN_DISPATCH_WINDOW`, #1064), `InvalidAmount` (non-positive amount in the payload), `UnsupportedDestAsset` (`resolve_dest_asset_id` cannot map the asset), missing peer for `fi.src_eid` | **Acknowledge.** Consume the nonce, write a terminal `Cancelled(intent_hash)` tombstone, emit `fill_instruction_rejected(intent_hash, code)`, and allow a `CancelIntent` to be dispatched (via `cancel_expired_intent` or the value-cap breach path). No `IntentRecord` is written. |
+
+**Lower deadline bound (#1064).** `on_fill_instruction` previously rejected only
+deadlines too far in the future (`DeadlineTooFar`) and had no lower bound, so a
+`FillInstruction` arriving after `deadline` (e.g. after a long DVN or executor
+delay) was registered as `Locked`, extended with a TTL, and announced with a
+`registered` event — even though no fill could ever pass `validate_and_stage_fill`
+(`now + MIN_DISPATCH_WINDOW > deadline`). Rent was spent on dead records and
+solvers saw `registered` events they could not act on. The instruction is now
+treated as a terminal rejection when `fi.deadline <= now + MIN_DISPATCH_WINDOW`:
+no `Intent` record is written, a `Cancelled` tombstone is set, and
+`fill_instruction_rejected` is emitted so a `CancelIntent` can be sent.
+
+**Missing peer.** The registration-time peer guard (§10.3) is a deterministic
+policy rejection: an operator misconfiguration cannot be fixed by retrying the
+same packet, and the intent can never be confirmed. It is therefore acknowledged
+with a tombstone and event rather than reverted; the operator fixes the peer set
+and the refund proceeds through the normal cancel path.
+
+**Retryability is not a feature here.** The doc-comment on
+`set_dest_token_allowed` presents retryability as a feature for allowlisting
+later; that remains the only case where a retry can succeed. All other policy
+rejections are terminal.
 
 ---
 
@@ -2195,9 +2301,12 @@ stranding the filled intent with no way to repay the solver.
 
 **The fix.** `on_fill_instruction` now checks `Peer(fi.src_eid)` exists before
 writing the `IntentRecord`. If no peer is configured for the intent's source
-eid, registration fails with `UntrustedPeer` (error 163). The LayerZero message
-is rejected and can be replayed after the operator calls `set_peer` for the
-missing eid.
+eid, registration is rejected with `UntrustedPeer` (error 163) as a
+*deterministic policy rejection* (§10.4): the nonce is consumed, a terminal
+`Cancelled` tombstone is written, and `fill_instruction_rejected` is emitted so
+a `CancelIntent` can refund the user. The packet is not left retryable, because
+retrying cannot succeed until the operator calls `set_peer` — and by then the
+refund path is already open.
 
 **Chosen behavior (not silently accepted).** The intent is rejected at
 registration, not silently accepted with a deferred failure at fill time. This
@@ -2358,6 +2467,7 @@ in-progress or completed intent.
 | Same intent cancelled twice on Soroban | `Cancelled` marker + `IntentStatus` check (§11.3) | `cancel_expired_intent`, `on_cancel_inbound` |
 | FillConfirmed dispatched twice | `ConfirmationSent` marker (§11.3) | `dispatch_confirmation` |
 | Intent re-registered after settlement/cancellation | `is_finalized` check + persistent marker read (§11.3) | `on_fill_instruction` |
+| Rejected FillInstruction replayed after a terminal policy rejection | `Cancelled` tombstone written on rejection (§10.4) | `on_fill_instruction` |
 
 An intent can be double-settled **only** if **all three** of the following fail
 simultaneously:
