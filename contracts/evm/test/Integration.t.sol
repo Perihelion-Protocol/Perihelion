@@ -23,7 +23,7 @@ import { MockERC20 } from "./PerihelionEscrow.t.sol";
 ///      receive legs, peer/nonce authentication, and the terminal-state guards
 ///      are all exercised against a counterparty that speaks the pinned protocol.
 contract StellarRelay is ILayerZeroEndpointV2 {
-    function setDelegate(address) external {}
+    function setDelegate(address) external { }
 
     bytes1 private constant VERSION = 0x01;
     bytes1 private constant T_FILL_INSTRUCTION = 0x01;
@@ -51,7 +51,11 @@ contract StellarRelay is ILayerZeroEndpointV2 {
 
     /// @inheritdoc ILayerZeroEndpointV2
     /// @dev Captures the escrow's outbound FillInstruction (the source->Stellar leg).
-    function send(MessagingParams calldata params, address) external payable returns (MessagingReceipt memory receipt) {
+    function send(MessagingParams calldata params, address)
+        external
+        payable
+        returns (MessagingReceipt memory receipt)
+    {
         bytes calldata m = params.message;
         require(m.length >= 34, "relay: short message");
         require(m[0] == VERSION && m[1] == T_FILL_INSTRUCTION, "relay: not FillInstruction");
@@ -62,7 +66,11 @@ contract StellarRelay is ILayerZeroEndpointV2 {
         }
         lastFillIntentHash = h;
         fillInstructionCount++;
-        return MessagingReceipt({ guid: bytes32(uint256(0xA11CE)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
+        return MessagingReceipt({
+            guid: bytes32(uint256(0xA11CE)),
+            nonce: 0,
+            fee: MessagingFee({ nativeFee: msg.value, lzTokenFee: 0 })
+        });
     }
 
     /// @dev Stellar settled: deliver a FillConfirmed authorizing the solver payout.
@@ -125,6 +133,7 @@ contract IntegrationTest is Test {
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
         escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
         vm.deal(solver, 10 ether);
     }
 
@@ -163,7 +172,7 @@ contract IntegrationTest is Test {
         assertEq(token.balanceOf(address(escrow)), 100_000);
 
         // Stellar settles and confirms back; the escrow pays the solver.
-        relay.deliverFillConfirmed(h, solver, 100_000, 42);
+        relay.deliverFillConfirmed(h, solver, 1_000_000, 42);
 
         assertEq(token.balanceOf(solver), 100_000);
         assertEq(token.balanceOf(address(escrow)), 0);
@@ -172,13 +181,18 @@ contract IntegrationTest is Test {
         assertFalse(refunded);
     }
 
-    /// The escrow pays whoever Stellar confirms, which need not be the address
-    /// that locked — the solver can nominate a distinct EVM payout address.
+    /// Before the deadline the reservation is exclusive: only the locking solver
+    /// may be paid. After the deadline the reservation opens to another EVM address.
     function test_RoundTrip_PayoutAddressIndependentOfLocker() public {
         address payout = address(0xDECAF0);
-        bytes32 h = _lock(_intent(1));
+        PerihelionEscrow.Intent memory intent = _intent(1);
+        bytes32 h = _lock(intent);
 
-        relay.deliverFillConfirmed(h, payout, 100_000, 42);
+        vm.expectRevert(PerihelionEscrow.ReservedForSolver.selector);
+        relay.deliverFillConfirmed(h, payout, 1_000_000, 42);
+
+        vm.warp(intent.deadline + 1);
+        relay.deliverFillConfirmed(h, payout, 1_000_000, 42);
 
         assertEq(token.balanceOf(payout), 100_000);
         assertEq(token.balanceOf(solver), 0);
@@ -215,7 +229,7 @@ contract IntegrationTest is Test {
         bytes32 h2 = _lock(_intent(2));
         assertEq(token.balanceOf(address(escrow)), 200_000);
 
-        relay.deliverFillConfirmed(h1, solver, 100_000, 1);
+        relay.deliverFillConfirmed(h1, solver, 1_000_000, 1);
         relay.deliverCancel(h2, 0);
 
         assertEq(token.balanceOf(solver), 100_000); // settled leg paid out

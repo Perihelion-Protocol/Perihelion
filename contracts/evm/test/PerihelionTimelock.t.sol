@@ -277,11 +277,7 @@ contract PerihelionTimelockTest is Test {
         vm.prank(c);
         tl.confirm(id);
         (, uint64 readyAtAfterReconfirm,,) = tl.operations(id);
-        assertEq(
-            readyAtAfterReconfirm,
-            readyAtBefore,
-            "re-confirming must not reset readyAt"
-        );
+        assertEq(readyAtAfterReconfirm, readyAtBefore, "re-confirming must not reset readyAt");
     }
 
     /// @notice AC2: an operation below threshold cannot execute even after readyAt.
@@ -347,8 +343,6 @@ contract PerihelionTimelockTest is Test {
         tl.execute(address(target), 0, data, SALT);
         assertEq(target.value(), 8);
     }
-
-
 
     // --- Cancellation policy ---------------------------------------------------
     //
@@ -525,8 +519,6 @@ contract PerihelionTimelockTest is Test {
         (,,, bool exists) = tl.operations(id);
         assertFalse(exists);
     }
-
-
 
     // --- Self-administered config -------------------------------------------
 

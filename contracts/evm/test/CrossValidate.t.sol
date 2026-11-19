@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import { NoopEndpointStub } from "./NoopEndpointStub.sol";
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 
@@ -28,7 +29,7 @@ contract CrossValidateTest is Test {
     string internal corpusDir;
 
     function setUp() public {
-        harness = new DecoderHarness(address(0x1), 30_316);
+        harness = new DecoderHarness(address(new NoopEndpointStub()), 30_316);
         corpusDir = _resolveCorpusDir();
     }
 

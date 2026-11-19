@@ -15,6 +15,23 @@ import {
 
 /// @dev Minimal mock ERC-20 for gas snapshot tests.
 contract GasSnapshotERC20 is IERC20 {
+    // Optional EIP-20 metadata (IERC20 declares these; mocks do not use them).
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function name() external pure returns (string memory) {
+        return "Mock";
+    }
+
+    function symbol() external pure returns (string memory) {
+        return "MCK";
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -43,7 +60,7 @@ contract GasSnapshotERC20 is IERC20 {
 
 /// @dev Mock endpoint for gas snapshot tests.
 contract GasSnapshotEndpoint is ILayerZeroEndpointV2 {
-    function setDelegate(address) external {}
+    function setDelegate(address) external { }
 
     uint256 public mockFee;
 
@@ -51,8 +68,16 @@ contract GasSnapshotEndpoint is ILayerZeroEndpointV2 {
         mockFee = fee;
     }
 
-    function send(MessagingParams calldata, address) external payable returns (MessagingReceipt memory receipt) {
-        return MessagingReceipt({ guid: bytes32(uint256(0xABCD)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
+    function send(MessagingParams calldata, address)
+        external
+        payable
+        returns (MessagingReceipt memory receipt)
+    {
+        return MessagingReceipt({
+            guid: bytes32(uint256(0xABCD)),
+            nonce: 0,
+            fee: MessagingFee({ nativeFee: msg.value, lzTokenFee: 0 })
+        });
     }
 
     function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {
@@ -102,6 +127,8 @@ contract GasSnapshotTest is Test {
 
         token = new GasSnapshotERC20();
         target = new GasSnapshotTarget();
+        escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 
         user = vm.addr(userPk);
         token.mint(user, 1_000_000);
