@@ -76,6 +76,7 @@ import {
   type Hex,
 } from "viem";
 import type { SourceWatcher } from "./relayer.js";
+import { noopLogger, type Logger } from "./logger.js";
 import {
   FILL_INSTRUCTION_LENGTH,
   type BridgeMessage,
@@ -212,6 +213,8 @@ export interface EVMSourceWatcherConfig {
   stellarEid: EndpointId;
   /** Maximum block range per getLogs call (default 2000). Adapts downward on range errors. */
   maxBlockRange?: number;
+  /** Receives watcher warnings (range halving, callback failures). Defaults to silent. */
+  logger?: Logger;
   /**
    * Optional LayerZero endpoint address on the source chain. When set, the
    * watcher decodes the outbound nonce from the endpoint's `PacketSent` event
@@ -253,6 +256,7 @@ export interface NonceCounter {
  */
 export class EVMSourceWatcher implements SourceWatcher {
   private readonly client: PublicClient;
+  private readonly logger: Logger;
   private maxBlockRange: number;
   private readonly transactionFetchConcurrency = 10;
   private readonly transactionFetchTimeoutMs = 10_000;
@@ -264,6 +268,7 @@ export class EVMSourceWatcher implements SourceWatcher {
       transport: http(config.rpcUrl),
     });
     this.maxBlockRange = config.maxBlockRange ?? 2000;
+    this.logger = config.logger ?? noopLogger;
   }
 
   async poll(
@@ -301,7 +306,7 @@ export class EVMSourceWatcher implements SourceWatcher {
         if (this._isProviderRangeError(err)) {
           if (this.maxBlockRange <= 1) throw err;
           this.maxBlockRange = Math.max(1, Math.floor(this.maxBlockRange / 2));
-          console.warn("EVMSourceWatcher: provider range error, halving max block range", {
+          this.logger.warn("EVMSourceWatcher: provider range error, halving max block range", {
             newMaxBlockRange: this.maxBlockRange,
             err: String(err),
           });
@@ -384,7 +389,7 @@ export class EVMSourceWatcher implements SourceWatcher {
         if (this._isProviderRangeError(err)) {
           if (this.maxBlockRange <= 1) throw err;
           this.maxBlockRange = Math.max(1, Math.floor(this.maxBlockRange / 2));
-          console.warn("EVMSourceWatcher: provider range error during refund scan, halving max block range", {
+          this.logger.warn("EVMSourceWatcher: provider range error during refund scan, halving max block range", {
             newMaxBlockRange: this.maxBlockRange,
             err: String(err),
           });
@@ -399,7 +404,7 @@ export class EVMSourceWatcher implements SourceWatcher {
         try {
           await onRefund(observation);
         } catch (err) {
-          console.warn("EVMSourceWatcher: onRefund callback failed", {
+          this.logger.warn("EVMSourceWatcher: onRefund callback failed", {
             intentHash: observation.intentHash,
             err: String(err),
           });

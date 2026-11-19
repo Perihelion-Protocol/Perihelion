@@ -23,20 +23,18 @@ import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 /// Run:
 ///   cd contracts/evm && forge test --match-contract SignatureVectors -vvv
 contract SignatureVectorsTest is Test {
-
     // ─── Vector file ──────────────────────────────────────────────────────────
 
     string internal constant VECTORS_FILE = "../shared/wire-vectors/signature-vectors.json";
 
     // ─── Fixed domain (must match signature-vectors.json) ────────────────────
 
-    uint256 internal constant CHAIN_ID           = 8453;
-    address internal constant VERIFYING_CONTRACT =
-        0x1234567890123456789012345678901234567890;
+    uint256 internal constant CHAIN_ID = 8453;
+    address internal constant VERIFYING_CONTRACT = 0x1234567890123456789012345678901234567890;
 
     // ─── Fixed intent (must match signature-vectors.json) ────────────────────
 
-    address internal constant SIGNER      = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
+    address internal constant SIGNER = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
     address internal constant WRONG_SIGNER = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC;
 
     // ─── Pre-computed hash from vector generator ──────────────────────────────
@@ -67,15 +65,15 @@ contract SignatureVectorsTest is Test {
             CHAIN_ID,
             VERIFYING_CONTRACT,
             SigVerifyHarness.IntentFields({
-                user:            SIGNER,
-                destination:     vm.parseJsonString(json, ".intent.destination"),
-                sourceChainId:   uint256(vm.parseJsonUint(json, ".intent.sourceChainId")),
-                sourceAsset:     vm.parseJsonAddress(json, ".intent.sourceAsset"),
-                sourceAmount:    uint256(vm.parseJsonUint(json, ".intent.sourceAmount")),
-                destAsset:       vm.parseJsonString(json, ".intent.destAsset"),
-                minDestAmount:   uint256(vm.parseJsonUint(json, ".intent.minDestAmount")),
-                deadline:        uint256(vm.parseJsonUint(json, ".intent.deadline")),
-                nonce:           uint256(vm.parseJsonUint(json, ".intent.nonce")),
+                user: SIGNER,
+                destination: vm.parseJsonString(json, ".intent.destination"),
+                sourceChainId: uint256(vm.parseJsonUint(json, ".intent.sourceChainId")),
+                sourceAsset: vm.parseJsonAddress(json, ".intent.sourceAsset"),
+                sourceAmount: uint256(vm.parseJsonUint(json, ".intent.sourceAmount")),
+                destAsset: vm.parseJsonString(json, ".intent.destAsset"),
+                minDestAmount: uint256(vm.parseJsonUint(json, ".intent.minDestAmount")),
+                deadline: uint256(vm.parseJsonUint(json, ".intent.deadline")),
+                nonce: uint256(vm.parseJsonUint(json, ".intent.nonce")),
                 preferredSolver: address(0)
             })
         );
@@ -157,10 +155,8 @@ contract SignatureVectorsTest is Test {
     // ─── ERC-1271 vectors ─────────────────────────────────────────────────────
 
     function test_erc1271_magic_value_accepted() public {
-        MockERC1271Wallet wallet = new MockERC1271Wallet(
-            MockERC1271Wallet.Mode.ReturnMagic,
-            bytes4(0x1626ba7e)
-        );
+        MockERC1271Wallet wallet =
+            new MockERC1271Wallet(MockERC1271Wallet.Mode.ReturnMagic, bytes4(0x1626ba7e));
         bytes memory sig = hex"deadbeef";
         assertTrue(
             harness.verifyEIP712(EXPECTED_INTENT_HASH, address(wallet), sig),
@@ -169,10 +165,8 @@ contract SignatureVectorsTest is Test {
     }
 
     function test_erc1271_wrong_value_rejected() public {
-        MockERC1271Wallet wallet = new MockERC1271Wallet(
-            MockERC1271Wallet.Mode.ReturnMagic,
-            bytes4(0xffffffff)
-        );
+        MockERC1271Wallet wallet =
+            new MockERC1271Wallet(MockERC1271Wallet.Mode.ReturnMagic, bytes4(0xffffffff));
         bytes memory sig = hex"deadbeef";
         assertFalse(
             harness.verifyEIP712(EXPECTED_INTENT_HASH, address(wallet), sig),
@@ -181,10 +175,8 @@ contract SignatureVectorsTest is Test {
     }
 
     function test_erc1271_revert_rejected() public {
-        MockERC1271Wallet wallet = new MockERC1271Wallet(
-            MockERC1271Wallet.Mode.Revert,
-            bytes4(0x1626ba7e)
-        );
+        MockERC1271Wallet wallet =
+            new MockERC1271Wallet(MockERC1271Wallet.Mode.Revert, bytes4(0x1626ba7e));
         bytes memory sig = hex"deadbeef";
         assertFalse(
             harness.verifyEIP712(EXPECTED_INTENT_HASH, address(wallet), sig),
@@ -193,10 +185,8 @@ contract SignatureVectorsTest is Test {
     }
 
     function test_erc1271_empty_return_rejected() public {
-        MockERC1271Wallet wallet = new MockERC1271Wallet(
-            MockERC1271Wallet.Mode.ReturnEmpty,
-            bytes4(0x1626ba7e)
-        );
+        MockERC1271Wallet wallet =
+            new MockERC1271Wallet(MockERC1271Wallet.Mode.ReturnEmpty, bytes4(0x1626ba7e));
         bytes memory sig = hex"deadbeef";
         assertFalse(
             harness.verifyEIP712(EXPECTED_INTENT_HASH, address(wallet), sig),
@@ -205,10 +195,8 @@ contract SignatureVectorsTest is Test {
     }
 
     function test_erc1271_short_return_rejected() public {
-        MockERC1271Wallet wallet = new MockERC1271Wallet(
-            MockERC1271Wallet.Mode.ReturnShort,
-            bytes4(0x1626ba7e)
-        );
+        MockERC1271Wallet wallet =
+            new MockERC1271Wallet(MockERC1271Wallet.Mode.ReturnShort, bytes4(0x1626ba7e));
         bytes memory sig = hex"deadbeef";
         assertFalse(
             harness.verifyEIP712(EXPECTED_INTENT_HASH, address(wallet), sig),
@@ -219,10 +207,8 @@ contract SignatureVectorsTest is Test {
     function test_erc1271_does_not_accept_ecdsa_vectors() public {
         // A contract wallet must not fall back to ECDSA: a valid ECDSA
         // signature for SIGNER must be rejected when intent.user is a contract.
-        MockERC1271Wallet wallet = new MockERC1271Wallet(
-            MockERC1271Wallet.Mode.ReturnMagic,
-            bytes4(0xffffffff)
-        );
+        MockERC1271Wallet wallet =
+            new MockERC1271Wallet(MockERC1271Wallet.Mode.ReturnMagic, bytes4(0xffffffff));
         bytes memory sig = _vectorSig(0);
         assertFalse(
             harness.verifyEIP712(EXPECTED_INTENT_HASH, address(wallet), sig),
@@ -244,9 +230,9 @@ contract SignatureVectorsTest is Test {
 contract MockERC1271Wallet {
     enum Mode {
         ReturnMagic, // return the configured 4-byte value (left-padded to 32 bytes)
-        Revert,      // revert on isValidSignature
+        Revert, // revert on isValidSignature
         ReturnEmpty, // return zero-length data
-        ReturnShort  // return fewer than 32 bytes
+        ReturnShort // return fewer than 32 bytes
     }
 
     Mode internal immutable mode;
@@ -282,7 +268,6 @@ contract MockERC1271Wallet {
 ///      hash from raw intent fields + domain parameters, used to pin the hash
 ///      against the vector file.
 contract SigVerifyHarness {
-
     // secp256k1 half-order — identical to PerihelionEscrow.SECP256K1_HALF_ORDER
     uint256 private constant HALF_ORDER =
         0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
@@ -297,11 +282,11 @@ contract SigVerifyHarness {
 
     struct IntentFields {
         address user;
-        string  destination;
+        string destination;
         uint256 sourceChainId;
         address sourceAsset;
         uint256 sourceAmount;
-        string  destAsset;
+        string destAsset;
         uint256 minDestAmount;
         uint256 deadline;
         uint256 nonce;
@@ -336,9 +321,7 @@ contract SigVerifyHarness {
     {
         (bool ok, bytes memory ret) = signer.staticcall{ gas: ERC1271_GAS_STIPEND }(
             abi.encodeWithSelector(
-                bytes4(keccak256("isValidSignature(bytes32,bytes)")),
-                digest,
-                signature
+                bytes4(keccak256("isValidSignature(bytes32,bytes)")), digest, signature
             )
         );
         if (!ok || ret.length < 32) return false;
@@ -354,7 +337,7 @@ contract SigVerifyHarness {
         if (signature.length != 65) return false;
         bytes32 r;
         bytes32 s;
-        uint8   v;
+        uint8 v;
         assembly {
             r := calldataload(signature.offset)
             s := calldataload(add(signature.offset, 32))
@@ -368,31 +351,35 @@ contract SigVerifyHarness {
     }
 
     /// @notice Compute the EIP-712 intent hash from raw intent fields + domain params.
-    function computeIntentHash(
-        uint256 chainId,
-        address verifyingContract,
-        IntentFields calldata f
-    ) external pure returns (bytes32) {
-        bytes32 domainSep = keccak256(abi.encode(
-            DOMAIN_TYPEHASH,
-            keccak256(bytes("Perihelion")),
-            keccak256(bytes("1")),
-            chainId,
-            verifyingContract
-        ));
-        bytes32 structHash = keccak256(abi.encode(
-            INTENT_TYPEHASH,
-            f.user,
-            keccak256(bytes(f.destination)),
-            f.sourceChainId,
-            f.sourceAsset,
-            f.sourceAmount,
-            keccak256(bytes(f.destAsset)),
-            f.minDestAmount,
-            f.deadline,
-            f.nonce,
-            f.preferredSolver
-        ));
+    function computeIntentHash(uint256 chainId, address verifyingContract, IntentFields calldata f)
+        external
+        pure
+        returns (bytes32)
+    {
+        bytes32 domainSep = keccak256(
+            abi.encode(
+                DOMAIN_TYPEHASH,
+                keccak256(bytes("Perihelion")),
+                keccak256(bytes("1")),
+                chainId,
+                verifyingContract
+            )
+        );
+        bytes32 structHash = keccak256(
+            abi.encode(
+                INTENT_TYPEHASH,
+                f.user,
+                keccak256(bytes(f.destination)),
+                f.sourceChainId,
+                f.sourceAsset,
+                f.sourceAmount,
+                keccak256(bytes(f.destAsset)),
+                f.minDestAmount,
+                f.deadline,
+                f.nonce,
+                f.preferredSolver
+            )
+        );
         return keccak256(abi.encodePacked("\x19\x01", domainSep, structHash));
     }
 }

@@ -26,6 +26,12 @@ versioned independently.
 - `make sdk-abi` / `make sdk-abi-check`: `sdk/src/escrow-abi.ts` is now
   generated from the PerihelionEscrow Foundry build artefact, and CI fails if
   the committed file is stale.
+- **sdk**: `submitWithFeeEscalation`, `quoteInclusionFee` and `submitAndWait`
+  are the Soroban submission path shared by the relayer and the solver.
+  Operators set the inclusion-fee policy with
+  `PERIHELION_SOROBAN_INCLUSION_FEE_PERCENTILE` (50/70/90/95/99, default 90),
+  `PERIHELION_SOROBAN_MIN_INCLUSION_FEE` (default 10000 stroops) and
+  `PERIHELION_SOROBAN_MAX_INCLUSION_FEE` (default 1000000 stroops per operation).
 
 ### Fixed
 
@@ -96,7 +102,18 @@ versioned independently.
   Docker image now run `dist/cli.js`, and `sideEffects` lists only the CLI
   (#579).
 
+- **sdk, relayer, mempool:** library code no longer writes to `console`. The SDK's
+  V_min and `http://` warnings go to `buildIntent`'s `onWarning` option and
+  `PerihelionClient`'s `logger` option, and are silent by default. The relayer's
+  `loadConfig`, `EVMSourceWatcher` and `SorobanDestinationDelivery` accept a
+  `logger`, which the CLI fills with its structured logger, so delivery-check
+  failures reach the JSON log stream. `MempoolServer` takes a `logger` option
+  (its CLI routes it to the terminal). (#980)
+
 ### Fixed
+
+- **relayer:** removed stray `=======` merge separators left in `src/config.ts` and
+  `src/relayer.ts`, which stopped the package from parsing. (#980)
 
 - The local Stellar quickstart service in `docker-compose.yml` uses the standalone
   network passphrase that `--local` creates, points the relayer and solver at the

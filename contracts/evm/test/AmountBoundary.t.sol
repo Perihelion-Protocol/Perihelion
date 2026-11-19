@@ -33,6 +33,11 @@ import { IERC20 } from "../src/IERC20.sol";
 ///   • sdk/test/intent.test.ts — SDK-side boundary enforcement
 ///   • contracts/soroban/settlement/src/test.rs — Soroban-side boundary tests
 
+/// @dev Endpoint stub: the escrow constructor calls `setDelegate` and needs code.
+contract AmountBoundaryNoopEndpoint {
+    function setDelegate(address) external { }
+}
+
 contract AmountBoundaryHarness is PerihelionEscrow {
     constructor(address ep, uint32 eid) PerihelionEscrow(ep, eid) { }
 
@@ -50,7 +55,7 @@ contract AmountBoundaryTest is Test {
     AmountBoundaryHarness internal harness;
 
     function setUp() public {
-        harness = new AmountBoundaryHarness(address(0x1), 30_316);
+        harness = new AmountBoundaryHarness(address(new AmountBoundaryNoopEndpoint()), 30_316);
     }
 
     // -----------------------------------------------------------------------

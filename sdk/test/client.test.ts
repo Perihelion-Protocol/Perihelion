@@ -30,8 +30,12 @@ function makeRecord(status = "pending") {
   };
 }
 
-function makeClient(fetchImpl: typeof fetch, mempoolUrl = "https://mempool.example.com/") {
-  return new PerihelionClient({ mempoolUrl, fetch: fetchImpl });
+function makeClient(
+  fetchImpl: typeof fetch,
+  mempoolUrl = "https://mempool.example.com/",
+  logger?: { warn(message: string): void },
+) {
+  return new PerihelionClient({ mempoolUrl, fetch: fetchImpl, logger });
 }
 
 // ─── constructor: URL validation ──────────────────────────────────────────────
@@ -86,13 +90,7 @@ test("constructor normalises a URL with multiple trailing slashes (no double-sla
 
 test("constructor warns on non-loopback http:// URL", () => {
   const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
-  try {
-    makeClient((() => {}) as unknown as typeof fetch, "http://remote.example.com/api");
-  } finally {
-    console.warn = origWarn;
-  }
+  makeClient((() => {}) as unknown as typeof fetch, "http://remote.example.com/api", { warn: (message: string) => warnings.push(message) });
   assert.equal(warnings.length, 1, "expected exactly one warning");
   assert.ok(warnings[0].includes("http://"), `warning should mention http://: ${warnings[0]}`);
   assert.ok(warnings[0].includes("bearer"), `warning should mention bearer tokens: ${warnings[0]}`);
@@ -100,37 +98,19 @@ test("constructor warns on non-loopback http:// URL", () => {
 
 test("constructor does NOT warn for https:// on a remote host", () => {
   const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
-  try {
-    makeClient((() => {}) as unknown as typeof fetch, "https://remote.example.com/api");
-  } finally {
-    console.warn = origWarn;
-  }
+  makeClient((() => {}) as unknown as typeof fetch, "https://remote.example.com/api", { warn: (message: string) => warnings.push(message) });
   assert.equal(warnings.length, 0, "no warning expected for https://");
 });
 
 test("constructor does NOT warn for http://localhost", () => {
   const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
-  try {
-    makeClient((() => {}) as unknown as typeof fetch, "http://localhost:3000");
-  } finally {
-    console.warn = origWarn;
-  }
+  makeClient((() => {}) as unknown as typeof fetch, "http://localhost:3000", { warn: (message: string) => warnings.push(message) });
   assert.equal(warnings.length, 0, "no warning expected for loopback http://");
 });
 
 test("constructor does NOT warn for http://127.0.0.1", () => {
   const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
-  try {
-    makeClient((() => {}) as unknown as typeof fetch, "http://127.0.0.1:3000");
-  } finally {
-    console.warn = origWarn;
-  }
+  makeClient((() => {}) as unknown as typeof fetch, "http://127.0.0.1:3000", { warn: (message: string) => warnings.push(message) });
   assert.equal(warnings.length, 0, "no warning expected for 127.0.0.1 http://");
 });
 
@@ -354,4 +334,18 @@ test("listPendingPages stops on a repeated cursor instead of looping forever", a
     for await (const _page of client.listPendingPages()) pages++;
   }, PerihelionPaginationError);
   assert.equal(pages, 2);
+});
+
+test("constructor writes nothing to the console without a logger (#980)", () => {
+  const seen: unknown[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    seen.push(args);
+  };
+  try {
+    makeClient((() => {}) as unknown as typeof fetch, "http://remote.example.com/api");
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(seen.length, 0, "the SDK must not write to the console by default");
 });

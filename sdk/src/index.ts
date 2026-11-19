@@ -39,6 +39,7 @@ export * from "./validate.js";
 export * from "./escrow-abi.js";
 export * from "./escrow-client.js";
 export * from "./deployments.js";
+export * from "./soroban-submit.js";
 
 // Explicit re-export of the shared EVM address encoder so the solver and
 // relayer can import it directly from the package entrypoint. The helper

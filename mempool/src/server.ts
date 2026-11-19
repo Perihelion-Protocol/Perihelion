@@ -92,9 +92,22 @@ const INTENT_STATUSES: ReadonlySet<string> = new Set([
   "expired",
 ]);
 
+/**
+ * Sink for the server's warnings and unhandled errors. Defaults to silent so
+ * embedding the server never writes to the console; the CLI injects one.
+ */
+export interface MempoolLogger {
+  warn(msg: string, meta?: Record<string, unknown>): void;
+  error(msg: string, meta?: Record<string, unknown>): void;
+}
+
+const noopMempoolLogger: MempoolLogger = { warn() {}, error() {} };
+
 export interface MempoolServerOptions {
   port?: number;
   host?: string;
+  /** Receives warnings and unhandled request errors. Defaults to silent. */
+  logger?: MempoolLogger;
   /** EVM chain ID the escrow is deployed on. Binds the EIP-712 domain. Required. */
   chainId: number;
   /** PerihelionEscrow contract address. Binds the EIP-712 domain. Required. */
@@ -146,6 +159,7 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 export class MempoolServer {
   private app = express();
   private store: IntentStore;
+  private readonly logger: MempoolLogger;
   private port: number;
   private host: string;
   private chainId: number;
@@ -175,6 +189,7 @@ export class MempoolServer {
         "MempoolServer requires a non-zero verifyingContract (escrow address) — the zero address verifies against no deployed contract.",
       );
     }
+    this.logger = opts.logger ?? noopMempoolLogger;
     this.port = opts.port ?? 3000;
     this.host = opts.host ?? "localhost";
     this.chainId = opts.chainId;
@@ -271,7 +286,9 @@ export class MempoolServer {
           res.status(status).json({ error: "Bad request" });
           return;
         }
-        console.error("[mempool] unhandled error:", err);
+        this.logger.error("[mempool] unhandled error", {
+          err: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        });
         res.status(500).json({ error: "Internal server error" });
       },
     );

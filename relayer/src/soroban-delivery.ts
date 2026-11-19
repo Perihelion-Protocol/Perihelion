@@ -17,9 +17,17 @@ import {
   Asset,
   Operation,
   type Account,
+  type Transaction,
 } from "@stellar/stellar-sdk";
-import { evmAddressToBytes32 } from "@perihelion/sdk";
+import {
+  evmAddressToBytes32,
+  resolveInclusionFeePolicy,
+  submitAndWait,
+  submitWithFeeEscalation,
+  type InclusionFeePolicy,
+} from "@perihelion/sdk";
 import { FatalError, type DestinationDelivery } from "./relayer.js";
+import { noopLogger, type Logger } from "./logger.js";
 import {
   CANCEL_INTENT_LENGTH,
   FILL_INSTRUCTION_LENGTH,
@@ -73,73 +81,6 @@ export function decodeIntentStatus(retval: xdr.ScVal | undefined | null): Intent
   }
 }
 
-/** Options for {@link submitAndWait}. */
-export interface SubmitAndWaitOptions {
-  /** Maximum number of `getTransaction` polls (default 20). */
-  maxAttempts?: number;
-  /** Delay between polls in milliseconds (default 1000). */
-  pollIntervalMs?: number;
-  /** Maximum number of resubmissions on `TRY_AGAIN_LATER` (default 3). */
-  maxResubmits?: number;
-  /** Base backoff delay in milliseconds for `TRY_AGAIN_LATER` (default 1000). */
-  backoffMs?: number;
-}
-
-/**
- * Submit a signed transaction and wait for it to be included in a ledger.
- *
- * Branches on the `sendTransaction` result status:
- * - `ERROR`: reject immediately with the decoded `errorResult` XDR.
- * - `TRY_AGAIN_LATER`: back off and resubmit.
- * - `PENDING` / `DUPLICATE`: poll `getTransaction` until confirmed.
- *
- * Shared by the relayer and the solver.
- */
-export async function submitAndWait(
-  rpc: SorobanRpc.Server,
-  transaction: Parameters<SorobanRpc.Server["sendTransaction"]>[0],
-  options: SubmitAndWaitOptions = {},
-): Promise<string> {
-  const maxAttempts = options.maxAttempts ?? 20;
-  const pollIntervalMs = options.pollIntervalMs ?? 1000;
-  const maxResubmits = options.maxResubmits ?? 3;
-  const backoffMs = options.backoffMs ?? 1000;
-
-  let resubmits = 0;
-  for (;;) {
-    const result = await rpc.sendTransaction(transaction);
-
-    if (result.status === "ERROR") {
-      const errorXdr = result.errorResult ? result.errorResult.toXDR("base64") : "unknown error";
-      throw new Error(`Transaction rejected by RPC: ${errorXdr}`);
-    }
-
-    if (result.status === "TRY_AGAIN_LATER") {
-      if (resubmits >= maxResubmits) {
-        throw new Error(`Transaction not accepted after ${resubmits} retries: ${result.hash}`);
-      }
-      resubmits += 1;
-      await new Promise((resolve) => setTimeout(resolve, backoffMs * resubmits));
-      continue;
-    }
-
-    // PENDING or DUPLICATE: poll for confirmation.
-    let attempts = 0;
-    while (attempts < maxAttempts) {
-      const status = await rpc.getTransaction(result.hash);
-      if (status.status === "SUCCESS") {
-        return result.hash;
-      }
-      if (status.status === "FAILED") {
-        throw new Error(`Transaction failed: ${status.resultXdr}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-      attempts += 1;
-    }
-    throw new Error(`Transaction confirmation timeout: ${result.hash}`);
-  }
-}
-
 /** Configuration for SorobanDestinationDelivery. */
 export interface SorobanDeliveryConfig {
   /** Soroban RPC endpoint URL. */
@@ -154,6 +95,13 @@ export interface SorobanDeliveryConfig {
   escrowAddress?: string;
   /** Transaction timeout in seconds (default 30). */
   timeoutSeconds?: number;
+  /** Structured logger for delivery diagnostics. Defaults to silent. */
+  logger?: Logger;
+  /**
+   * Operator policy for the inclusion fee bid on each submission: which
+   * `getFeeStats` percentile to follow, the floor and the hard cap.
+   */
+  inclusionFee?: InclusionFeePolicy;
 }
 
 /**
@@ -167,45 +115,61 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
   private signerSecret: string;
   private signerKeypair: Keypair;
   private timeoutSeconds: number;
+  private readonly inclusionFee: Required<InclusionFeePolicy>;
+  private readonly logger: Logger;
 
   constructor(private config: SorobanDeliveryConfig) {
+    this.logger = config.logger ?? noopLogger;
     this.rpc = new SorobanRpc.Server(config.rpcUrl);
     this.networkPassphrase = config.networkPassphrase;
     this.settlementContractId = config.settlementContractId;
     this.signerSecret = config.signerSecret;
     this.signerKeypair = Keypair.fromSecret(config.signerSecret);
     this.timeoutSeconds = config.timeoutSeconds ?? 30;
+    // Validate the policy up front so a bad cap fails at startup, not mid-delivery.
+    this.inclusionFee = resolveInclusionFeePolicy(config.inclusionFee);
   }
 
   async deliver(pending: PendingMessage): Promise<string> {
     try {
-      // 1. Get signer account to build transaction
+      // 1. Restore archived entries first. A RestoreFootprint transaction uses
+      // a sequence number of its own, so it must land before step 2 reads it.
+      await this.restoreArchivedEntries(pending);
+
+      // 2. Read the sequence once. Every fee attempt reuses it, so at most one
+      // attempt can ever apply.
       const account = await this.getSignerAccount();
 
-      // 2. Build transaction with the lz_receive invocation
-      const builder = new TransactionBuilder(account, {
-        fee: "10000",
-        networkPassphrase: this.networkPassphrase,
+      // 3. Submit at an inclusion-fee bid taken from network fee stats. A
+      // TRY_AGAIN_LATER or an expiry resubmits at a higher bid within the cap.
+      const landed = await submitWithFeeEscalation({
+        rpc: this.rpc,
+        signerPublicKey: this.signerKeypair.publicKey(),
+        sequence: account.sequenceNumber(),
+        policy: this.inclusionFee,
+        logger: this.logger,
+        prepare: async (attemptAccount, inclusionFeeStroops) => {
+          const { transaction, simulated } = await this.simulateLzReceive(
+            attemptAccount,
+            pending,
+            inclusionFeeStroops,
+          );
+          if (!SorobanRpc.Api.isSimulationSuccess(simulated)) {
+            throw new Error(`Simulation failed: ${String(simulated.error)}`);
+          }
+          return SorobanRpc.assembleTransaction(transaction, simulated).build();
+        },
+        sign: (transaction) => transaction.sign(this.signerKeypair),
       });
-      await this.appendLzReceiveCall(builder, pending);
-      builder.setTimeout(this.timeoutSeconds);
-      let transaction = builder.build();
 
-      // 3. Simulate; restore archived entries if the simulation asks for it.
-      let simulated = await this.rpc.simulateTransaction(transaction);
-      if (SorobanRpc.Api.isSimulationRestore(simulated)) {
-        await this.restoreFootprint(simulated.restorePreamble);
-        transaction = builder.build();
-        simulated = await this.rpc.simulateTransaction(transaction);
-      }
-      if (!SorobanRpc.Api.isSimulationSuccess(simulated)) {
-        throw new Error(`Simulation failed: ${String(simulated.error)}`);
-      }
-      transaction = SorobanRpc.assembleTransaction(transaction, simulated).build();
-
-      // 4. Sign and submit, waiting for confirmation.
-      transaction.sign(this.signerKeypair);
-      return await submitAndWait(this.rpc, transaction);
+      // The fee charged comes from the ledger result, not from the bid.
+      this.logger.info("delivered to Soroban", {
+        hash: landed.hash,
+        attempts: landed.attempts,
+        inclusionFeeStroops: landed.inclusionFeeStroops,
+        feeChargedStroops: landed.feeChargedStroops.toString(),
+      });
+      return landed.hash;
     } catch (err) {
       if (err instanceof FatalError) throw err;
       if (err instanceof Error && /signer|secret key|network passphrase/i.test(err.message)) {
@@ -237,7 +201,8 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
 
       return false;
     } catch (err) {
-      console.error("Failed to check if delivered", { key, err });
+      // Stringify the error: Error objects serialize to {} in the JSON log stream.
+      this.logger.error("Failed to check if delivered", { key, err: String(err) });
       return false;
     }
   }
@@ -265,6 +230,32 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     if (!SorobanRpc.Api.isSimulationSuccess(simulated) || !simulated.result) return undefined;
 
     return decodeIntentStatus(simulated.result.retval);
+  }
+
+  /** Build and simulate the lz_receive transaction at the given per-operation fee. */
+  private async simulateLzReceive(
+    account: Account,
+    pending: PendingMessage,
+    inclusionFeeStroops: number,
+  ): Promise<{ transaction: Transaction; simulated: SorobanRpc.Api.SimulateTransactionResponse }> {
+    const builder = new TransactionBuilder(account, {
+      fee: String(inclusionFeeStroops),
+      networkPassphrase: this.networkPassphrase,
+    });
+    await this.appendLzReceiveCall(builder, pending);
+    builder.setTimeout(this.timeoutSeconds);
+    const transaction = builder.build();
+    const simulated = await this.rpc.simulateTransaction(transaction);
+    return { transaction, simulated };
+  }
+
+  /** Restore the footprint of archived entries when a simulation asks for it. */
+  private async restoreArchivedEntries(pending: PendingMessage): Promise<void> {
+    const account = await this.getSignerAccount();
+    const { simulated } = await this.simulateLzReceive(account, pending, 100);
+    if (SorobanRpc.Api.isSimulationRestore(simulated)) {
+      await this.restoreFootprint(simulated.restorePreamble);
+    }
   }
 
   private async getSignerAccount(): Promise<Account> {

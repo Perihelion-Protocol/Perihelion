@@ -11,6 +11,7 @@
  * should import from `index.ts` instead, which has no side effects.
  */
 
+import { inclusionFeePolicyFromEnv } from "@perihelion/sdk";
 import { loadConfig } from "./config.js";
 import { Relayer } from "./relayer.js";
 import { EVMSourceWatcher } from "./evm-watcher.js";
@@ -50,10 +51,9 @@ function assertSafeRelayerMode(config: ReturnType<typeof loadConfig>): void {
 }
 
 async function main(): Promise<void> {
-  const config = loadConfig();
-
   // Structured JSON logger — replaces console for production-grade output.
   const log = createLogger({ component: "relayer" });
+  const config = loadConfig(process.env, log);
 
   assertSafeRelayerMode(config);
   if ((process.env.PERIHELION_RELAYER_MODE ?? "").toLowerCase() === "dev") {
@@ -86,6 +86,7 @@ async function main(): Promise<void> {
     escrowAddress: config.escrowAddress,
     sourceEid: config.sourceEid,
     stellarEid: config.stellarEid,
+    logger: log,
   });
 
   const sorobanDelivery = new SorobanDestinationDelivery({
@@ -95,6 +96,8 @@ async function main(): Promise<void> {
     signerSecret: config.signerSecret,
     escrowAddress: config.escrowAddress,
     timeoutSeconds: config.txTimeoutSeconds,
+    inclusionFee: inclusionFeePolicyFromEnv(process.env),
+    logger: log,
   });
 
   const evmToStellarCheckpoint = new FileCheckpointStore(config.checkpointFile);

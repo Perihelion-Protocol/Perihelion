@@ -3,8 +3,14 @@
 import { MempoolServer } from "./index.js";
 import { loadConfig } from "./config.js";
 
+// Entry point: this is where the library's warnings are routed to the terminal.
+const logger = {
+  warn: (msg: string, meta?: Record<string, unknown>) => console.warn(msg, meta ?? ""),
+  error: (msg: string, meta?: Record<string, unknown>) => console.error(msg, meta ?? ""),
+};
+
 const config = loadConfig();
-const server = new MempoolServer(config);
+const server = new MempoolServer({ ...config, logger });
 
 let shuttingDown = false;
 

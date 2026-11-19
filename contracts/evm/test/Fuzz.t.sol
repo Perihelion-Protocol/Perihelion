@@ -31,6 +31,7 @@ contract PerihelionEscrowFuzzTest is Test {
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
         escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
         vm.deal(solver, 100 ether);
     }
 
@@ -46,7 +47,8 @@ contract PerihelionEscrowFuzzTest is Test {
             sourceAsset: address(token),
             sourceAmount: amount,
             destAsset: "USDC:GA5Z",
-            minDestAmount: amount,
+            // The contract rejects minDestAmount above 2^127-1 (AmountTooLarge).
+            minDestAmount: amount > (type(uint128).max >> 1) ? (type(uint128).max >> 1) : amount,
             deadline: deadline,
             nonce: nonce,
             preferredSolver: address(0)
@@ -167,11 +169,7 @@ contract PerihelionEscrowFuzzTest is Test {
         uint64 ledger
     ) public {
         bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02),
-            intentHash,
-            solverWord,
-            amount,
-            ledger
+            bytes1(0x01), bytes1(0x02), intentHash, solverWord, amount, ledger
         );
 
         // Call lzReceive from a random non-endpoint address — must revert NotEndpoint
@@ -198,8 +196,12 @@ contract PerihelionEscrowFuzzTest is Test {
 
         // Build a minimal message with version, type, and hash
         bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(address(0)))), uint128(0), uint64(0)
+            bytes1(0x01),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(address(0)))),
+            uint128(0),
+            uint64(0)
         );
 
         vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
@@ -209,8 +211,12 @@ contract PerihelionEscrowFuzzTest is Test {
     /// @dev lzReceive with a stale nonce (zero) must revert StaleNonce.
     function testFuzz_LzReceive_ZeroNonceRejected(bytes32 intentHash) public {
         bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash,
-            bytes32(uint256(uint160(address(0)))), uint128(0), uint64(0)
+            bytes1(0x01),
+            bytes1(0x02),
+            intentHash,
+            bytes32(uint256(uint160(address(0)))),
+            uint128(0),
+            uint64(0)
         );
 
         vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
@@ -245,6 +251,8 @@ contract PerihelionEscrowFuzzTest is Test {
         amountA = uint128(bound(amountA, 1, type(uint128).max - 1));
         amountB = uint128(bound(amountB, 1, type(uint128).max));
         vm.assume(amountA != amountB);
+        // Two locks can total more than the setUp mint; top the user up.
+        token.mint(user, type(uint128).max);
 
         uint256 deadline = block.timestamp + 600;
 
@@ -334,17 +342,13 @@ contract PerihelionEscrowFuzzTest is Test {
 
     // --- Helpers -------------------------------------------------------------
 
-    function _fillConfirmed(bytes32 intentHash)
-        internal
-        pure
-        returns (bytes memory)
-    {
+    function _fillConfirmed(bytes32 intentHash) internal pure returns (bytes memory) {
         return abi.encodePacked(
             bytes1(0x01), // V = PROTOCOL_VERSION
             bytes1(0x02), // T_FILL_CONFIRMED
             intentHash,
             bytes32(uint256(uint160(address(0x5012E5)))), // solver
-            uint128(100_000),
+            uint128(type(uint128).max >> 1), // >= any minDestAmount the fuzzer can produce
             uint64(12_345)
         );
     }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
 export { MempoolServer } from "./server.js";
+export type { MempoolLogger, MempoolServerOptions } from "./server.js";
 export { IntentStore } from "./store.js";
 export type { MempoolIntentRecord, IntentStatus } from "./types.js";
