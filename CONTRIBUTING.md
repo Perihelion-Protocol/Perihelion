@@ -158,6 +158,10 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
 
 - Keep PRs focused — one logical change per PR is easier to review and merge.
 - PR titles must also follow conventional commits (also enforced by CI).
+- Triage conclusions (for example "already fixed on `main`, no change needed")
+  belong in the issue or PR comment thread, not in files committed to the
+  repository. Do not add per-contributor notes or scratch triage files to the
+  tree.
 - Ensure CI is green: `npm test`, `cargo test`, `forge test`, and lints.
 - **Invariants first.** Reviewers check every contract PR against the protocol's
   [design invariants](./docs/TECHNICAL-ARCHITECTURE.md#0-design-invariants-read-first);
