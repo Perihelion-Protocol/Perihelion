@@ -48,23 +48,31 @@ interface IERC1271 {
 ///      topic column is the exact symbol the Soroban contract emits for the
 ///      analogous event (full names, never abbreviated; see
 ///      `docs/EVENT-SHAPES.md`). "-" means there is no Soroban analogue.
+///      The table is checked against the compiled ABI by `make event-spec-check`
+///      (scripts/check-event-spec.mjs); CI fails on any drift.
 ///
-///      | Event                  | Topics                                              | Data                                                          | Soroban topic                  |
-///      |------------------------|-----------------------------------------------------|---------------------------------------------------------------|--------------------------------|
-///      | Locked                 | intentHash, solver, user                             | asset, amount, destination, destAsset, minDestAmount, deadline| `registered`                   |
-///      | Released               | intentHash, solver                                  | amount, fillAmount, fillLedger | `filled`                       |
-///      | Refunded               | intentHash, user                                    | amount, reason                | `cancelled`                    |
-///      | RefundedLocalTimeout   | intentHash, user                                    | amount                        | -                              |
-///      | PeerSet                | -                                                   | peer                          | `peer_set`                     |
-///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  | -                              |
-///      | GuardianSet            | guardian                                            | -                             | -                              |
-///      | PausedSet              | -                                                   | paused                        | `paused_set`                   |
-///      | OwnershipTransferStart | previousOwner, newOwner                             | -                             | `admin_transfer_started`       |
-///      | OwnershipTransferred   | previousOwner, newOwner                             | -                             | `admin_transfer_completed`     |
-///      | OwnershipTransferCancel| previousOwner                                       | -                             | -                              |
-///      | Skimmed                | token, to                                           | amount                        | -                              |
-///      | RollingWindowCapTriggered | windowStart                                      | accumulated                   | `rolling_window_cap_triggered` |
-///      | RollingWindowCapReset  | -                                                   | -                             | `rolling_window_cap_reset`     |
+///      | Event                       | Topics                   | Data                                                           | Soroban topic                  |
+///      |-----------------------------|--------------------------|----------------------------------------------------------------|--------------------------------|
+///      | Locked                      | intentHash, solver, user | asset, amount, destination, destAsset, minDestAmount, deadline | `registered`                   |
+///      | Released                    | intentHash, solver       | amount, fillAmount, fillLedger, minDestAmount                  | `filled`                       |
+///      | Refunded                    | intentHash, user         | amount, reason                                                 | `cancelled`                    |
+///      | RefundedLocalTimeout        | intentHash, user         | amount                                                         | -                              |
+///      | FillConfirmedIgnored        | intentHash               | reason                                                         | -                              |
+///      | CancelIgnored               | intentHash               | reason                                                         | `cancel_ignored`               |
+///      | PeerSet                     | -                        | peer                                                           | `peer_set`                     |
+///      | ConfirmationGraceSet        | -                        | secondsGrace                                                   | -                              |
+///      | GuardianSet                 | guardian                 | -                                                              | -                              |
+///      | PausedSet                   | -                        | paused                                                         | `paused_set`                   |
+///      | OwnershipTransferStarted    | previousOwner, newOwner  | -                                                              | `admin_transfer_started`       |
+///      | OwnershipTransferred        | previousOwner, newOwner  | -                                                              | `admin_transfer_completed`     |
+///      | OwnershipTransferCancelled  | previousOwner            | -                                                              | -                              |
+///      | Skimmed                     | token, to                | amount                                                         | -                              |
+///      | NativeSkimmed               | to                       | amount                                                         | -                              |
+///      | AssetAllowed                | asset                    | allowed                                                        | -                              |
+///      | MaxIntentAmountPerAssetSet  | asset                    | maxAmount                                                      | -                              |
+///      | RollingWindowCapPerAssetSet | asset                    | duration, cap                                                  | -                              |
+///      | RollingWindowCapTriggered   | -                        | windowStart, accumulated                                       | `rolling_window_cap_triggered` |
+///      | RollingWindowCapReset       | -                        | -                                                              | `rolling_window_cap_reset`     |
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
