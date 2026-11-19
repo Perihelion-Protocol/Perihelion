@@ -724,10 +724,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // enough live locals to exceed the legacy codegen's 16-slot stack limit
         // (#857). Order of checks, effects and interactions is unchanged.
         bytes32 intentHash = _validateIntent(intent, signature);
-        (bool pulled, uint256 received) = _pullFunds(intent);
-        // A rolling-window breach latches the breaker and refunds msg.value; the
-        // lock is not recorded and no FillInstruction is dispatched.
-        if (!pulled) return;
+        // Check value caps before pulling funds. A breach latches the breaker
+        // (state persists; this does not revert), refunds msg.value, and returns
+        // without recording a lock or dispatching a FillInstruction.
+        if (!_checkValueCaps(intent.sourceAmount, intent.sourceAsset)) {
+            if (msg.value > 0) {
+                (bool refunded,) = msg.sender.call{ value: msg.value }("");
+                if (!refunded) revert NativeTransferFailed();
+            }
+            return;
+        }
+        uint256 received = _pullFunds(intent);
         _recordLock(intentHash, intent, received);
         _dispatchFillInstruction(intentHash, intent);
     }
@@ -768,18 +775,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
     }
 
-    /// @dev Enforce value caps, pull `sourceAmount` from the user and return the
-    ///      amount the escrow actually received.
-    function _pullFunds(Intent calldata intent) private returns (bool pulled, uint256 received) {
-        // Check value caps before pulling funds.
-        if (!_checkValueCaps(intent.sourceAmount, intent.sourceAsset)) {
-            if (msg.value > 0) {
-                (bool refunded,) = msg.sender.call{ value: msg.value }("");
-                if (!refunded) revert NativeTransferFailed();
-            }
-            return (false, 0);
-        }
-
+    /// @dev Pull `sourceAmount` from the user, commit the measured delta to the
+    ///      rolling-window accumulator, and return the amount actually received.
+    function _pullFunds(Intent calldata intent) private returns (uint256 received) {
         // Measured-delta accounting: store exactly what the escrow received, so
         // fee-on-transfer / rebasing tokens can never release more than is held.
         uint256 balBefore = IERC20(intent.sourceAsset).balanceOf(address(this));
@@ -793,7 +791,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         // Commit the actual received amount to the rolling window accumulator.
         _commitValueCaps(intent.sourceAsset, received);
-        return (true, received);
     }
 
     /// @dev Persist the lock, bump the aggregate liability and emit {Locked}.
