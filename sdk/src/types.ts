@@ -62,7 +62,8 @@ export type IntentStatus =
   | "filled" // delivered on Stellar; awaiting source-chain `Released`
   | "settled" // source-chain escrow emitted `Released`; bridge complete
   | "refunded" // deadline passed / failed; source funds returned
-  | "expired"; // deadline passed before any claim
+  | "expired" // deadline passed before any claim
+  | "cancelled"; // user revoked the signed intent before any lock (#1053)
 
 /**
  * On-chain `IntentStatus` enum as defined by the settlement contract
@@ -149,7 +150,7 @@ function toNativeStatus(scVal: unknown): unknown {
  */
 export type MempoolIntentStatus = Extract<
   IntentStatus,
-  "pending" | "filled" | "settled" | "refunded" | "expired"
+  "pending" | "filled" | "settled" | "refunded" | "expired" | "cancelled"
 >;
 
 /** An intent together with its signature and current status. */

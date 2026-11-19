@@ -41,6 +41,7 @@ const MEMPOOL_STATUSES: Record<MempoolIntentStatus, true> = {
   settled: true,
   refunded: true,
   expired: true,
+  cancelled: true,
 };
 
 test("MempoolIntentStatus matches the spec's IntentStatus vocabulary", () => {

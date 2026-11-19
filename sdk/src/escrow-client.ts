@@ -164,6 +164,32 @@ export class PerihelionEscrowClient {
   }
 
   /**
+   * Revoke one of your own signed intents before a solver locks it (#1053).
+   *
+   * Sent by the intent's user (the wallet client's account must be the signer).
+   * Once confirmed, `lock` for this intent reverts with `IntentCancelled`. The call
+   * is not pausable and is idempotent. It reverts with `AlreadyLocked` if a solver
+   * has already locked the intent.
+   *
+   * @param intentHash The EIP-712 hash of the intent (see `hashIntent`).
+   * @returns The transaction hash.
+   */
+  async cancelIntent(intentHash: Hex): Promise<Hex> {
+    const account = this.walletClient.account;
+    if (!account) throw new Error("wallet client has no account");
+
+    const hash = await this.walletClient.writeContract({
+      account,
+      chain: this.walletClient.chain,
+      address: this.escrowAddress,
+      abi: ESCROW_ABI,
+      functionName: "cancelIntent",
+      args: [intentHash],
+    });
+    return hash;
+  }
+
+  /**
    * Retrieve the lock record for an intent.
    *
    * Wraps the contract's public `locks(bytes32)` mapping getter, which does

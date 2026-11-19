@@ -66,6 +66,7 @@ interface IERC1271 {
 ///      | OwnershipTransferStart | previousOwner, newOwner                             | -                             | `admin_transfer_started`       |
 ///      | OwnershipTransferred   | previousOwner, newOwner                             | -                             | `admin_transfer_completed`     |
 ///      | OwnershipTransferCancel| previousOwner                                       | -                             | -                              |
+///      | IntentRevoked          | intentHash, user                                    | -                             | -                              |
 ///      | Skimmed                | token, to                                           | amount                        | -                              |
 ///      | MaxIntentAmountSet     | -                                                   | maxAmount                     | `max_intent_amount_set`        |
 ///      | RollingWindowCapSet    | -                                                   | duration, cap                 | `rolling_window_cap_set`       |
@@ -244,6 +245,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice intentHash => escrow position.
     mapping(bytes32 => Lock) public locks;
+    /// @notice user => intentHash => revoked before any lock (#1053). Keyed by the
+    ///         signer so only the user who signed an intent can revoke it.
+    mapping(address => mapping(bytes32 => bool)) public cancelledIntent;
     /// @notice token => aggregate of all un-finalised Lock.amount values for that token.
     ///         Incremented in lock(), decremented in _onFillConfirmed, _onCancelIntent,
     ///         and cancelExpired. Allows skim() to compute the genuine on-chain surplus
@@ -343,6 +347,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event FillConfirmedIgnored(bytes32 indexed intentHash, uint8 reason);
     event CancelIgnored(bytes32 indexed intentHash, uint8 reason);
     event AssetAllowed(address indexed asset, bool allowed);
+    /// @dev Emitted by {cancelIntent}: the user revoked an unlocked intent.
+    event IntentRevoked(bytes32 indexed intentHash, address indexed user);
     event MaxIntentAmountPerAssetSet(address indexed asset, uint256 maxAmount);
 
     // --- Errors --------------------------------------------------------------
@@ -402,6 +408,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @dev A uint256 intent field cannot fit in the narrower wire/storage type
     ///      without wrapping (minDestAmount/sourceAmount vs uint128, deadline vs uint64).
     error AmountTooLarge();
+    /// @dev The intent was revoked by its user with {cancelIntent} before locking.
+    error IntentCancelled();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -697,6 +705,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         _dispatchFillInstruction(intentHash, intent);
     }
 
+    /// @notice Revoke one of your own signed intents before a solver locks it (#1053).
+    /// @dev Only the signer can revoke: the mapping is keyed by `msg.sender`, and a
+    ///      different caller only writes an unused slot. Once revoked, {lock} reverts
+    ///      with {IntentCancelled}. Revocation after a lock is refused with
+    ///      {AlreadyLocked}, because the lock already exists and the funds follow the
+    ///      normal release or refund path. Not pausable: a user must always be able to
+    ///      withdraw consent. Idempotent for an unlocked intent.
+    /// @param intentHash EIP-712 hash of the intent, as returned by {hashIntent}.
+    function cancelIntent(bytes32 intentHash) external {
+        if (locks[intentHash].user != address(0)) revert AlreadyLocked();
+        cancelledIntent[msg.sender][intentHash] = true;
+        emit IntentRevoked(intentHash, msg.sender);
+    }
+
     /// @dev Stateless validation of a signed intent; returns its EIP-712 hash.
     function _validateIntent(Intent calldata intent, bytes calldata signature)
         private
@@ -735,6 +757,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         intentHash = hashIntent(intent);
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
+        if (cancelledIntent[intent.user][intentHash]) revert IntentCancelled();
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
     }
 

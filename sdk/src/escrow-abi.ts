@@ -27,6 +27,19 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "CANCEL_INTENT_LENGTH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "DOMAIN_SEPARATOR",
     "inputs": [],
     "outputs": [
@@ -34,6 +47,32 @@ export const ESCROW_ABI = [
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "FILL_CONFIRMED_LENGTH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "FILL_INSTRUCTION_LENGTH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -144,10 +183,47 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "cancelIntent",
+    "inputs": [
+      {
+        "name": "intentHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "cancelOwnershipTransfer",
     "inputs": [],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cancelledIntent",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -220,7 +296,7 @@ export const ESCROW_ABI = [
       {
         "name": "",
         "type": "address",
-        "internalType": "contract ILayerZeroEndpoint"
+        "internalType": "contract ILayerZeroEndpointV2"
       }
     ],
     "stateMutability": "view"
@@ -775,6 +851,25 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "rollingWindowCapPerAsset",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "rollingWindowDuration",
     "inputs": [],
     "outputs": [
@@ -808,6 +903,19 @@ export const ESCROW_ABI = [
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "rollingWindowTriggeredAsset",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -917,6 +1025,29 @@ export const ESCROW_ABI = [
     "type": "function",
     "name": "setRollingWindowCap",
     "inputs": [
+      {
+        "name": "_windowDuration",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_cap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setRollingWindowCapForAsset",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      },
       {
         "name": "_windowDuration",
         "type": "uint256",
@@ -1051,6 +1182,25 @@ export const ESCROW_ABI = [
   },
   {
     "type": "event",
+    "name": "CancelIgnored",
+    "inputs": [
+      {
+        "name": "intentHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "reason",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "ConfirmationGraceSet",
     "inputs": [
       {
@@ -1064,10 +1214,48 @@ export const ESCROW_ABI = [
   },
   {
     "type": "event",
+    "name": "FillConfirmedIgnored",
+    "inputs": [
+      {
+        "name": "intentHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "reason",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "GuardianSet",
     "inputs": [
       {
         "name": "guardian",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "IntentRevoked",
+    "inputs": [
+      {
+        "name": "intentHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "user",
         "type": "address",
         "indexed": true,
         "internalType": "address"
@@ -1365,6 +1553,31 @@ export const ESCROW_ABI = [
   },
   {
     "type": "event",
+    "name": "RollingWindowCapPerAssetSet",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "duration",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "cap",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "RollingWindowCapReset",
     "inputs": [],
     "anonymous": false
@@ -1449,6 +1662,11 @@ export const ESCROW_ABI = [
   },
   {
     "type": "error",
+    "name": "AssetCapNotConfigured",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "AssetNotAllowed",
     "inputs": []
   },
@@ -1494,6 +1712,11 @@ export const ESCROW_ABI = [
   },
   {
     "type": "error",
+    "name": "IntentCancelled",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "IntentExpired",
     "inputs": []
   },
@@ -1505,6 +1728,16 @@ export const ESCROW_ABI = [
   {
     "type": "error",
     "name": "InvalidSignature",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MalformedDestAsset",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MalformedDestination",
     "inputs": []
   },
   {
@@ -1615,6 +1848,11 @@ export const ESCROW_ABI = [
   {
     "type": "error",
     "name": "TransferFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UndeployedSmartAccount",
     "inputs": []
   },
   {

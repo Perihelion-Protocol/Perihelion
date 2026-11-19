@@ -39,6 +39,7 @@ const INTENT_STATUSES: ReadonlySet<string> = new Set([
   "settled",
   "refunded",
   "expired",
+  "cancelled",
 ]);
 
 export interface MempoolServerOptions {

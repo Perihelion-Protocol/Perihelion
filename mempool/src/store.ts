@@ -15,7 +15,7 @@ const DEFAULT_MAX_SIZE = 50_000;
 const DEFAULT_EXPIRY_GRACE_MS = 60_000;
 
 /** Terminal statuses cannot transition to any other status. */
-const TERMINAL_STATUSES: ReadonlySet<IntentStatus> = new Set(["settled", "refunded", "expired"]);
+const TERMINAL_STATUSES: ReadonlySet<IntentStatus> = new Set(["settled", "refunded", "expired", "cancelled"]);
 
 /**
  * Deep-freeze a record before it is stored, so a caller holding a reference
