@@ -328,6 +328,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
+    event EndpointDelegateSet(address indexed delegate);
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -464,6 +465,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (secondsGrace < MIN_CONFIRMATION_GRACE) revert GraceTooShort();
         confirmationGrace = secondsGrace;
         emit ConfirmationGraceSet(secondsGrace);
+    }
+
+    /// @notice Hand the LayerZero endpoint delegate to `_delegate`. Owner-only.
+    /// @dev The endpoint only accepts `setDelegate` from the OApp itself, so the escrow
+    ///      forwards the call. Deployment sets the deployer as delegate; governance moves
+    ///      it to the timelock so endpoint configuration (DVNs, executors) is multisig-gated.
+    /// @param _delegate New LayerZero delegate. Must be non-zero.
+    function setEndpointDelegate(address _delegate) external onlyOwner {
+        if (_delegate == address(0)) revert ZeroAddress();
+        endpoint.setDelegate(_delegate);
+        emit EndpointDelegateSet(_delegate);
     }
 
     /// @notice Set (or clear) the emergency guardian. Owner-only.
