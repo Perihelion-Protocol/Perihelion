@@ -270,8 +270,10 @@ solver must deliver on Stellar — the solver's gross margin before costs.
 ### Max intent amount / Per-intent cap
 
 The maximum amount a single intent can lock on the source chain or settle on Stellar.
-Configurable per-chain and governed by the timelock. Breaching this cap causes the
-lock or fill to be rejected, protecting against catastrophic loss from undiscovered bugs.
+On EVM it is configured per allowlisted asset (`setMaxIntentAmountPerAsset`); there is no
+protocol-wide EVM maximum. An asset with a zero maximum cannot be locked. Breaching the
+cap causes the lock or fill to be rejected, protecting against catastrophic loss from
+undiscovered bugs.
 
 **Status:** Security control (under development; see #145)  
 **Enforced by:** EVM escrow on `lock()`, Soroban settlement on `fill_intent()`  

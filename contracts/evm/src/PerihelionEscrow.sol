@@ -63,7 +63,6 @@ interface IERC1271 {
 ///      | OwnershipTransferred   | previousOwner, newOwner                             | -                             | `admin_transfer_completed`     |
 ///      | OwnershipTransferCancel| previousOwner                                       | -                             | -                              |
 ///      | Skimmed                | token, to                                           | amount                        | -                              |
-///      | MaxIntentAmountSet     | -                                                   | maxAmount                     | `max_intent_amount_set`        |
 ///      | RollingWindowCapSet    | -                                                   | duration, cap                 | `rolling_window_cap_set`       |
 ///      | RollingWindowCapTriggered | windowStart                                      | accumulated                   | `rolling_window_cap_triggered` |
 ///      | RollingWindowCapReset  | -                                                   | -                             | `rolling_window_cap_reset`     |
@@ -211,15 +210,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice Mapping of allowed source assets. Only assets in this allowlist can be locked.
     mapping(address => bool) public assetAllowed;
-    /// @notice Mapping of per-asset maximum lock amounts. Every allowlisted asset
-    ///         must have an explicit non-zero entry before it can be locked.
+    /// @notice Per-intent maximum lock amount for each asset (the only per-intent cap on EVM).
+    ///         Every allowlisted asset must have an explicit non-zero entry before it can be locked.
     mapping(address => uint256) public maxIntentAmountPerAsset;
 
     // --- Value caps (issue #145) -----------------------------------------------
 
-    /// @notice Maximum amount a single intent can lock. Zero means unlimited.
-    ///         Enforced at lock time. Timelock-governed.
-    uint256 public maxIntentAmount;
     /// @notice Time window (in seconds) for rolling throughput cap. Zero means disabled.
     uint256 public rollingWindowDuration;
     /// @notice Deprecated protocol-wide value retained for ABI compatibility.
@@ -331,7 +327,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event OwnershipTransferCancelled(address indexed previousOwner);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
     event NativeSkimmed(address indexed to, uint256 amount);
-    event MaxIntentAmountSet(uint256 maxAmount);
     event RollingWindowCapSet(uint256 duration, uint256 cap);
     event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
     event RollingWindowCapReset();
@@ -526,23 +521,18 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         emit AssetAllowed(asset, allowed);
     }
 
-    /// @notice Set per-asset maximum lock amount. Owner-only. Overrides global cap.
+    /// @notice Set the per-intent maximum lock amount for one allowlisted asset. Owner-only.
+    ///         This is the only per-intent cap on EVM; there is no protocol-wide fallback.
+    ///         A zero value leaves the asset unconfigured, so every {lock} of it reverts
+    ///         with {AssetCapNotConfigured}.
     /// @param asset Address of the ERC-20 token.
-    /// @param maxAmount Maximum lock amount for this asset, or 0 to use global cap.
+    /// @param maxAmount Maximum lock amount for this asset, in the token's native units.
     function setMaxIntentAmountPerAsset(address asset, uint256 maxAmount) external onlyOwner {
         maxIntentAmountPerAsset[asset] = maxAmount;
         emit MaxIntentAmountPerAssetSet(asset, maxAmount);
     }
 
     // --- Value caps (issue #145) -----------------------------------------------
-
-    /// @notice Set the maximum amount a single intent can lock. Owner-only.
-    ///         Zero means unlimited. Starts conservative; raised as confidence grows.
-    /// @param maxAmount Maximum lock amount (in token's native units), or 0 for unlimited.
-    function setMaxIntentAmount(uint256 maxAmount) external onlyOwner {
-        maxIntentAmount = maxAmount;
-        emit MaxIntentAmountSet(maxAmount);
-    }
 
     /// @notice Set the rolling-window aggregate throughput cap. Owner-only.
     ///         When exceeded, new locks are paused until the admin manually resets.

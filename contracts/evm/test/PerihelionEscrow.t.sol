@@ -617,6 +617,21 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
     }
 
+    /// @notice Per-asset cap of zero means "not configured": there is no global
+    ///         fallback, so the lock must revert rather than use some other maximum.
+    function test_LockRevertsWhenPerAssetCapIsZero() public {
+        escrow.setMaxIntentAmountPerAsset(address(token), 0);
+        assertEq(escrow.maxIntentAmountPerAsset(address(token)), 0);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.AssetCapNotConfigured.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
     function test_SetAssetAllowed() public {
         MockERC20 newToken = new MockERC20();
         newToken.mint(user, 1_000_000);
