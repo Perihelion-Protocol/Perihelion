@@ -271,11 +271,16 @@ async function withAnvilEscrow(fn: (env: AnvilEscrow) => Promise<void>): Promise
       }
     }
 
+    // Any non-zero endpoint: the paths under test never touch LayerZero. The
+    // constructor calls setDelegate on it, so it needs code that accepts the call
+    // (0x00 = STOP: succeeds with no return data).
+    const endpoint = "0x000000000000000000000000000000000000dEaD" as Address;
+    await rpc("anvil_setCode", [endpoint, "0x00"]);
+
     const deployHash = await walletClient.deployContract({
       abi: ESCROW_ABI,
       bytecode,
-      // Any non-zero endpoint: the paths under test never touch LayerZero.
-      args: ["0x000000000000000000000000000000000000dEaD", 30148],
+      args: [endpoint, 30148],
     });
     const { contractAddress: escrow } = await publicClient.waitForTransactionReceipt({ hash: deployHash });
     assert.ok(escrow);
