@@ -4,10 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "fmt": "prettier --write \"*.ts\" \"integration/**/*.ts\"",
+    "fmt:check": "prettier --check \"*.ts\" \"integration/**/*.ts\"",
     "test": "node --test --import tsx --experimental-test-coverage *.test.ts",
     "test:happy": "node --test --import tsx happy-path.test.ts",
     "test:refund": "node --test --import tsx refund-path.test.ts",
-    "test:watch": "node --test --watch --import tsx *.test.ts"
+    "test:watch": "node --test --watch --import tsx *.test.ts",
+    "test:integration": "node --test --import tsx integration/*.test.ts"
   },
   "dependencies": {
     "@perihelion/sdk": "*",

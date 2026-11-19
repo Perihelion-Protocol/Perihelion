@@ -19,7 +19,6 @@ implementation lives in [`relayer/`](../relayer/).
 > permissionless executor (see [§1.2](#12-development-mode-vs-production)).
 > The CLI refuses to start in this mode against Pubnet unless
 > `PERIHELION_RELAYER_MODE=dev` is set explicitly (see [§4.1](#41-all-environment-variables)).
-=======
 
 ---
 

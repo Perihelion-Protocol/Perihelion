@@ -3,8 +3,8 @@
 /** Load executor configuration from environment variables. */
 
 import type { ExecutorConfig } from "./executor.js";
-import { getAddress, isAddress, privateKeyToAccount, type Hex } from "viem";
-import { inclusionFeePolicyFromEnv, type InclusionFeePolicy } from "@perihelion/sdk";
+import { getAddress, isAddress, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
 const EXECUTOR_ENV_KEYS = [
   "PERIHELION_EVM_RPC_URL",

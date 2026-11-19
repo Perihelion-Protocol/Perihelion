@@ -44,7 +44,7 @@ pre-commit:
     # ── TypeScript ──────────────────────────────────────────────
     ts-typecheck:
       run: |
-        for dir in sdk relayer solver mempool; do
+        for dir in sdk relayer solver mempool test; do
           STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- "$dir/src/**/*.ts")
           [ -z "$STAGED" ] && continue
           (cd "$dir" && npx tsc --noEmit) || exit 1

@@ -35,19 +35,23 @@ versioned independently.
 
 ### Fixed
 
-- **evm**: `PerihelionEscrow.sol` did not parse on `main` (the #857 stack-depth
-  refactor left `_pullFunds` unclosed and `_dispatchFillInstruction` without a
-  header), so no EVM build, test or fuzz job could run. It compiles again, the
-  Foundry suite passes, and the gas snapshot and pinned bytecode are regenerated.
-  (#1034)
-- **evm**: the differential fuzz harness is deployed against a no-op endpoint
-  stub, since the escrow constructor calls `setDelegate` on it. (#996)
-- **relayer, solver**: Soroban `lz_receive` and `fill_intent` no longer use a
-  fixed `10000`-stroop inclusion fee. Each submission bids a `getFeeStats`
-  percentile within an operator cap, and a `TRY_AGAIN_LATER` or an expired
-  attempt is resubmitted at a higher bid with the same sequence number. The
-  solver's stellar fee metric now records the fee the ledger charged rather than
-  zero. (#981)
+- **relayer**: `loadConfig` now rejects fractional or out-of-range endpoint ids
+  (`PERIHELION_SOURCE_EID`, `PERIHELION_STELLAR_EID` must be integers in
+  1..4294967295), fractional `PERIHELION_START_BLOCK` and
+  `PERIHELION_POLL_INTERVAL_MS`, and a `SIGNER_SECRET` whose strkey checksum is
+  wrong. Each fails at startup naming the variable (#978).
+
+- **build**: the `test/` workspace has `build`, `lint`, `typecheck`, `clean` and
+  `fmt` scripts, so root aggregate commands and the lefthook type-check loop
+  include it (#977).
+
+- **relayer, solver**: removed stray `=======` lines left by a bad merge that
+  stopped `config.ts`, `relayer.ts` and `solver/cli.ts` from parsing.
+
+- **ci**: added `.github/workflows/release.yml`, which runs on `vX.Y.Z` tags to
+  verify versions and the changelog, pack the packages and publish a GitHub
+  release with `SHA256SUMS`. See `RELEASING.md` (#979).
+
 - **sdk**: `ESCROW_ABI` had drifted from `PerihelionEscrow.sol` — it declared a
   non-existent `getLock` function and a `PausedError` error.
   `PerihelionEscrowClient.getLock` now reads the contract's `locks(bytes32)`

@@ -7,7 +7,6 @@ scopeable issues that contributors at every level can meaningfully tackle.
 This file is the quick-start. The full contributor playbook — issue taxonomy by
 skill and Wave cycle, PR review process, and the path from first-time
 contributor to maintainer — lives in
-[`docs/CONTRIBUTING.md`](./docs/CONTRIBUTING.md) and
 [the architecture spec, §9](./docs/TECHNICAL-ARCHITECTURE.md#9-contribution-guide-for-drips-wave).
 
 ## Code of Conduct
@@ -158,6 +157,14 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
 
 - Keep PRs focused — one logical change per PR is easier to review and merge.
 - PR titles must also follow conventional commits (also enforced by CI).
+- Triage conclusions (for example "already fixed on `main`, no change needed")
+  belong in the issue or PR comment thread, not in files committed to the
+  repository. Do not add per-contributor notes or scratch triage files to the
+  tree.
+- Name test files after the module or behaviour they cover (`quote.test.ts`,
+  `cursor-validation.test.ts`), not after the issue that prompted them. Keep
+  issue numbers in test names or `describe` titles for traceability, for
+  example `describe("evaluate: malformed preferredSolver handling (#731)")`.
 - Ensure CI is green: `npm test`, `cargo test`, `forge test`, and lints.
 - **Invariants first.** Reviewers check every contract PR against the protocol's
   [design invariants](./docs/TECHNICAL-ARCHITECTURE.md#0-design-invariants-read-first);
@@ -188,7 +195,10 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
      `x.y.z`, then run `npm install` and `cargo update -p perihelion-settlement
      --precise x.y.z` so the lockfiles stay consistent.
   3. Open a PR with just the version bump and changelog rename; once merged,
-     tag the resulting commit `vx.y.z` and push the tag.
+     tag the resulting commit `vx.y.z` and push the tag. Pushing the tag runs
+     `.github/workflows/release.yml`, which builds and attaches the packages.
+     The full steps, and the artefacts that are still manual, are in
+     [RELEASING.md](./RELEASING.md).
   - This monorepo does not yet use per-package independent versioning or
     changeset/release-please automation — all packages move together until
     a package reaches 1.0 and needs its own release cadence.
@@ -317,10 +327,12 @@ Additional required settings:
 ## Security review policy
 
 Changes to the following paths carry heightened risk and require at least one
-approval from **`@Perihelion-Protocol/security-reviewers`** in addition to the
-normal package-owner review. This is enforced via CODEOWNERS and branch
-protection (`Require review from Code Owners` must be enabled in Settings →
-Branches → Protection rules for `main`).
+approval from **`@Perihelion-Protocol/maintainers`**, the code owners of every
+path in the repository (see [`.github/CODEOWNERS`](./.github/CODEOWNERS)). This is
+enforced via CODEOWNERS and branch protection (`Require review from Code Owners`
+must be enabled in Settings → Branches → Protection rules for `main`). A separate
+security-reviewers group is not currently assigned; if one is created, add it to
+the paths listed below in CODEOWNERS and update this section.
 
 | Path | Why it is sensitive |
 | ---- | ------------------- |

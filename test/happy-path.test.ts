@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 /**
- * End-to-end happy path test: user signs → solver locks on EVM → FillInstruction
+ * Protocol MODEL test (TypeScript re-implementation, not the deployed contracts): user signs → solver locks on EVM → FillInstruction
  * relayed → solver fills on Soroban → FillConfirmed relayed back → escrow
  * releases to solver.
  *
@@ -23,8 +23,8 @@ import {
 } from "./mocks.js";
 
 // Test configuration
-const EVM_EID = 30101; // Base testnet
-const STELLAR_EID = 30316; // Stellar testnet
+const EVM_EID = 30101; // LayerZero eid for Ethereum mainnet (label only; not Base testnet)
+const STELLAR_EID = 30316; // Stellar label used by the model (not a verified LayerZero id)
 const ESCROW_ADDRESS = "0x1111111111111111111111111111111111111111";
 const SETTLEMENT_ADDRESS = "0xSTELLAR";
 
@@ -34,11 +34,14 @@ const SOLVER_STELLAR = "GAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCF6M
 
 const RECIPIENT_STELLAR = "GARCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCFRVX";
 
-test("happy path: full lifecycle with settlement", async () => {
+test("model/happy path: full lifecycle with settlement", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6); // USDC-like, 6 decimals
-  const destAsset = new MockStellarAsset("USDC", "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -149,11 +152,14 @@ test("happy path: full lifecycle with settlement", async () => {
   console.log("   • Value conserved across both chains");
 });
 
-test("happy path: solver payout address independent of locker", async () => {
+test("model/happy path: solver payout address independent of locker", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -204,11 +210,14 @@ test("happy path: solver payout address independent of locker", async () => {
   console.log(`   • Payout: ${PAYOUT_ADDRESS} (balance: 1,000,000)`);
 });
 
-test("happy path: two concurrent intents resolve independently", async () => {
+test("model/happy path: two concurrent intents resolve independently", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+  const destAsset = new MockStellarAsset(
+    "USDC",
+    "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+  );
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -259,7 +268,13 @@ test("happy path: two concurrent intents resolve independently", async () => {
 
   // --- Settle intent1 -------------------------------------------------------
   const solverEvmBytes = SOLVER_ADDRESS.padEnd(66, "0") as Hex;
-  settlement.fillIntent(hash1, SOLVER_STELLAR, solverEvmBytes, 10_000_000n, Math.floor(Date.now() / 1000));
+  settlement.fillIntent(
+    hash1,
+    SOLVER_STELLAR,
+    solverEvmBytes,
+    10_000_000n,
+    Math.floor(Date.now() / 1000),
+  );
   escrow.lzReceive(hash1, SOLVER_ADDRESS, 1_000_000n);
 
   // --- Cancel intent2 -------------------------------------------------------

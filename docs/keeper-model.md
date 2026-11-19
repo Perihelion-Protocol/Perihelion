@@ -172,7 +172,7 @@ The two keeper paths treat an underfunded reserve differently. Operators must mo
 ## Architecture Links
 
 - **Threat model**: `docs/threat-model.md` (section on liveness assumptions)
-- **Protocol spec**: `docs/protocol-spec.md` (state machine & edge cases)
+- **Intent lifecycle**: `docs/TECHNICAL-ARCHITECTURE.md` §2 (state machine & edge cases)
 - **Technical architecture**: `docs/TECHNICAL-ARCHITECTURE.md` (idempotency & reentrancy invariants)
 - **EVM contract**: `contracts/evm/src/PerihelionEscrow.sol` (NatSpec on `cancelExpired`)
 - **Soroban contract**: `contracts/soroban/settlement/src/lib.rs` (NatSpec on `cancel_expired_intent`, `set_keeper_reward`)

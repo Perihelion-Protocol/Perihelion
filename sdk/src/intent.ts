@@ -601,7 +601,9 @@ export async function verifyIntent(
  *                    intent is considered expired once `now >= deadline - |skew|`.
  *                    Use this for **submission guards** to avoid sending something that
  *                    will land just after its deadline.
- *                  - Default: `0` (no adjustment). Recommended: `+30` for solver fills.
+ *                  - Default: `0` (no adjustment). Recommended: `+660` for solver fills
+ *                    (relay p99 of 600 s + worst-case clock skew of 60 s; see
+ *                    `docs/clock-and-deadline-analysis.md` §5.1).
  */
 export function isExpired(
   intent: Intent,

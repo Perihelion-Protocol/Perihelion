@@ -1344,7 +1344,9 @@ fails to deliver a `CancelIntent`. Its critical correctness condition: it must
 **not** refund the user if the funds were (or are about to be) released to a
 solver. Because `_lzReceive(FillConfirmed)` and `cancelExpired` can be mined in
 either order, the guard is a strict check on the same terminal flags both paths
-mutate, under checks-effects-interactions.
+mutate, under checks-effects-interactions. The timing derivation behind the
+`confirmationGrace` minimum is in
+[`clock-and-deadline-analysis.md`](./clock-and-deadline-analysis.md).
 
 ```solidity
 error NotLocked();

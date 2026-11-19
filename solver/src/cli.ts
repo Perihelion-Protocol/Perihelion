@@ -71,7 +71,6 @@ async function main(): Promise<void> {
   }
 
   const solver = new Solver(config, executor, log, metrics);
-======
 
   // Minimal HTTP server for Prometheus scraping.
   //

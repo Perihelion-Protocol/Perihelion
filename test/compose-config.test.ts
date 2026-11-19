@@ -95,13 +95,7 @@ test("escrow address is required, not defaulted to an Anvil account", () => {
 });
 
 test("settlement contract ids are required, not hard-coded to an undeployed contract", () => {
-  assert.match(
-    String(service("relayer").environment?.PERIHELION_SETTLEMENT_CONTRACT),
-    REQUIRED,
-  );
-  assert.match(
-    String(service("solver").environment?.PERIHELION_SETTLEMENT_CONTRACT_ID),
-    REQUIRED,
-  );
+  assert.match(String(service("relayer").environment?.PERIHELION_SETTLEMENT_CONTRACT), REQUIRED);
+  assert.match(String(service("solver").environment?.PERIHELION_SETTLEMENT_CONTRACT_ID), REQUIRED);
   assert.doesNotMatch(RAW, /CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS/);
 });

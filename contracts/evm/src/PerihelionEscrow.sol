@@ -733,8 +733,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
                 (bool refunded,) = msg.sender.call{ value: msg.value }("");
                 if (!refunded) revert NativeTransferFailed();
             }
-            // Sentinel: 0 means the cap tripped and no funds were pulled. A real
-            // pull always yields a non-zero amount (see NothingReceived below).
             return 0;
         }
 

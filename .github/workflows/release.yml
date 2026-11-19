@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: MIT
+#
+# Tag-triggered release. Pushing a `vX.Y.Z` tag verifies that every workspace
+# version and the CHANGELOG match the tag, builds the TypeScript packages, packs
+# them, and publishes a GitHub release with the tarballs and SHA256SUMS.
+#
+# Not done here (see RELEASING.md): Soroban/EVM contract artefacts and npm
+# publication. Both need maintainer credentials or a working contract build.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Verify tag matches workspace versions and CHANGELOG
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          for pkg in package.json sdk/package.json relayer/package.json solver/package.json mempool/package.json test/package.json; do
+            version="$(node -p "require('./${pkg}').version")"
+            if [ "$version" != "$tag" ]; then
+              echo "::error file=${pkg}::version ${version} does not match tag ${GITHUB_REF_NAME}"
+              exit 1
+            fi
+          done
+          if ! grep -q "^## \[${tag}\] - " CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::no '## [${tag}] - YYYY-MM-DD' section"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build all packages
+        run: make build-ts
+
+      - name: Pack publishable packages
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          for ws in sdk relayer solver mempool; do
+            npm pack --workspace="$ws" --pack-destination release-artifacts
+          done
+          cd release-artifacts
+          sha256sum ./*.tgz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            release-artifacts/*.tgz release-artifacts/SHA256SUMS
