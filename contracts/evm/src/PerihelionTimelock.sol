@@ -60,7 +60,14 @@ contract PerihelionTimelock {
 
     // --- Events --------------------------------------------------------------
 
-    event Proposed(bytes32 indexed id, address indexed proposer, address target, uint256 value);
+    event Proposed(
+        bytes32 indexed id,
+        address indexed proposer,
+        address target,
+        uint256 value,
+        bytes data,
+        bytes32 salt
+    );
     event Confirmed(bytes32 indexed id, address indexed owner, uint256 confirmations);
     event ConfirmationRevoked(bytes32 indexed id, address indexed owner, uint256 confirmations);
     event Ready(bytes32 indexed id, uint256 readyAt);
@@ -89,6 +96,7 @@ contract PerihelionTimelock {
     error Reentrancy();
     error Expired();
     error AlreadyCancelConfirmed();
+    error InvalidMsgValue();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -186,6 +194,14 @@ contract PerihelionTimelock {
     ///      propose → confirm → delay cycle has elapsed. `value` is meant for
     ///      targets that are actually payable; verify the target accepts ETH
     ///      before proposing a non-zero value.
+    ///
+    ///      The full `data` and `salt` are emitted in `Proposed` so owners can
+    ///      verify from chain data alone that the calldata they are confirming
+    ///      hashes to `id` (issue #1059).
+    ///
+    ///      Value-bearing operations must be funded either by the executor
+    ///      sending exactly `value` with `execute`, or by pre-funding the
+    ///      timelock via `receive()` (issue #1060).
     /// @param target Call target address.
     /// @param value ETH value to forward.
     /// @param data Calldata to execute.
@@ -200,7 +216,7 @@ contract PerihelionTimelock {
         Operation storage op = operations[id];
         if (op.exists) revert AlreadyExists();
         op.exists = true;
-        emit Proposed(id, msg.sender, target, value);
+        emit Proposed(id, msg.sender, target, value, data, salt);
         _confirm(id);
     }
 
@@ -254,6 +270,13 @@ contract PerihelionTimelock {
     }
 
     /// @notice Execute a confirmed operation once its delay has elapsed.
+    /// @dev Funding model for value-bearing operations (issue #1060): the
+    ///      forwarded `value` comes from the timelock's balance. The executor
+    ///      must either send exactly `value` as `msg.value` (which is then
+    ///      forwarded) or send `msg.value == 0` and rely on the timelock being
+    ///      pre-funded via `receive()`. Any other `msg.value` reverts with
+    ///      `InvalidMsgValue`, so ETH cannot be stranded in the timelock by
+    ///      accident.
     /// @param target Call target.
     /// @param value ETH value.
     /// @param data Calldata.
@@ -264,6 +287,7 @@ contract PerihelionTimelock {
         onlyOwner
         nonReentrant
     {
+        if (msg.value != 0 && msg.value != value) revert InvalidMsgValue();
         bytes32 id = hashOperation(target, value, data, salt);
         Operation storage op = operations[id];
         if (!op.exists) revert UnknownOperation();

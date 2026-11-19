@@ -89,23 +89,59 @@ confirm → delay → execute).
      $TARGET $VALUE $CALLDATA $SALT --private-key $OWNER_KEY
    ```
 
-2. **Confirm** (threshold−1 other owners):
-   Each owner signs a confirmation transaction:
+2. **Verify** (every confirming owner, before signing anything):
+   The `Proposed` event carries the full operation payload, so owners must not
+   rely on calldata received off-chain. Recover `target`, `value`, `data` and
+   `salt` from the event logs and recompute the operation id:
    ```bash
+   # Read the proposal straight from the Proposed event
+   #   event Proposed(bytes32 indexed id, address indexed proposer,
+   #                  address target, uint256 value, bytes data, bytes32 salt)
+   TARGET=$(cast logs --address $TIMELOCK \
+     "Proposed(bytes32,address,address,uint256,bytes,bytes32)" \
+     --from-block <proposal_block> --json | jq -r '.[0].topics[0]' >/dev/null; ...)
+   # Simpler: decode the event with `cast receipt` / `cast logs --json` and
+   # extract target, value, data and salt from the non-indexed fields.
    OPERATION_ID=$(cast call $TIMELOCK "hashOperation(address,uint256,bytes,bytes32)" \
      $TARGET $VALUE $CALLDATA $SALT)
+   ```
+   Confirm that the recomputed `OPERATION_ID` equals the indexed `id` from the
+   event. If they differ, the off-chain calldata does not match what was
+   proposed on-chain — do **not** confirm, and escalate to the other owners.
+
+3. **Confirm** (threshold−1 other owners):
+   Each owner signs a confirmation transaction for the verified operation id:
+   ```bash
    cast send $TIMELOCK "confirm(bytes32)" $OPERATION_ID --private-key $OWNER_KEY
    ```
    Once threshold confirmations are reached, the delay timer starts.
 
-3. **Wait** (automated):
+4. **Wait** (automated):
    The operation is public and actionable by anyone after `DELAY` seconds.
 
-4. **Execute** (any owner or automated keepers):
+5. **Execute** (any owner or automated keepers):
    ```bash
    cast send $TIMELOCK "execute(address,uint256,bytes,bytes32)" \
      $TARGET $VALUE $CALLDATA $SALT --private-key $OWNER_KEY
    ```
+
+**Funding value-bearing operations:**
+
+`execute` is `payable`, but the timelock reconciles `msg.value` with the
+operation's `value`; a mismatch reverts. There are exactly two supported ways
+to fund an operation that forwards ETH:
+
+- **Executor pays:** the executing owner sends exactly `value` as `msg.value`
+  (e.g. `cast send ... --value $VALUE`). The ETH is forwarded to `target` in
+  the same transaction.
+- **Pre-funded:** send ETH to the timelock with a plain transfer (it is
+  accepted by `receive()`), then execute with `msg.value == 0`. The timelock
+  forwards `value` from its own balance.
+
+Do not send `msg.value` that differs from the operation's `value`; the
+transaction will revert. Perihelion governance calls (`setPeer`,
+`setGuardian`, `setConfirmationGrace`, `setPaused`, owner rotation) are all
+zero-value and should be executed with `msg.value == 0`.
 
 **Key best practices:**
 - Propose and confirm from separate signing sessions (network isolation)
@@ -117,7 +153,10 @@ confirm → delay → execute).
 
 **On-chain:**
 - Monitor `timelock.Proposed` events: any unknown proposals may indicate a
-  leaked owner key
+  leaked owner key. The event includes `target`, `value`, `data` and `salt`,
+  so decode the selector against the escrow ABI to see exactly what a pending
+  operation does, and recompute `hashOperation(target, value, data, salt)` to
+  verify it matches the indexed `id`
 - Check `timelock.Confirmed` to watch the confirmation window
 - Alert on `timelock.Executed`: verify it matches the expected operation
 
