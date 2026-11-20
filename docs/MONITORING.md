@@ -175,6 +175,7 @@ These indicate anomalies that require investigation but may have benign explanat
   - Check if destination chain message delivery is stuck
   - If rate remains elevated, escalate (possible attack or griefing)
 
+<<<<<<< HEAD
 #### Alert H5: Timelock `Proposed` Payload Verification (issue #1059)
 - **Condition:** Any `Proposed(id, proposer, target, value, data, salt)` event
   from the timelock (`contracts/evm/src/PerihelionTimelock.sol`) where:
@@ -206,6 +207,58 @@ These indicate anomalies that require investigation but may have benign explanat
 
 #### Alert H6: Timelock Revoke/Re-confirm Griefing (issue #283)
 =======
+=======
+#### Alert H6: `Filled` Without `ConfirmationSent` (Split `deliver_intent` → `dispatch_confirmation` Stall, issue #1078)
+- **Condition:** An intent emits `Filled` on Soroban but no matching `ConfirmationSent`
+  event is observed within `MIN_DISPATCH_WINDOW` ledgers of the fill. This is the
+  split-path stall: `deliver_intent` transfers the solver's funds to the user and
+  writes `Settled`, but sends nothing cross-chain. If `dispatch_confirmation` is not
+  executed before `deadline + MIN_DISPATCH_WINDOW`, it reverts with `IntentExpired`
+  forever, the EVM escrow refunds the user via `cancelExpired`, and the solver
+  absorbs the loss (user paid twice).
+- **Why it matters:** `deliver_intent` is a public, permissionless entrypoint. A
+  single missed `dispatch_confirmation` (solver out of XLM, RPC down, contract
+  paused at the wrong moment) can cost the solver its full fill amount. The keeper
+  reward only becomes payable after `DISPATCH_REWARD_GRACE_LEDGERS`, so it does not
+  fully mitigate the risk.
+- **Signal:** `Filled(hash, ...)` with no subsequent `ConfirmationSent(hash, ...)`
+  for the same intent hash. Query the contract's `list_undispatched_intents`
+  view, which returns `Settled` intents still awaiting dispatch. Respect the
+  view's `MAX_LIST_BATCH` limit — page through results rather than requesting more
+  than the batch size in a single call.
+- **Trigger:** Any intent present in `list_undispatched_intents` whose fill ledger
+  is within `MIN_DISPATCH_WINDOW / 2` ledgers of the dispatch deadline
+  (`deadline + MIN_DISPATCH_WINDOW`). Escalate to CRITICAL once fewer than
+  `MIN_DISPATCH_WINDOW / 4` ledgers remain, since the window is about to close
+  permanently.
+- **Action:**
+  - Immediately call the permissionless `dispatch_confirmation(hash)` for each
+    undispatched intent — any operator account may do this; it is not restricted
+    to the original solver.
+  - If the call reverts with `IntentExpired`, the window has already closed; the
+    EVM escrow will refund the user via `cancelExpired` and the solver has lost
+    principal. Escalate to incident response and notify the affected solver.
+  - If the contract is paused, coordinate with guardians to resume so dispatch can
+    proceed before the deadline.
+  - Root-cause the missed dispatch (solver XLM balance, RPC availability, pause
+    timing) and feed back into solver runbook guidance.
+- **Monitoring query:**
+  ```sql
+  -- Intents filled on Soroban but never dispatched cross-chain
+  -- (populate from list_undispatched_intents, paged by MAX_LIST_BATCH)
+  SELECT
+    hash,
+    fill_ledger,
+    deadline,
+    (deadline + :min_dispatch_window) AS dispatch_deadline_ledger,
+    ((deadline + :min_dispatch_window) - :current_ledger) AS ledgers_remaining
+  FROM undispatched_intents
+  WHERE ledgers_remaining <= (:min_dispatch_window / 2)
+  ORDER BY ledgers_remaining ASC;
+  ```
+
+#### Alert H5: Timelock Revoke/Re-confirm Griefing (issue #283)
+>>>>>>> pr1173
 - **Condition:** The same operation id emits `ConfirmationRevoked` followed by
   `Confirmed` (or `Ready`) more than **2 times within any 24-hour window**,
   or a `Ready` event is emitted for an id that already emitted `Ready` previously.
