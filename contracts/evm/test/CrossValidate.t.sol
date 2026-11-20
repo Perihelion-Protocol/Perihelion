@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import { NoopEndpointStub } from "./NoopEndpointStub.sol";
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 import { MockEndpoint } from "./PerihelionEscrow.t.sol";

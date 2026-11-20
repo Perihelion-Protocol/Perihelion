@@ -39,6 +39,13 @@
       "contract": "PerihelionEscrow",
       "description": "token.call() in _safeTransfer and _safeTransferFrom",
       "rationale": "Pattern required for tokens that do not return bool (e.g. USDT). Both helpers check return value via the decoded bool and revert on failure."
+    },
+    {
+      "detector": "encode-packed-collision",
+      "contract": "PerihelionEscrow",
+      "function": "_encodeFillInstruction",
+      "description": "abi.encodePacked called with multiple dynamic arguments (recipientField, destAssetField)",
+      "rationale": "Both dynamic arguments are fixed-width buffers built by _padRight (exactly 56 and 69 bytes), so the packed encoding has no length ambiguity. The layout is pinned by the fill_instruction golden vectors in contracts/shared/wire-vectors."
     }
   ]
 }

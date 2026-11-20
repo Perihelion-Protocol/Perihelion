@@ -15,17 +15,17 @@ import {
 
 /// @dev Minimal mock ERC-20 for gas snapshot tests.
 contract GasSnapshotERC20 is IERC20 {
-    // Optional EIP-20 metadata (IERC20 declares these; mocks don't track supply).
+    // Optional EIP-20 metadata (IERC20 declares these; mocks do not use them).
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
     function name() external pure returns (string memory) {
         return "Mock";
     }
 
     function symbol() external pure returns (string memory) {
-        return "MOCK";
-    }
-
-    function decimals() external pure returns (uint8) {
-        return 18;
+        return "MCK";
     }
 
     function totalSupply() external pure returns (uint256) {

@@ -312,6 +312,7 @@ contract MockEndpoint is ILayerZeroEndpointV2 {
     uint32 public lastDstEid;
     bytes32 public lastReceiver;
     bytes public lastMessage;
+    bytes public lastOptions;
     uint256 public lastNativeFee;
     address public lastRefundAddress;
     uint256 public sendCount;
@@ -333,6 +334,7 @@ contract MockEndpoint is ILayerZeroEndpointV2 {
         lastDstEid = params.dstEid;
         lastReceiver = params.receiver;
         lastMessage = params.message;
+        lastOptions = params.options;
         lastNativeFee = msg.value;
         lastRefundAddress = refundAddress;
         sendCount++;
@@ -409,6 +411,7 @@ contract PerihelionEscrowTest is Test {
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferCancelled(address indexed previousOwner);
+    event EnforcedOptionsSet(bytes options);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
 
     function setUp() public {
@@ -571,6 +574,8 @@ contract PerihelionEscrowTest is Test {
         feeToken.mint(user, 1_000_000);
         vm.prank(user);
         feeToken.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(feeToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(feeToken), type(uint256).max);
 
         escrow.setAssetAllowed(address(feeToken), true);
         escrow.setMaxIntentAmountPerAsset(address(feeToken), type(uint256).max);
@@ -1335,12 +1340,32 @@ contract PerihelionEscrowTest is Test {
     function test_OldOwnerKeepsControlUntilAccepted() public {
         escrow.transferOwnership(solver);
         // Old owner can still act, and can even cancel the handover.
-        escrow.transferOwnership(address(0));
+        escrow.cancelOwnershipTransfer();
         assertEq(escrow.pendingOwner(), address(0));
 
         vm.prank(solver);
         vm.expectRevert(PerihelionEscrow.NotPendingOwner.selector);
         escrow.acceptOwnership();
+    }
+
+    function test_RevertWhen_TransferOwnershipToZero() public {
+        vm.expectRevert(PerihelionEscrow.ZeroAddress.selector);
+        escrow.transferOwnership(address(0));
+    }
+
+    /// @dev A zero-address proposal must not clear a live handover; only
+    ///      cancelOwnershipTransfer does that.
+    function test_RevertWhen_ZeroTransferKeepsPendingOwner() public {
+        escrow.transferOwnership(solver);
+        vm.expectRevert(PerihelionEscrow.ZeroAddress.selector);
+        escrow.transferOwnership(address(0));
+        assertEq(escrow.pendingOwner(), solver);
+    }
+
+    function test_RevertWhen_TransferOwnershipToCurrentOwner() public {
+        vm.expectRevert(PerihelionEscrow.TransferToCurrentOwner.selector);
+        escrow.transferOwnership(owner);
+        assertEq(escrow.pendingOwner(), address(0));
     }
 
     function test_RevertWhen_TransferOwnershipNotOwner() public {
@@ -1374,6 +1399,8 @@ contract PerihelionEscrowTest is Test {
         noReturnToken.mint(user, 1_000_000);
         vm.prank(user);
         noReturnToken.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(noReturnToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(noReturnToken), type(uint256).max);
 
         escrow.setAssetAllowed(address(noReturnToken), true);
         escrow.setMaxIntentAmountPerAsset(address(noReturnToken), type(uint256).max);
@@ -1396,6 +1423,8 @@ contract PerihelionEscrowTest is Test {
         falseToken.mint(user, 1_000_000);
         vm.prank(user);
         falseToken.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(falseToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(falseToken), type(uint256).max);
 
         escrow.setAssetAllowed(address(falseToken), true);
         escrow.setMaxIntentAmountPerAsset(address(falseToken), type(uint256).max);
@@ -1414,6 +1443,8 @@ contract PerihelionEscrowTest is Test {
         heavyFeeToken.mint(user, 1_000_000);
         vm.prank(user);
         heavyFeeToken.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(heavyFeeToken), true);
+        escrow.setMaxIntentAmountPerAsset(address(heavyFeeToken), type(uint256).max);
 
         escrow.setAssetAllowed(address(heavyFeeToken), true);
         escrow.setMaxIntentAmountPerAsset(address(heavyFeeToken), type(uint256).max);
@@ -1976,6 +2007,138 @@ contract PerihelionEscrowTest is Test {
         // decayGuardianPause now reverts (no guardian pause active).
         vm.expectRevert(PerihelionEscrow.PauseNotGuardianInitiated.selector);
         escrow.decayGuardianPause();
+    }
+
+    /// @dev Incident: leaked guardian pauses, the pause decays, and the cooldown
+    ///      locks out the guardian slot. Owner rotates to a fresh key, which must
+    ///      be able to pause at once rather than waiting out the old cooldown.
+    function test_GuardianRotation_NewGuardianPausesImmediately() public {
+        address leaked = address(0x6A);
+        address fresh = address(0x6B);
+        escrow.setGuardian(leaked);
+
+        vm.prank(leaked);
+        escrow.pause();
+        vm.warp(block.timestamp + escrow.GUARDIAN_PAUSE_TTL());
+        escrow.decayGuardianPause();
+        assertGt(escrow.guardianPauseCooldownUntil(), block.timestamp);
+
+        // Still inside the leaked key's cooldown: the old key is locked out.
+        vm.prank(leaked);
+        vm.expectRevert(PerihelionEscrow.GuardianCooldown.selector);
+        escrow.pause();
+
+        escrow.setGuardian(fresh);
+        assertEq(escrow.guardianPauseCooldownUntil(), 0);
+
+        vm.prank(fresh);
+        escrow.pause();
+        assertTrue(escrow.paused());
+    }
+
+    /// @dev An active pause started by the outgoing guardian is converted to an
+    ///      owner pause on rotation, so it cannot lapse on that key's TTL.
+    function test_GuardianRotation_ActivePauseBecomesOwnerControlled() public {
+        address leaked = address(0x6A);
+        escrow.setGuardian(leaked);
+
+        vm.prank(leaked);
+        escrow.pause();
+        escrow.setGuardian(address(0x6B));
+        assertEq(escrow.guardianPauseExpiry(), 0);
+
+        vm.warp(block.timestamp + escrow.GUARDIAN_PAUSE_TTL() + 1);
+        vm.expectRevert(PerihelionEscrow.PauseNotGuardianInitiated.selector);
+        escrow.decayGuardianPause();
+        assertTrue(escrow.paused());
+
+        // The owner resumes when the incident is over.
+        escrow.setPaused(false);
+        assertFalse(escrow.paused());
+    }
+
+    function test_RevertWhen_GuardianSetToOwner() public {
+        vm.expectRevert(PerihelionEscrow.GuardianIsOwner.selector);
+        escrow.setGuardian(owner);
+        assertEq(escrow.guardian(), address(0));
+    }
+
+    // --- Executor options (#1046) ----------------------------------------------
+
+    function test_EnforcedOptions_DefaultIsLzReceiveGas() public view {
+        bytes memory expected = abi.encodePacked(
+            bytes2(0x0003), bytes1(0x01), bytes2(0x0011), bytes1(0x01), uint128(300_000)
+        );
+        assertEq(escrow.enforcedOptions(), expected);
+        assertEq(expected.length, 22);
+    }
+
+    function test_SetEnforcedOptions_UsedByLock() public {
+        bytes memory opts = abi.encodePacked(
+            bytes2(0x0003), bytes1(0x01), bytes2(0x0011), bytes1(0x01), uint128(500_000)
+        );
+
+        vm.expectEmit(false, false, false, true);
+        emit EnforcedOptionsSet(opts);
+        escrow.setEnforcedOptions(opts);
+        assertEq(escrow.enforcedOptions(), opts);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+        endpoint.setMockFee(0.01 ether);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        // The FillInstruction is sent with the stored options, not a compile-time constant.
+        assertEq(endpoint.lastOptions(), opts);
+    }
+
+    function test_RevertWhen_SetEnforcedOptionsNotOwner() public {
+        bytes memory opts =
+            abi.encodePacked(bytes2(0x0003), bytes1(0x01), bytes2(0x0011), bytes1(0x01), uint128(1));
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.setEnforcedOptions(opts);
+    }
+
+    /// @dev Each malformed Type-3 option set must be rejected with InvalidOptions.
+    function test_RevertWhen_SetEnforcedOptionsMalformed() public {
+        bytes memory gasOpt =
+            abi.encodePacked(bytes1(0x01), bytes2(0x0011), bytes1(0x01), uint128(1));
+
+        // Wrong option type (Type-1 instead of Type-3).
+        vm.expectRevert(PerihelionEscrow.InvalidOptions.selector);
+        escrow.setEnforcedOptions(abi.encodePacked(bytes2(0x0002), gasOpt));
+
+        // Too short to carry a type.
+        vm.expectRevert(PerihelionEscrow.InvalidOptions.selector);
+        escrow.setEnforcedOptions(hex"00");
+
+        // Empty.
+        vm.expectRevert(PerihelionEscrow.InvalidOptions.selector);
+        escrow.setEnforcedOptions("");
+
+        // Truncated entry: header promises 17 bytes, only 5 follow.
+        vm.expectRevert(PerihelionEscrow.InvalidOptions.selector);
+        escrow.setEnforcedOptions(abi.encodePacked(bytes2(0x0003), hex"0100110100000000"));
+
+        // Zero-length entry: no room for an option type.
+        vm.expectRevert(PerihelionEscrow.InvalidOptions.selector);
+        escrow.setEnforcedOptions(abi.encodePacked(bytes2(0x0003), bytes1(0x01), bytes2(0x0000)));
+
+        // Trailing bytes after a complete entry.
+        vm.expectRevert(PerihelionEscrow.InvalidOptions.selector);
+        escrow.setEnforcedOptions(abi.encodePacked(bytes2(0x0003), gasOpt, bytes1(0x00)));
+
+        // Over the length bound.
+        bytes memory tooLong = new bytes(257);
+        tooLong[0] = 0x00;
+        tooLong[1] = 0x03;
+        vm.expectRevert(PerihelionEscrow.InvalidOptions.selector);
+        escrow.setEnforcedOptions(tooLong);
+
+        // A rejected write leaves the stored options untouched.
+        assertEq(escrow.enforcedOptions().length, 22);
     }
 
     function test_OwnerUnpause_ResetsGuardianCooldown() public {

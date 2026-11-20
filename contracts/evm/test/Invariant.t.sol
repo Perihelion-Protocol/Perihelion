@@ -174,6 +174,8 @@ contract PerihelionEscrowInvariantTest is Test {
 
         escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
+
         targetContract(address(handler));
     }
 

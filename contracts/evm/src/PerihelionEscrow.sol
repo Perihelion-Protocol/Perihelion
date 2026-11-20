@@ -60,6 +60,7 @@ interface IERC1271 {
 ///      | Refunded               | intentHash, user                                    | amount, reason                | `cancelled`                    |
 ///      | RefundedLocalTimeout   | intentHash, user                                    | amount                        | -                              |
 ///      | PeerSet                | -                                                   | peer                          | `peer_set`                     |
+///      | EnforcedOptionsSet     | -                                                   | options                       | -                              |
 ///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  | -                              |
 ///      | GuardianSet            | guardian                                            | -                             | -                              |
 ///      | PausedSet              | -                                                   | paused                        | `paused_set`                   |
@@ -190,6 +191,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         pause again after a TTL-dismissed pause. Together these bound the
     ///         worst-case DoS duty cycle to ≤50 % if the guardian key leaks.
     uint256 public constant GUARDIAN_PAUSE_TTL = 72 hours;
+    /// @dev Upper bound on {enforcedOptions}; keeps quote and send gas bounded.
+    uint256 internal constant MAX_ENFORCED_OPTIONS_LEN = 256;
 
     /// @notice Maximum byte length of `Intent.destination`. A Stellar strkey
     ///         (G.../C...) is exactly 56 characters; longer values are invalid.
@@ -221,6 +224,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     address public guardian;
     /// @notice Trusted Stellar settlement OApp (32-byte LayerZero address).
     bytes32 public stellarPeer;
+    /// @notice Executor options attached to every FillInstruction, in LayerZero
+    ///         Type-3 format. Set by the owner via {setEnforcedOptions}. {quoteFee}
+    ///         and {lock} read this same value, so a solver's quote matches the
+    ///         lock-time check.
+    bytes public enforcedOptions;
     /// @notice Extra delay beyond `deadline` before the local refund fallback opens,
     ///         giving an in-flight FillConfirmed time to land first (race guard).
     uint256 public confirmationGrace = 2 hours;
@@ -354,6 +362,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event RefundedLocalTimeout(bytes32 indexed intentHash, address indexed user, uint256 amount);
     event PeerSet(bytes32 peer);
+    event EnforcedOptionsSet(bytes options);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
     event EndpointDelegateSet(address indexed delegate);
@@ -403,6 +412,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error NotPendingOwner();
     /// @dev `cancelOwnershipTransfer` was called while no handover is pending.
     error NoPendingOwner();
+    /// @dev `transferOwnership` was called with the current owner as the nominee.
+    error TransferToCurrentOwner();
+    /// @dev `setGuardian` was called with the owner address; the roles must stay separate.
+    error GuardianIsOwner();
+    /// @dev `setEnforcedOptions` was given bytes that are not a well-formed Type-3 option set.
+    error InvalidOptions();
     /// @dev An address expected to be a contract (e.g. an allowlisted asset) has no code.
     error NotAContract();
     error NotAuthorized();
@@ -412,7 +427,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error GraceTooShort();
     error FeeTooLow();
     error ZeroAddress();
-    error SourceChainMismatch();
     error StringFieldEmpty();
     /// @dev `destination` is not a valid 56-char G.../C... strkey (#1052).
     error MalformedDestination();
@@ -423,7 +437,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error PauseNotGuardianInitiated();
     error PauseNotExpired();
     error ExceedsMaxIntentAmount();
-    error RollingWindowCapExceeded();
     error RollingWindowCapAlreadyTriggered();
     error RollingWindowNotYetResettable();
     error InvalidDuration();
@@ -470,6 +483,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         endpoint.setDelegate(msg.sender);
         stellarEid = _stellarEid;
         owner = msg.sender;
+        // Type-3 lzReceive option: worker 0x01 (executor), length 0x0011 (type + gas),
+        // option type 0x01, gas 300_000 as uint128, no value field.
+        enforcedOptions = abi.encodePacked(
+            bytes2(0x0003), bytes1(0x01), bytes2(0x0011), bytes1(0x01), uint128(300_000)
+        );
         _reentrancy = 1; // 1/2/1 sentinel: slot stays non-zero, each lock/unlock is a warm SSTORE
         emit OwnershipTransferred(address(0), msg.sender);
         DOMAIN_SEPARATOR = keccak256(
@@ -496,6 +514,16 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         emit PeerSet(peer);
     }
 
+    /// @notice Replace the executor options attached to every FillInstruction.
+    /// @dev Owner-only. Reverts with {InvalidOptions} unless `options` is a
+    ///      well-formed LayerZero Type-3 option set (see {_validateEnforcedOptions}).
+    /// @param options Type-3 options bytes, at most MAX_ENFORCED_OPTIONS_LEN long.
+    function setEnforcedOptions(bytes calldata options) external onlyOwner {
+        _validateEnforcedOptions(options);
+        enforcedOptions = options;
+        emit EnforcedOptionsSet(options);
+    }
+
     /// @notice Tune the local-refund grace period. Bounded by MIN_CONFIRMATION_GRACE
     ///         (so a cancel cannot race an in-flight FillConfirmed) and
     ///         MAX_CONFIRMATION_GRACE (so a misconfiguration cannot strand refunds).
@@ -519,8 +547,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Set (or clear) the emergency guardian. Owner-only.
+    /// @dev Rotation resets the guardian's pause clock so the incoming key is not
+    ///      locked out by a cooldown earned by the outgoing one. An active
+    ///      guardian-initiated pause is converted to an owner pause (no auto-expiry):
+    ///      the owner is the party handling the rotation, and the pause must not
+    ///      lapse on the outgoing key's TTL. The owner resumes with {setPaused}.
+    ///      Reverts with {GuardianIsOwner} if `newGuardian` is the owner.
     /// @param newGuardian Address of the new guardian (use address(0) to clear).
     function setGuardian(address newGuardian) external onlyOwner {
+        if (newGuardian == owner) revert GuardianIsOwner();
+        guardianPauseCooldownUntil = 0;
+        guardianPauseExpiry = 0; // no-op unless a guardian pause is active
         guardian = newGuardian;
         emit GuardianSet(newGuardian);
     }
@@ -670,11 +707,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Begin a two-step ownership handover. `newOwner` must call
-    ///         {acceptOwnership} to take effect. To cancel a pending handover
-    ///         with a clear event, use {cancelOwnershipTransfer} instead of
-    ///         passing `address(0)`.
+    ///         {acceptOwnership} to take effect. Cancel a pending handover with
+    ///         {cancelOwnershipTransfer}; this function never clears it.
+    /// @dev Reverts with {ZeroAddress} for `address(0)` and with
+    ///      {TransferToCurrentOwner} for the current owner. A rejected call leaves
+    ///      any pending handover untouched.
     /// @param newOwner Address to propose as the new owner.
     function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert ZeroAddress();
+        if (newOwner == owner) revert TransferToCurrentOwner();
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
     }
@@ -758,6 +799,16 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // enough live locals to exceed the legacy codegen's 16-slot stack limit
         // (#857). Order of checks, effects and interactions is unchanged.
         bytes32 intentHash = _validateIntent(intent, signature);
+        // Check value caps before pulling funds. A breach latches the breaker
+        // (state persists; this does not revert), refunds msg.value, and returns
+        // without recording a lock or dispatching a FillInstruction.
+        if (!_checkValueCaps(intent.sourceAmount, intent.sourceAsset)) {
+            if (msg.value > 0) {
+                (bool refunded,) = msg.sender.call{ value: msg.value }("");
+                if (!refunded) revert NativeTransferFailed();
+            }
+            return;
+        }
         uint256 received = _pullFunds(intent);
         // A zero amount means a rolling-cap breach refused the pull (see
         // {_checkValueCaps}); the breaker latch was persisted and any native value
@@ -827,8 +878,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
     }
 
-    /// @dev Enforce value caps, pull `sourceAmount` from the user and return the
-    ///      amount the escrow actually received.
+    /// @dev Pull `sourceAmount` from the user, commit the measured delta to the
+    ///      rolling-window accumulator, and return the amount actually received.
     function _pullFunds(Intent calldata intent) private returns (uint256 received) {
         // Check value caps before pulling funds.
         if (!_checkValueCaps(intent.sourceAmount, intent.sourceAsset)) {
@@ -1194,13 +1245,29 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: codec -----------------------------------------------------
 
-    /// @dev Official LayerZero V2 Type-3 executor option for lzReceive.
-    ///      The option is part of both quote and send, avoiding underquoted
-    ///      messages that the executor cannot deliver.
-    function _lzReceiveOptions() internal pure returns (bytes memory) {
-        return abi.encodePacked(
-            bytes2(0x0003), bytes1(0x01), bytes1(0x01), bytes2(0x0011), uint128(300_000), uint128(0)
-        );
+    /// @dev Enforce the LayerZero Type-3 layout: a 2-byte type (0x0003), then
+    ///      entries of `workerId(1) | optionLength(2) | payload(optionLength)` that
+    ///      consume the bytes exactly. The payload starts with an option type, so
+    ///      `optionLength` must be at least 1.
+    function _validateEnforcedOptions(bytes calldata options) private pure {
+        if (options.length < 2 || options.length > MAX_ENFORCED_OPTIONS_LEN) {
+            revert InvalidOptions();
+        }
+        if (options[0] != 0x00 || options[1] != 0x03) revert InvalidOptions();
+        uint256 i = 2;
+        while (i < options.length) {
+            if (i + 3 > options.length) revert InvalidOptions();
+            uint256 optionLength = (uint256(uint8(options[i + 1])) << 8) | uint8(options[i + 2]);
+            if (optionLength == 0) revert InvalidOptions();
+            i += 3 + optionLength;
+        }
+        if (i != options.length) revert InvalidOptions();
+    }
+
+    /// @dev Executor options for every FillInstruction. Quote and send both read
+    ///      this value, so the fee a solver sizes matches what `lock` checks.
+    function _executorOptions() internal view returns (bytes memory) {
+        return enforcedOptions;
     }
 
     /// @dev Build MessagingParams for a FillInstruction message. Both lock and quoteFee
@@ -1215,7 +1282,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             dstEid: stellarEid,
             receiver: stellarPeer,
             message: message,
-            options: _lzReceiveOptions(),
+            options: _executorOptions(),
             payInLzToken: false
         });
     }

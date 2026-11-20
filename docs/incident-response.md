@@ -521,6 +521,16 @@ the damage an attacker can do before the key is rotated.
      -- set_guardian --guardian <new-guardian-address>
    ```
 
+   **What rotation does to the pause state (EVM escrow):**
+   - `setGuardian` clears the guardian's cooldown, so the new key can pause
+     immediately. The old key's lockout does not carry over.
+   - An active pause started by the old guardian is converted to an
+     **owner pause**: it no longer auto-expires after 72 hours. The protocol
+     stays paused until the owner calls `setPaused(false)`. This keeps the
+     outgoing key's TTL from lifting the halt during an incident.
+   - `setGuardian(owner)` reverts with `GuardianIsOwner`. The owner and guardian
+     roles must stay on different keys.
+
 4. **Notify the team:**
    - Post to #security: "Guardian key rotation complete; old key revoked. New
      key is in HSM. No user funds were at risk."

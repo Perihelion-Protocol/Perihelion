@@ -9,6 +9,9 @@ import { Origin } from "../src/interfaces/ILayerZero.sol";
 /// @dev Stateless property tests for the escrow's value-handling, guards, and
 ///      nonce/replay protection.
 contract PerihelionEscrowFuzzTest is Test {
+    /// @dev Largest amount the escrow accepts (minDestAmount must fit in uint128 >> 1).
+    uint256 internal constant MAX_INTENT_AMOUNT = uint256(type(uint128).max) >> 1;
+
     PerihelionEscrow internal escrow;
     MockERC20 internal token;
     MockEndpoint internal endpoint;
