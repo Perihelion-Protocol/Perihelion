@@ -356,6 +356,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event PeerSet(bytes32 peer);
     event ConfirmationGraceSet(uint256 secondsGrace);
     event GuardianSet(address indexed guardian);
+    event EndpointDelegateSet(address indexed delegate);
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -504,6 +505,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (secondsGrace < MIN_CONFIRMATION_GRACE) revert GraceTooShort();
         confirmationGrace = secondsGrace;
         emit ConfirmationGraceSet(secondsGrace);
+    }
+
+    /// @notice Hand the LayerZero endpoint delegate to `_delegate`. Owner-only.
+    /// @dev The endpoint only accepts `setDelegate` from the OApp itself, so the escrow
+    ///      forwards the call. Deployment sets the deployer as delegate; governance moves
+    ///      it to the timelock so endpoint configuration (DVNs, executors) is multisig-gated.
+    /// @param _delegate New LayerZero delegate. Must be non-zero.
+    function setEndpointDelegate(address _delegate) external onlyOwner {
+        if (_delegate == address(0)) revert ZeroAddress();
+        endpoint.setDelegate(_delegate);
+        emit EndpointDelegateSet(_delegate);
     }
 
     /// @notice Set (or clear) the emergency guardian. Owner-only.
@@ -957,6 +969,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     // --- LayerZero inbound ---------------------------------------------------
 
     /// @inheritdoc ILayerZeroReceiver
+    /// @dev The real EndpointV2 refuses to verify the first packet on a pathway unless the
+    ///      receiver opts in. Only the Stellar peer on the configured eid may open one (issue #1050).
+    function allowInitializePath(Origin calldata origin) external view returns (bool) {
+        return origin.srcEid == stellarEid && origin.sender == stellarPeer;
+    }
+
+    /// @inheritdoc ILayerZeroReceiver
+    /// @dev Always 0: inbound delivery is unordered and replay is enforced by the nonce bitmap.
+    ///      Ordered delivery is not supported (issue #1050).
+    function nextNonce(uint32, bytes32) external pure returns (uint64) {
+        return 0;
+    }
+
+    /// @inheritdoc ILayerZeroReceiver
     /// @dev `lzReceive` is declared `payable` to satisfy the `ILayerZeroReceiver` interface.
     ///      The contract does not process native value on inbound messages; any native value
     ///      delivered by the endpoint/executor remains as contract surplus and can be recovered
@@ -969,6 +995,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         bytes calldata /* extraData */
     ) external payable nonReentrant {
         if (msg.sender != address(endpoint)) revert NotEndpoint();
+        // LayerZero scopes peers per source endpoint id, so the sender bytes32 alone does not
+        // identify the Stellar pathway. Bind both: a matching sender from another eid is refused
+        // before any nonce is consumed (issue #1049).
+        if (origin.srcEid != stellarEid) revert UntrustedPeer();
         if (origin.sender != stellarPeer) revert UntrustedPeer();
         // Bitmap-based nonce tracking supports unordered delivery (LayerZero
         // lazy-nonce model). A nonce is accepted exactly once regardless of
@@ -994,20 +1024,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @dev `solverEvm` is the canonical solver identity carried by the FillInstruction
-    ///      that was locked on the source chain. It must match the locking solver
-    ///      during the lock's exclusivity window; after the deadline, another solver
-    ///      may complete the fill before the confirmation grace period expires.
+    ///      that was locked on the source chain. It must always match the locking solver.
+    ///      There is no post-deadline open-fill fallback: the Stellar settlement rejects
+    ///      fills inside its dispatch window before the deadline, so a second solver could
+    ///      never legitimately complete a fill. Strict exclusivity is the only reachable
+    ///      behaviour, and this function enforces it explicitly (issue #1048).
     function _onFillConfirmed(bytes calldata message) internal {
         (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger) =
             _decodeFillConfirmed(message);
         Lock storage l = locks[intentHash];
         if (l.user == address(0)) revert NotLocked();
-        // Exclusivity invariant: before expiry, only the EVM address that called
-        // lock may receive the release. After expiry, the reservation is open to
-        // another solver until cancelExpired reaches the confirmation-grace edge.
-        if (solverEvm != l.solver && block.timestamp < l.deadline) {
-            revert ReservedForSolver();
-        }
+        // Strict exclusivity: only the EVM address that called lock may receive the
+        // release. A late fill by another solver is refused and the refund path
+        // (cancelExpired after the confirmation grace) remains the only recourse.
+        if (solverEvm != l.solver) revert ReservedForSolver();
         if (l.released || l.refunded) revert AlreadyFinalized();
         if (fillAmount < l.minDestAmount) revert UnderDelivered();
 
@@ -1230,6 +1260,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
                 // reservation_window is explicit and zero until the signed EVM intent schema adds it.
                 //                                 total       227
         );
+    }
 
     /// @dev Right-zero-pad `src` to exactly `width` bytes, truncating if longer.
     function _padRight(bytes memory src, uint256 width) private pure returns (bytes memory out) {

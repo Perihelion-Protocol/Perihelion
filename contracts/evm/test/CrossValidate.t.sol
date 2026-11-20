@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
+import { MockEndpoint } from "./PerihelionEscrow.t.sol";
 
 /// @dev Cross-language validation: decode Rust-generated payloads and assert
 /// the Solidity decoder produces identical results or rejects identically.

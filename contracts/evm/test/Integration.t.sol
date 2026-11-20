@@ -181,19 +181,41 @@ contract IntegrationTest is Test {
         assertFalse(refunded);
     }
 
-    /// The escrow pays whoever Stellar confirms, which need not be the address
-    /// that locked — the solver can nominate a distinct EVM payout address. That
-    /// is only allowed once the lock's exclusivity window (its deadline) has passed.
-    function test_RoundTrip_PayoutAddressIndependentOfLocker() public {
-        address payout = address(0xDECAF0);
-        PerihelionEscrow.Intent memory intent = _intent(1);
-        bytes32 h = _lock(intent);
+    /// Strict exclusivity (issue #1048): the release goes only to the address that
+    /// locked. A FillConfirmed naming a different solver is refused, and the lock
+    /// stays open for the refund path.
+    function test_RoundTrip_PayoutToOtherSolverRejected() public {
+        address other = address(0xDECAF0);
+        bytes32 h = _lock(_intent(1));
 
-        vm.warp(intent.deadline);
-        relay.deliverFillConfirmed(h, payout, 1_000_000, 42);
+        vm.expectRevert(PerihelionEscrow.ReservedForSolver.selector);
+        relay.deliverFillConfirmed(h, other, 1_000_000, 42);
 
-        assertEq(token.balanceOf(payout), 100_000);
-        assertEq(token.balanceOf(solver), 0);
+        (,,,,,, bool released, bool refunded) = escrow.locks(h);
+        assertFalse(released);
+        assertFalse(refunded);
+        assertEq(token.balanceOf(other), 0);
+    }
+
+    /// No post-deadline open-fill fallback (issue #1048): even after the intent
+    /// deadline, a solver other than the locker cannot complete the fill.
+    function test_RoundTrip_LateFillFromOtherSolverRejectedAfterDeadline() public {
+        bytes32 h = _lock(_intent(1));
+        vm.warp(block.timestamp + 601); // past the 600s deadline, before grace
+
+        vm.expectRevert(PerihelionEscrow.ReservedForSolver.selector);
+        relay.deliverFillConfirmed(h, address(0xDECAF0), 1_000_000, 42);
+    }
+
+    /// The locking solver can still complete its own fill after the deadline and
+    /// before the confirmation grace expires.
+    function test_RoundTrip_LockerFillAfterDeadlineReleases() public {
+        bytes32 h = _lock(_intent(1));
+        vm.warp(block.timestamp + 601);
+
+        relay.deliverFillConfirmed(h, solver, 1_000_000, 42);
+
+        assertEq(token.balanceOf(solver), 100_000);
     }
 
     function test_RoundTrip_CancelFromStellar() public {

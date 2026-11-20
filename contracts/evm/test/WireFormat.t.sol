@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
+import { MockEndpoint } from "./PerihelionEscrow.t.sol";
 
 /// @dev Endpoint stub: the escrow constructor calls `setDelegate` and needs code.
 contract WireFormatNoopEndpoint {
@@ -32,12 +33,12 @@ contract DecoderHarness is PerihelionEscrow {
     }
 
     /// @dev Expose _encodeFillInstruction for testing.
-    function encodeFillInstruction(bytes32 intentHash, Intent calldata intent)
-        external
-        view
-        returns (bytes memory)
-    {
-        return _encodeFillInstruction(intentHash, intent, address(0));
+    function encodeFillInstruction(
+        bytes32 intentHash,
+        Intent calldata intent,
+        address lockingSolver
+    ) external view returns (bytes memory) {
+        return _encodeFillInstruction(intentHash, intent, lockingSolver);
     }
 
     function fillInstructionLength() external pure returns (uint256) {
@@ -201,7 +202,7 @@ contract WireFormatConformanceTest is Test {
             preferredSolver: address(0) // all-zeros = open
          });
 
-        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent);
+        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent, address(0));
         assertEq(
             encoded.length,
             harness.fillInstructionLength(),
@@ -248,7 +249,7 @@ contract WireFormatConformanceTest is Test {
             nonce: 0,
             preferredSolver: address(0)
         });
-        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent);
+        bytes memory encoded = harness.encodeFillInstruction(FI_INTENT_HASH, intent, address(0));
         assertEq(encoded, _readVector(name), name);
     }
 
@@ -373,7 +374,8 @@ contract FillInstructionEncodeTest is Test {
     /// Encoded payload is exactly 227 bytes (expanded from the old 158 and including reservation_window).
     function test_EncodedPayloadIs227Bytes() public view {
         PerihelionEscrow.Intent memory intent = _baseIntent();
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        bytes memory encoded =
+            harness.encodeFillInstruction(bytes32(uint256(1)), intent, address(0));
         assertEq(encoded.length, 227);
     }
 
@@ -386,7 +388,8 @@ contract FillInstructionEncodeTest is Test {
         PerihelionEscrow.Intent memory intent = _baseIntent();
         intent.destAsset = fullAsset;
 
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        bytes memory encoded =
+            harness.encodeFillInstruction(bytes32(uint256(1)), intent, address(0));
         assertEq(encoded.length, 227);
 
         // Slice out the 69-byte dest_asset field at offset 94.
@@ -409,7 +412,8 @@ contract FillInstructionEncodeTest is Test {
         // A Stellar strkey is exactly 56 chars; trim/pad to 56 for test.
         PerihelionEscrow.Intent memory intent = _baseIntent();
         intent.destination = "GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 58 chars, will be clamped to 56
-        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        bytes memory encoded =
+            harness.encodeFillInstruction(bytes32(uint256(1)), intent, address(0));
         // Confirm recipient field occupies bytes [38, 94).
         assertEq(encoded.length, 227);
         // Byte at offset 94 is the start of dest_asset, not recipient overflow.

@@ -460,6 +460,13 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
     }
 
+    /// @dev Allowlists `asset` with no per-asset cap, the configuration a deployment applies
+    ///      before the escrow accepts locks for it (see script/Deploy.s.sol).
+    function _allowAsset(address asset) internal {
+        escrow.setAssetAllowed(asset, true);
+        escrow.setMaxIntentAmountPerAsset(asset, type(uint256).max);
+    }
+
     function _fillConfirmed(bytes32 intentHash, address solverEvm)
         internal
         pure
@@ -470,7 +477,7 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             intentHash,
             bytes32(uint256(uint160(solverEvm))),
-            uint128(1_000_000), // must meet intent.minDestAmount (990_000) or UnderDelivered
+            uint128(990_000), // == _intent().minDestAmount
             uint64(12_345)
         );
     }
@@ -532,7 +539,8 @@ contract PerihelionEscrowTest is Test {
         assertEq(endpoint.sendCount(), 1);
         assertEq(endpoint.lastDstEid(), STELLAR_EID);
         assertEq(endpoint.lastReceiver(), STELLAR_PEER);
-        assertEq(endpoint.lastNativeFee(), 0.01 ether);
+        // The escrow forwards only the quoted fee (0 with the mock) and refunds the rest.
+        assertEq(endpoint.lastNativeFee(), 0);
         assertEq(endpoint.lastRefundAddress(), solver);
 
         bytes memory message = endpoint.lastMessage();
@@ -559,6 +567,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_LockMeasuredDeltaWithFeeOnTransfer() public {
         FeeERC20 feeToken = new FeeERC20(100); // 1% fee
+        _allowAsset(address(feeToken));
         feeToken.mint(user, 1_000_000);
         vm.prank(user);
         feeToken.approve(address(escrow), type(uint256).max);
@@ -612,7 +621,7 @@ contract PerihelionEscrowTest is Test {
         assertEq(token.balanceOf(address(escrow)), 100_000);
     }
 
-    function test_LockExactFeeSucceeds() public {
+    function test_LockBelowFeeReverts() public {
         PerihelionEscrow.Intent memory intent = _intent();
         bytes memory sig = _sign(intent);
 
@@ -718,9 +727,7 @@ contract PerihelionEscrowTest is Test {
         vm.prank(user);
         newToken.approve(address(escrow), type(uint256).max);
 
-        escrow.setAssetAllowed(address(newToken), true);
-
-        escrow.setMaxIntentAmountPerAsset(address(newToken), type(uint256).max);
+        _allowAsset(address(newToken));
         assertTrue(escrow.assetAllowed(address(newToken)));
 
         PerihelionEscrow.Intent memory intent = _intent();
@@ -936,7 +943,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Released(h, solver, 100_000, 1_000_000, 12_345, 990_000);
+        emit Released(h, solver, 100_000, 990_000, 12_345, 990_000);
         _confirm(h, solver, 1);
 
         assertEq(token.balanceOf(solver), 100_000);
@@ -999,6 +1006,45 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
         vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
         endpoint.deliver(escrow, STELLAR_EID, bytes32(uint256(0xBAD)), 1, _fillConfirmed(h, solver));
+    }
+
+    /// @notice Issue #1049: a packet carrying the Stellar peer bytes32 from a different source
+    ///         endpoint id is refused, and it does not consume the nonce on the real pathway.
+    function test_RevertWhen_WrongSourceEidWithCorrectSender() public {
+        bytes32 h = _lock();
+
+        vm.expectRevert(PerihelionEscrow.UntrustedPeer.selector);
+        endpoint.deliver(escrow, STELLAR_EID + 1, STELLAR_PEER, 1, _cancelIntent(h));
+
+        // The same nonce is still accepted from the genuine Stellar pathway.
+        _cancel(h, 1);
+        (,,,,,, bool released, bool refunded) = escrow.locks(h);
+        assertFalse(released);
+        assertTrue(refunded);
+    }
+
+    /// @notice Issue #1050: the endpoint may open only the genuine Stellar pathway.
+    function test_AllowInitializePath_OnlyStellarPathway() public view {
+        assertTrue(
+            escrow.allowInitializePath(
+                Origin({ srcEid: STELLAR_EID, sender: STELLAR_PEER, nonce: 0 })
+            )
+        );
+        assertFalse(
+            escrow.allowInitializePath(
+                Origin({ srcEid: STELLAR_EID + 1, sender: STELLAR_PEER, nonce: 0 })
+            )
+        );
+        assertFalse(
+            escrow.allowInitializePath(
+                Origin({ srcEid: STELLAR_EID, sender: bytes32(uint256(0xBAD)), nonce: 0 })
+            )
+        );
+    }
+
+    /// @notice Issue #1050: unordered delivery, so the endpoint never waits on a nonce.
+    function test_NextNonce_IsUnordered() public view {
+        assertEq(escrow.nextNonce(STELLAR_EID, STELLAR_PEER), 0);
     }
 
     function test_RevertWhen_StaleNonce() public {
@@ -1324,6 +1370,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_LockWithNoReturnToken() public {
         NoReturnERC20 noReturnToken = new NoReturnERC20();
+        _allowAsset(address(noReturnToken));
         noReturnToken.mint(user, 1_000_000);
         vm.prank(user);
         noReturnToken.approve(address(escrow), type(uint256).max);
@@ -1345,6 +1392,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_LockWithFalseReturningToken() public {
         FalseReturningERC20 falseToken = new FalseReturningERC20();
+        _allowAsset(address(falseToken));
         falseToken.mint(user, 1_000_000);
         vm.prank(user);
         falseToken.approve(address(escrow), type(uint256).max);
@@ -1362,6 +1410,7 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_LockTokenReceivesNothing() public {
         FeeERC20 heavyFeeToken = new FeeERC20(10_000); // 100% fee (receives 0)
+        _allowAsset(address(heavyFeeToken));
         heavyFeeToken.mint(user, 1_000_000);
         vm.prank(user);
         heavyFeeToken.approve(address(escrow), type(uint256).max);
@@ -1442,7 +1491,9 @@ contract PerihelionEscrowTest is Test {
     }
 
     /// @notice Symmetric: message amount smaller than locked still releases l.amount.
-    function test_FillConfirmedReleasesLockAmountWhenMessageAmountIsSmaller() public {
+    /// @notice A FillConfirmed reporting less than minDestAmount is rejected outright, so
+    ///         the lock can never be released for an under-delivered fill.
+    function test_RevertWhen_FillConfirmedAmountIsSmaller() public {
         bytes32 h = _lock(); // locks 100_000 tokens
 
         bytes memory msgWithSmallAmount = abi.encodePacked(
@@ -1450,13 +1501,14 @@ contract PerihelionEscrowTest is Test {
             T_FILL_CONFIRMED,
             h,
             bytes32(uint256(uint160(solver))),
-            uint128(990_000), // exactly minDestAmount: passes the floor, must NOT under-release
+            uint128(1), // tiny: must not release
             uint64(1)
         );
+        vm.expectRevert(PerihelionEscrow.UnderDelivered.selector);
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgWithSmallAmount);
 
-        assertEq(token.balanceOf(solver), 100_000);
-        assertEq(token.balanceOf(address(escrow)), 0);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
+        assertEq(token.balanceOf(solver), 0);
     }
 
     // --- FillConfirmed/CancelIntent codec: exact byte layout ----
@@ -1506,7 +1558,7 @@ contract PerihelionEscrowTest is Test {
         escrow.cancelExpired(h);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Late FillConfirmed arrives and is rejected by the terminal-state guard.
+        // Late FillConfirmed arrives after the refund and reverts: the lock is finalized.
         vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 1);
     }
@@ -1521,7 +1573,7 @@ contract PerihelionEscrowTest is Test {
         _cancel(h, 1);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Subsequent FillConfirmed is consumed as a no-op.
+        // Subsequent FillConfirmed reverts: the finalized lock is never released.
         vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 2);
     }

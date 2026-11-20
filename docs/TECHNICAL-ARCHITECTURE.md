@@ -131,6 +131,19 @@ exceed worst-case cross-chain latency (LayerZero relay + Stellar finality). A
 `cancelExpired` call that lands before the grace window opens reverts with
 `DeadlineNotPassed()`.
 
+**Solver-lock exclusivity (strict):**
+Only the EVM address that called `lock` can complete the fill. The EVM escrow
+refuses any `FillConfirmed` whose `solverEvm` differs from it, and Soroban refuses
+any `solver_evm` that differs from the locked identity. Neither side has a
+post-deadline open-fill fallback. Both the EVM `reservation_window` and the
+Soroban reservation are fixed at zero, so the fallback window would be empty:
+Soroban rejects fills once `now + MIN_DISPATCH_WINDOW > deadline`, which is before
+the reservation expires. The branch was therefore dead code and was removed
+(issue #1048). A user whose locking solver goes offline recovers funds through
+`cancelExpired` after the confirmation grace. Restoring a liveness fallback needs
+a signed `reservationWindow` in the EIP-712 `Intent`, a breaking typehash change
+requiring SDK and wire-vector updates.
+
 **Preferred-solver reservation is EVM-lock-only:**
 The EVM escrow enforces `preferredSolver` when the user locks funds. The
 wire-format words remain reserved for compatibility, but an EVM address cannot
@@ -1008,8 +1021,8 @@ fields. Amounts are unsigned 128-bit in the asset's smallest unit.
 | 94 | 69 | `dest_asset` | Canonical Stellar asset text, including `CODE:ISSUER`, right-zero-padded if needed. |
 | 163 | 16 | `min_dest_amount` | u128 slippage floor. |
 | 179 | 8 | `deadline` | u64 unix seconds. |
-| 187 | 32 | `locked_solver` | EVM address that called `lock`, left-padded to 32 bytes. Mandatory in canonical release payloads and exclusive until the reservation window expires. |
-| 219 | 8 | `reservation_window` | Exclusive duration in seconds, bounded by `deadline`; after expiry another solver may fill before the source refund grace period closes. |
+| 187 | 32 | `locked_solver` | EVM address that called `lock`, left-padded to 32 bytes. Mandatory in canonical release payloads and exclusive for the whole lock lifetime (strict exclusivity, issue #1048). |
+| 219 | 8 | `reservation_window` | Reserved field kept for layout stability. The EVM escrow always encodes `0`, and no open-fill fallback depends on it (issue #1048). |
 | **227** | | **total** | |
 
 **`FillConfirmed` (Stellar → source)** — authorizes solver payout on source.
@@ -1017,7 +1030,7 @@ fields. Amounts are unsigned 128-bit in the asset's smallest unit.
 | Offset | Size | Field | Consumer | Description |
 |--------|------|-------|----------|-------------|
 | 2 | 32 | `intent_hash` | **EVM escrow** | Identifies the lock to release. Must match a live, unfinalized lock. |
-| 34 | 32 | `solver_evm` | **EVM escrow** | Left-padded EVM payout identity. It must equal `locked_solver` while the reservation window is active; after expiry it may identify the solver that completed the permissionless fill. |
+| 34 | 32 | `solver_evm` | **EVM escrow** | Left-padded EVM payout identity. It must equal `locked_solver`. There is no post-deadline exception (issue #1048). |
 | 66 | 16 | `fill_amount` | **Off-chain / event log** | u128 Stellar-side delivery amount — **informational only**. Does not control the EVM release; the escrow releases `l.amount` (the measured-delta locked value). Decoded and emitted in the `Released` event for off-chain reconciliation without a separate RPC call. Encoding as u128 matches the `min_dest_amount` width in FillInstruction. |
 | 82 | 8 | `fill_ledger` | **Off-chain / event log** | u64 Stellar ledger sequence at fill time — **informational only**. Sourced from `u32 env.ledger().sequence()` and widened to u64 on the wire: (1) future-proofs against the eventual Stellar u32 overflow (~136 years at current rates) without a breaking wire change; (2) matches the EVM `uint64` receiver width. Decoded and emitted in `Released` for dispute resolution and explorer display. |
 | **90** | | **total** | | |
@@ -1262,7 +1275,7 @@ interface IPerihelionEscrow {
 
     /// @notice Emitted when a solver locks a user's funds against an intent.
     /// @param intentHash EIP-712 id (I5).
-    /// @param solver     Address that is exclusive during the reservation window and is repaid on fill.
+    /// @param solver     Address that is exclusive for the lifetime of the lock and is repaid on fill.
     /// @param user       Funds owner.
     /// @param asset      ERC-20 locked.
     /// @param amount     Amount actually received by escrow (post-transfer delta).

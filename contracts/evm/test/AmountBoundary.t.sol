@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
+import { MockEndpoint } from "./PerihelionEscrow.t.sol";
 import { IERC20 } from "../src/IERC20.sol";
 
 /// @notice Issue #57 — Amount boundary conformance tests.

@@ -170,6 +170,7 @@ contract PerihelionEscrowInvariantTest is Test {
         token.approve(address(escrow), type(uint256).max);
 
         escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 
         escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 

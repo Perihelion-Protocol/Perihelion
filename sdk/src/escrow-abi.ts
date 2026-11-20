@@ -151,6 +151,42 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "allowInitializePath",
+    "inputs": [
+      {
+        "name": "origin",
+        "type": "tuple",
+        "internalType": "struct Origin",
+        "components": [
+          {
+            "name": "srcEid",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "sender",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "nonce",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "assetAllowed",
     "inputs": [
       {
@@ -638,6 +674,30 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "nextNonce",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
     "name": "owner",
     "inputs": [],
     "outputs": [
@@ -953,6 +1013,19 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "setEndpointDelegate",
+    "inputs": [
+      {
+        "name": "_delegate",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setGuardian",
     "inputs": [
       {
@@ -1208,6 +1281,19 @@ export const ESCROW_ABI = [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EndpointDelegateSet",
+    "inputs": [
+      {
+        "name": "delegate",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
       }
     ],
     "anonymous": false

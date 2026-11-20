@@ -122,40 +122,84 @@ forge script script/DeployTimelock.s.sol --rpc-url "$RPC" --broadcast
 
 ### 4.2 Deploy the escrow
 
+The escrow is configured from a JSON file in the same transaction batch as its
+deployment, so it can accept locks as soon as ownership moves and no setting
+needs a separate governance cycle. Copy `contracts/evm/script/config/example.json`
+to `contracts/evm/script/config/<chain>.json` and fill in:
+
+| Key | Meaning |
+| --- | ------- |
+| `peer` | 32-byte address of the Soroban settlement contract (required; a zero peer is rejected) |
+| `guardian` | Emergency-pause key (required) |
+| `confirmationGrace` | Local-refund grace in seconds, within the contract's 30 min to 7 day bounds (required) |
+| `rollingWindowDuration` | Window length in seconds for per-asset rolling caps |
+| `assets` / `assetMaxIntentAmounts` / `assetRollingWindowCaps` | Allowlisted tokens. Each asset needs a max lock amount. Amounts are JSON strings. Parallel arrays of equal length |
+| `owner` | The timelock. Nominated as pending owner, not yet owner |
+
+The config must live under `contracts/evm/script/config/` or `test/fixtures/`,
+because Foundry only permits file reads there.
+
 ```bash
 export PERIHELION_ENDPOINT=0xLZEndpoint
 export PERIHELION_STELLAR_EID=30316        # Stellar settlement EID
-export PERIHELION_STELLAR_PEER=0x...        # 32-byte Soroban peer (optional now; can set later)
-export PERIHELION_GUARDIAN=0xGuardian       # emergency-pause key
-export PERIHELION_OWNER=$TIMELOCK           # initiates two-step handover to the timelock
+export PERIHELION_CONFIG=script/config/<chain>.json
 forge script script/Deploy.s.sol --rpc-url "$RPC" --broadcast
 # -> note the deployed PerihelionEscrow address as $ESCROW
 ```
 
-At this point `pendingOwner == $TIMELOCK`, `guardian == $PERIHELION_GUARDIAN`,
-and `owner` is still the deployer until the handover completes.
+At this point `pendingOwner == $TIMELOCK`, `stellarPeer`, `guardian`, grace, the
+asset allowlist and caps are all configured, and `owner` is still the deployer
+until the handover completes. The LayerZero delegate still belongs to the
+deployer, and §4.3 moves it.
 
 ### 4.3 Complete the ownership handover (timelock governance)
 
-The timelock must call `escrow.acceptOwnership()` through its own flow. Encode
-the call, then `propose → confirm (×M) → wait delay → execute`:
+The timelock must run two operations through its own flow, in this order:
+
+1. `escrow.acceptOwnership()`: the timelock becomes owner.
+2. `escrow.setEndpointDelegate($TIMELOCK)`: the LayerZero delegate moves to the
+   timelock. Only the owner can call it, so it must run after step 1.
+
+`script/AcceptOwnership.s.sol` builds both operations and prints the `propose`
+and `execute` calldata for each. It broadcasts nothing:
 
 ```bash
-ACCEPT=$(cast calldata "acceptOwnership()")
-SALT=0x0000000000000000000000000000000000000000000000000000000000000001
+export PERIHELION_ESCROW=$ESCROW PERIHELION_TIMELOCK=$TIMELOCK
+forge script script/AcceptOwnership.s.sol --rpc-url "$RPC"
+```
 
-# Owner 1 proposes (auto-confirms):
-cast send $TIMELOCK "propose(address,uint256,bytes,bytes32)" $ESCROW 0 $ACCEPT $SALT --private-key $OWNER1
-# Owner 2 confirms (reaches threshold, starts the 48h clock):
-ID=$(cast call $TIMELOCK "hashOperation(address,uint256,bytes,bytes32)" $ESCROW 0 $ACCEPT $SALT)
-cast send $TIMELOCK "confirm(bytes32)" $ID --private-key $OWNER2
+For each operation, submit `propose → confirm (×M) → wait delay → execute`,
+using the printed calldata. Operation 1 is submitted and executed first, then
+operation 2:
+
+```bash
+# Owner 1 proposes (auto-confirms), using the propose calldata for operation 0:
+cast send $TIMELOCK <propose-calldata-0> --private-key $OWNER1
+# Owner 2 confirms with the id printed for operation 0 (reaches threshold, starts the delay):
+cast send $TIMELOCK "confirm(bytes32)" <id-0> --private-key $OWNER2
 # ...wait out PERIHELION_TL_DELAY...
-cast send $TIMELOCK "execute(address,uint256,bytes,bytes32)" $ESCROW 0 $ACCEPT $SALT --private-key $OWNER1
-# -> escrow.owner() == $TIMELOCK
+cast send $TIMELOCK <execute-calldata-0> --private-key $OWNER1
+# -> escrow.owner() == $TIMELOCK. Repeat for operation 1 (setEndpointDelegate).
 ```
 
 Any subsequent EVM admin change (peer rotation, grace, unpause) follows this
 same four-step pattern, just with different calldata.
+
+Any subsequent EVM admin change (peer rotation, grace, unpause) follows this
+same four-step pattern, just with different calldata.
+
+**Verify before recording.** Once the handover is complete, check the on-chain
+state against the same config file. The script reverts on the first missing or
+mismatched setting, so it can gate a pipeline:
+
+```bash
+export PERIHELION_ESCROW=$ESCROW PERIHELION_TIMELOCK=$TIMELOCK PERIHELION_CONFIG=script/config/<chain>.json
+forge script script/VerifyDeployment.s.sol --rpc-url "$RPC"
+# -> prints the effective configuration, then "Verification passed."
+```
+
+Run it before any lock is accepted. Until the handover completes it reverts
+with `owner is not the timelock` by design.
 
 ### 4.4 Record the deployment
 
@@ -203,7 +247,9 @@ Configure the LayerZero send/receive libraries and the DVN set per chain
 
 **Basic post-deploy checklist:**
 
+- [ ] `forge script script/VerifyDeployment.s.sol` passes against the deployment config
 - [ ] `escrow.owner() == $TIMELOCK`, `escrow.pendingOwner() == 0`
+- [ ] Escrow's LayerZero delegate is `$TIMELOCK` (via `setEndpointDelegate`, §4.3)
 - [ ] `escrow.guardian() == $PERIHELION_GUARDIAN`
 - [ ] `escrow.stellarPeer()` and `escrow.stellarEid()` correct
 - [ ] `escrow.paused() == false`

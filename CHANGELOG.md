@@ -51,6 +51,8 @@ versioned independently.
 - **ci**: added `.github/workflows/release.yml`, which runs on `vX.Y.Z` tags to
   verify versions and the changelog, pack the packages and publish a GitHub
   release with `SHA256SUMS`. See `RELEASING.md` (#979).
+- **evm**: `lzReceive` rejects packets whose `origin.srcEid` is not the configured Stellar endpoint id, before any nonce is consumed (#1049).
+- **evm**: the escrow implements the LayerZero V2 receiver hooks `allowInitializePath` (opens only the Stellar peer on the configured eid) and `nextNonce` (returns 0, unordered delivery). A real EndpointV2 can now initialise the pathway and verify FillConfirmed and CancelIntent (#1050).
 
 - **sdk**: `ESCROW_ABI` had drifted from `PerihelionEscrow.sol` — it declared a
   non-existent `getLock` function and a `PausedError` error.
@@ -87,6 +89,8 @@ versioned independently.
   `MalformedPayload` (#722, #903).
 
 ### Changed
+
+- **evm, soroban**: removed the post-reservation open-fill fallback. Only the locking solver can complete a fill, at any point before the confirmation grace expires. The fallback was unreachable: the EVM sends a zero `reservation_window`, and Soroban stops accepting fills 30 minutes before the deadline, so no second solver could fill inside that window. A user whose locking solver goes offline recovers funds through `cancelExpired`. Restoring a liveness fallback needs a signed `reservationWindow` in the intent, a breaking typehash change (#1048).
 
 - **Breaking (Soroban events):** every settlement-contract event topic is now
   the event's full documented name — e.g. `admin_transfer_started` (was

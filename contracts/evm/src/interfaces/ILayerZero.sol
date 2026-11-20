@@ -45,7 +45,9 @@ interface ILayerZeroEndpointV2 {
     function setDelegate(address _delegate) external;
 }
 
-/// @notice OApp receiver callback required by LayerZero V2.
+/// @notice OApp receiver surface of LayerZero V2, matching the official `ILayerZeroReceiver`.
+///         The endpoint calls `allowInitializePath` before it verifies the first packet on a
+///         pathway, and `nextNonce` when a receiver uses ordered delivery.
 interface ILayerZeroReceiver {
     function lzReceive(
         Origin calldata _origin,
@@ -54,4 +56,10 @@ interface ILayerZeroReceiver {
         address _executor,
         bytes calldata _extraData
     ) external payable;
+
+    /// @notice Whether the endpoint may initialise the pathway `_origin`.
+    function allowInitializePath(Origin calldata _origin) external view returns (bool);
+
+    /// @notice Next nonce the receiver expects from `_sender` on `_srcEid`. 0 means unordered.
+    function nextNonce(uint32 _srcEid, bytes32 _sender) external view returns (uint64);
 }

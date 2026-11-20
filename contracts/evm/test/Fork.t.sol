@@ -131,6 +131,8 @@ contract ForkTest is Test {
         escrow.setAssetAllowed(address(token), true);
         escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
         escrow.setConfirmationGrace(2 hours);
+        escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 
         // Deploy timelock (2-of-3)
         address[] memory owners = new address[](3);

@@ -96,12 +96,20 @@ bounding the per-intent storage TTL on Stellar.
 The canonical FillInstruction solver word is the EVM address that called `lock`,
 not `preferredSolver` and not an arbitrary payout address. Soroban stores that
 32-byte identity and requires `solver_evm` supplied by the delivering solver to
-match it while `reservation_window` is active. The EVM escrow applies the same
-window when consuming FillConfirmed. Once the window reaches the intent deadline,
-the fill is permissionless until the source-chain confirmation grace period lets
-`cancelExpired` win the refund race; a post-expiry solver's own EVM address is then
-the payout recipient. The canonical identity is never substituted during the
-exclusive window.
+equal it. The EVM escrow enforces the same equality when consuming
+FillConfirmed.
+
+Exclusivity is strict and has no time-based exception. Only the locking solver
+can complete a fill, at any point before the source-chain confirmation grace
+expires. There is no post-deadline open-fill fallback. The EVM wire format sends a
+zero `reservation_window`, and Soroban stops accepting fills
+`MIN_DISPATCH_WINDOW` (30 minutes) before the deadline, so no other solver could
+ever complete a fill in a post-expiry window. If the locking solver goes offline,
+the user recovers funds through `cancelExpired` once the confirmation grace has
+elapsed. The decision and its trade-off are recorded in
+[TECHNICAL-ARCHITECTURE.md](./TECHNICAL-ARCHITECTURE.md).
+A future liveness fallback needs a signed `reservationWindow` in the EIP-712
+intent (a breaking typehash change) and is out of scope here.
 
 ## Amount Field Specification
 

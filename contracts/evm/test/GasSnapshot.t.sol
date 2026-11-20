@@ -129,6 +129,8 @@ contract GasSnapshotTest is Test {
         escrow.setAssetAllowed(address(token), true);
         escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
         target = new GasSnapshotTarget();
+        escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 
         user = vm.addr(userPk);
         token.mint(user, 1_000_000);
