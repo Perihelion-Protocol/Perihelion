@@ -175,7 +175,6 @@ These indicate anomalies that require investigation but may have benign explanat
   - Check if destination chain message delivery is stuck
   - If rate remains elevated, escalate (possible attack or griefing)
 
-<<<<<<< HEAD
 #### Alert H5: Timelock `Proposed` Payload Verification (issue #1059)
 - **Condition:** Any `Proposed(id, proposer, target, value, data, salt)` event
   from the timelock (`contracts/evm/src/PerihelionTimelock.sol`) where:
@@ -205,10 +204,7 @@ These indicate anomalies that require investigation but may have benign explanat
   ORDER BY block_time DESC;
   ```
 
-#### Alert H6: Timelock Revoke/Re-confirm Griefing (issue #283)
-=======
-=======
-#### Alert H6: `Filled` Without `ConfirmationSent` (Split `deliver_intent` → `dispatch_confirmation` Stall, issue #1078)
+#### Alert H7: `Filled` Without `ConfirmationSent` (Split `deliver_intent` → `dispatch_confirmation` Stall, issue #1078)
 - **Condition:** An intent emits `Filled` on Soroban but no matching `ConfirmationSent`
   event is observed within `MIN_DISPATCH_WINDOW` ledgers of the fill. This is the
   split-path stall: `deliver_intent` transfers the solver's funds to the user and
@@ -257,8 +253,7 @@ These indicate anomalies that require investigation but may have benign explanat
   ORDER BY ledgers_remaining ASC;
   ```
 
-#### Alert H5: Timelock Revoke/Re-confirm Griefing (issue #283)
->>>>>>> pr1173
+#### Alert H6: Timelock Revoke/Re-confirm Griefing (issue #283)
 - **Condition:** The same operation id emits `ConfirmationRevoked` followed by
   `Confirmed` (or `Ready`) more than **2 times within any 24-hour window**,
   or a `Ready` event is emitted for an id that already emitted `Ready` previously.

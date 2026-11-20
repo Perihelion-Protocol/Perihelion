@@ -6,6 +6,30 @@ use soroban_sdk::contracterror;
 /// `1xx` lifecycle, `13x` authorization, `14x` intent preconditions,
 /// `16x` messaging, `5xx` invariant/internal. Surfaced to clients as
 /// `Error(Contract, #code)`.
+///
+/// # Error classification (issues #1063, #1064)
+///
+/// Inbound LayerZero handlers (`lz_receive_bytes`, `on_fill_instruction`)
+/// distinguish two classes of failure:
+///
+/// * **Transport / authentication errors** — the packet itself is bad or
+///   untrusted. These keep reverting so the whole invocation (including the
+///   nonce) rolls back and the packet stays retryable:
+///   `MalformedPayload`, `StaleNonce`, `UnknownMessageType`, and
+///   `UntrustedPeer` when it denotes a sender mismatch.
+///
+/// * **Deterministic policy rejections** — the packet is authentic and
+///   well-formed, but policy forbids acting on it and a retry can never
+///   succeed. These consume the nonce, write a terminal `Cancelled` marker,
+///   emit `fill_instruction_rejected(hash, code)`, and allow a CancelIntent
+///   to be dispatched:
+///   `InvalidAmount`, `DeadlineTooFar`, `ExceedsMaxIntentAmount`,
+///   `RollingWindowCapExceeded`, `RollingWindowCapTriggered`,
+///   `UnsupportedDestAsset`, `InvalidDestAsset`, and `UntrustedPeer` when it
+///   denotes a missing peer in `on_fill_instruction`.
+///
+/// `is_deterministic_policy_rejection` encodes this table; `code` exposes the
+/// stable numeric code carried by the rejection event.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -124,4 +148,39 @@ pub enum PerihelionError {
     // --- Invariant / internal ---
     /// Arithmetic error that prior checks should have made unreachable.
     ArithmeticError = 500,
+}
+
+impl PerihelionError {
+    /// Stable numeric code for this error, as surfaced in
+    /// `Error(Contract, #code)` and in `fill_instruction_rejected` events.
+    pub fn code(&self) -> u32 {
+        *self as u32
+    }
+
+    /// Whether this error is a deterministic policy rejection (issues #1063,
+    /// #1064).
+    ///
+    /// Returns `true` for errors that can never succeed on retry and should
+    /// therefore be acknowledged with a terminal marker instead of reverting.
+    /// Returns `false` for transport / authentication errors, which must keep
+    /// reverting so the packet remains retryable.
+    ///
+    /// Note: `UntrustedPeer` is classified as a deterministic policy rejection
+    /// here because the only inbound use that reaches this helper is the
+    /// missing-peer check in `on_fill_instruction`. Sender-mismatch checks in
+    /// `lz_receive_bytes` must revert directly and must not consult this
+    /// helper.
+    pub fn is_deterministic_policy_rejection(&self) -> bool {
+        matches!(
+            self,
+            PerihelionError::InvalidAmount
+                | PerihelionError::DeadlineTooFar
+                | PerihelionError::ExceedsMaxIntentAmount
+                | PerihelionError::RollingWindowCapExceeded
+                | PerihelionError::RollingWindowCapTriggered
+                | PerihelionError::UnsupportedDestAsset
+                | PerihelionError::InvalidDestAsset
+                | PerihelionError::UntrustedPeer
+        )
+    }
 }

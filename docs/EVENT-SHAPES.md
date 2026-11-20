@@ -56,6 +56,24 @@ ever emitted these symbols.
 `rolling_window_cap_reset` already used `Symbol::new` with their full names;
 they moved into `mod events` but their topics are unchanged.
 
+## Added topics (issues #1063, #1064, #1065)
+
+| Topic                          | Emitted when                                                       |
+|--------------------------------|--------------------------------------------------------------------|
+| `fill_instruction_rejected`    | A FillInstruction is terminally rejected by policy (deterministic rejection, e.g. `DeadlineTooFar`, `DeadlinePassed`, `InvalidAmount`, `UnsupportedDestAsset`, `ExceedsMaxIntentAmount`, missing peer). Data carries the instruction hash and a rejection code. The nonce is consumed and a terminal `Cancelled` marker is written so a CancelIntent can be dispatched; transport/authentication errors (`UntrustedPeer`, `StaleNonce`, `MalformedPayload`) still revert. |
+| `enforced_options_set`         | Admin sets the per-destination-eid LayerZero executor options (`set_enforced_options(eid, bytes)`). Data carries the eid and the encoded Type-3 options blob. |
+
+Both names exceed 9 characters and are built with `Symbol::new` via `mod
+events`.
+
+## Payload changes (issue #1066)
+
+`confirmation_sent` and `cancelled` now include the **actual** LayerZero fee
+paid (the quoted `required` amount forwarded to the endpoint), not the
+caller-supplied `lz_fee` maximum, so off-chain reconciliation can account for
+the exact cost. Consumers decoding these payloads must read the trailing fee
+field.
+
 ## Indexer guidance
 
 `peer_change_proposed` / `peer_change_cancelled` (and the endpoint
