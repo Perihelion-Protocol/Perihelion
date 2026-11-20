@@ -67,6 +67,7 @@ contract PerihelionTimelock {
     event Executed(bytes32 indexed id);
     event Cancelled(bytes32 indexed id);
     event CancelConfirmed(bytes32 indexed id, address indexed owner, uint256 cancelConfirmations);
+    event CancelRevoked(bytes32 indexed id, address indexed owner, uint256 cancelConfirmations);
     event OwnerAdded(address indexed owner);
     event OwnerRemoved(address indexed owner);
     event ThresholdSet(uint256 threshold);
@@ -89,6 +90,7 @@ contract PerihelionTimelock {
     error Reentrancy();
     error Expired();
     error AlreadyCancelConfirmed();
+    error NotCancelConfirmed();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -198,7 +200,29 @@ contract PerihelionTimelock {
     {
         id = hashOperation(target, value, data, salt);
         Operation storage op = operations[id];
-        if (op.exists) revert AlreadyExists();
+        if (op.exists) {
+            // An unexecuted operation past its grace period can never be
+            // executed again (issue #1058). Allow it to be re-proposed with
+            // the same id so off-chain tooling that derives ids
+            // deterministically keeps working, and so it goes through the
+            // full delay again.
+            bool expired = !op.executed && op.readyAt != 0
+                && block.timestamp > uint256(op.readyAt) + GRACE_PERIOD;
+            if (!expired) revert AlreadyExists();
+            // Clear per-owner flags for the current owner set; mappings of
+            // mappings cannot be deleted wholesale.
+            uint256 n = _owners.length;
+            for (uint256 i = 0; i < n; i++) {
+                address o = _owners[i];
+                delete confirmedBy[id][o];
+                delete cancelConfirmedBy[id][o];
+            }
+            delete cancelConfirmations[id];
+            op.confirmations = 0;
+            op.readyAt = 0;
+            op.executed = false;
+            op.exists = false;
+        }
         op.exists = true;
         emit Proposed(id, msg.sender, target, value);
         _confirm(id);
@@ -218,13 +242,24 @@ contract PerihelionTimelock {
         confirmedBy[id][msg.sender] = true;
         op.confirmations += 1;
         emit Confirmed(id, msg.sender, op.confirmations);
-        // Start the timelock the moment the threshold is first reached.
-        // readyAt is set at most once and never overwritten — the clock is
-        // monotonic (issue #283). revokeConfirmation no longer clears readyAt,
-        // so a revoke/re-confirm cycle cannot push the execution window forward.
-        if (op.readyAt == 0 && op.confirmations >= threshold) {
-            op.readyAt = uint64(block.timestamp + delay);
-            emit Ready(id, op.readyAt);
+        // Start the timelock the moment the threshold is first reached by the
+        // *current* owner set (issue #1056). Counting the cached
+        // `op.confirmations` would let a removed owner's confirmation pre-arm
+        // the clock, so the live count is authoritative here just as it is in
+        // `execute`. readyAt is set at most once and never overwritten — the
+        // clock is monotonic (issue #283). revokeConfirmation no longer clears
+        // readyAt, so a revoke/re-confirm cycle cannot push the execution
+        // window forward.
+        if (op.readyAt == 0) {
+            uint256 validConfirmations = 0;
+            uint256 n = _owners.length;
+            for (uint256 i = 0; i < n; i++) {
+                if (confirmedBy[id][_owners[i]]) validConfirmations += 1;
+            }
+            if (validConfirmations >= threshold) {
+                op.readyAt = uint64(block.timestamp + delay);
+                emit Ready(id, op.readyAt);
+            }
         }
     }
 
@@ -314,7 +349,17 @@ contract PerihelionTimelock {
         cancelConfirmations[id] = count;
         emit CancelConfirmed(id, msg.sender, count);
 
-        if (count >= threshold) {
+        // Count only cancel votes from addresses that are owners right now
+        // (issue #1057): a removed owner's cancel vote must not keep counting
+        // towards the threshold. The cached counter is kept for event
+        // emission only; the authoritative check uses the live set.
+        uint256 validCancels = 0;
+        uint256 n = _owners.length;
+        for (uint256 i = 0; i < n; i++) {
+            if (cancelConfirmedBy[id][_owners[i]]) validCancels += 1;
+        }
+
+        if (validCancels >= threshold) {
             // Threshold reached: delete the operation and its cancel state.
             delete operations[id];
             delete cancelConfirmations[id];
@@ -323,7 +368,6 @@ contract PerihelionTimelock {
             // re-proposal of the identical operation reuses the same id, so
             // stale flags would otherwise brick it (AlreadyConfirmed /
             // AlreadyCancelConfirmed) and leave stale cancel votes behind.
-            uint256 n = _owners.length;
             for (uint256 i = 0; i < n; i++) {
                 address o = _owners[i];
                 delete confirmedBy[id][o];
@@ -331,6 +375,20 @@ contract PerihelionTimelock {
             }
             emit Cancelled(id);
         }
+    }
+
+    /// @notice Withdraw a cancel-confirmation before the operation is deleted.
+    ///         Lets an owner who voted to cancel by mistake undo it instead of
+    ///         leaving their vote armed indefinitely (issue #1057).
+    /// @param id Operation id to revoke the cancel vote for.
+    function revokeCancel(bytes32 id) external onlyOwner {
+        Operation storage op = operations[id];
+        if (!op.exists) revert UnknownOperation();
+        if (op.executed) revert AlreadyExecuted();
+        if (!cancelConfirmedBy[id][msg.sender]) revert NotCancelConfirmed();
+        cancelConfirmedBy[id][msg.sender] = false;
+        cancelConfirmations[id] -= 1;
+        emit CancelRevoked(id, msg.sender, cancelConfirmations[id]);
     }
 
     // --- Self-administered configuration -------------------------------------
