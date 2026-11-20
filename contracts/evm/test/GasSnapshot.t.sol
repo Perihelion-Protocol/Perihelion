@@ -136,6 +136,8 @@ contract GasSnapshotTest is Test {
         token.mint(user, 1_000_000);
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 
         vm.deal(solver, 10 ether);
     }

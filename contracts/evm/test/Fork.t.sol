@@ -376,6 +376,7 @@ contract ForkTest is Test {
         vm.warp(readyAt + tl.GRACE_PERIOD() + 1);
         vm.prank(owners[0]); // execute is owner-gated; check the expiry, not NotOwner
         vm.expectRevert(PerihelionTimelock.Expired.selector);
+        vm.prank(owners[0]);
         tl.execute(address(target), 0, data, SALT);
     }
 

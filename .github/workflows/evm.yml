@@ -92,6 +92,10 @@ jobs:
         working-directory: .
         run: make build-evm
 
+      - name: Event spec check
+        working-directory: .
+        run: node scripts/check-event-spec.mjs
+
       - name: Tests
         working-directory: .
         run: make test-evm

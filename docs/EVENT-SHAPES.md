@@ -88,3 +88,24 @@ the period in which a rotation can be observed and contested.
 topic (symbol + topic count) for each renamed event, including all eight
 events from issue #679, so a future rename or drift between the table and the
 code fails a test.
+
+## EVM ignore events (issue #1041)
+
+`PerihelionEscrow` consumes benign late inbound deliveries as no-ops instead of
+reverting, so the LayerZero packet does not stay as a permanently failing payload.
+Each no-op emits an event whose `reason` byte is one of:
+
+| Event               | Reason | Constant                   | Meaning                                                            |
+|---------------------|--------|----------------------------|--------------------------------------------------------------------|
+| `FillConfirmedIgnored` | `0x01` | `IGNORE_UNKNOWN_LOCK`      | No lock exists for `intentHash`.                                   |
+| `FillConfirmedIgnored` | `0x02` | `IGNORE_ALREADY_FINALIZED` | The lock was already released or refunded (e.g. after `cancelExpired`). |
+| `CancelIgnored`     | `0x01` | `IGNORE_UNKNOWN_LOCK`      | No lock exists for `intentHash`.                                   |
+| `CancelIgnored`     | `0x02` | `IGNORE_ALREADY_FINALIZED` | The lock was already released or refunded.                         |
+
+In every case the nonce is consumed by `lzReceive` and no funds move.
+
+Not ignored: a `FillConfirmed` from a non-reserved solver before the deadline
+(`ReservedForSolver`) and a `FillConfirmed` below `minDestAmount` (`UnderDelivered`).
+These are delivery violations, not races, so they still revert and stay visible in the
+failed-message queue. Transport-level problems (endpoint, peer, nonce, malformed payload)
+also still revert.

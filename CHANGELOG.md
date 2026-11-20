@@ -73,6 +73,24 @@ versioned independently.
 - **evm**: removed the unused `SourceChainMismatch` and `RollingWindowCapExceeded`
   errors. CI now fails on custom errors that are declared but never used
   (`scripts/check-unused-errors.mjs`).
+- **evm**: `PerihelionEscrow` and its test suite compile again. A merge had dropped
+  lines from `_pullFunds` and the `_dispatchFillInstruction` header, and the test mocks
+  did not implement the optional ERC-20 metadata methods. A rolling-window cap breach
+  now returns without recording a lock or dispatching a FillInstruction.
+- **evm** (breaking): removed the protocol-wide `maxIntentAmount` and
+  `setMaxIntentAmount`, which were never enforced, and the `MaxIntentAmountSet` event.
+  `setMaxIntentAmountPerAsset` is the only per-intent cap. A zero value leaves the asset
+  unconfigured, so `lock` reverts with `AssetCapNotConfigured`; the documented global
+  fallback never existed.
+- **evm** (breaking): removed `setRollingWindowCap`, the `rollingWindowCap` getter and the
+  `RollingWindowCapSet` event. The setter wrote a value that enforcement never read and
+  changed every asset's window duration.
+- **evm**: a `FillConfirmed` for an unknown lock, or for a lock already released or
+  refunded (for example after `cancelExpired`), is consumed as a no-op and emits
+  `FillConfirmedIgnored` instead of reverting. The packet no longer stays as a
+  permanently failing payload. `ReservedForSolver` and `UnderDelivered` still revert.
+- **evm**: the event spec table in `PerihelionEscrow.sol` matches the ABI again (six events
+  were missing). `make event-spec-check` runs in the EVM CI job and fails on drift.
 - **sdk**: `ESCROW_ABI` had drifted from `PerihelionEscrow.sol` — it declared a
   non-existent `getLock` function and a `PausedError` error.
   `PerihelionEscrowClient.getLock` now reads the contract's `locks(bytes32)`

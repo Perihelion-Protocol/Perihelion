@@ -23,7 +23,7 @@
         coverage coverage-ts coverage-soroban coverage-evm \
         gas                                    \
         audit audit-ts audit-evm audit-rust    \
-        bytecode-check sdk-abi sdk-abi-check   \
+        bytecode-check sdk-abi sdk-abi-check event-spec-check \
         clean                                  \
         fuzz fuzz-bounded fuzz-extended fuzz-nightly \
         fuzz-evm fuzz-rust fuzz-cross          \
@@ -265,6 +265,11 @@ sdk-abi-check: ## Fail if sdk/src/escrow-abi.ts differs from the PerihelionEscro
 	@echo "▶ sdk-abi-check"
 	cd contracts/evm && forge build --skip test --skip script
 	node scripts/gen-escrow-abi.mjs --check
+
+event-spec-check: ## Fail if the EVM event spec table in PerihelionEscrow.sol drifts from the ABI
+	@echo "▶ event-spec-check"
+	cd contracts/evm && forge build --skip test --skip script
+	node scripts/check-event-spec.mjs
 
 audit-rust: ## cargo-deny policy check for the Soroban workspace (advisories, licences, bans, sources)
 	@echo "▶ audit-rust"

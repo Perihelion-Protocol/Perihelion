@@ -52,27 +52,31 @@ interface IERC1271 {
 ///      topic column is the exact symbol the Soroban contract emits for the
 ///      analogous event (full names, never abbreviated; see
 ///      `docs/EVENT-SHAPES.md`). "-" means there is no Soroban analogue.
+///      The table is checked against the compiled ABI by `make event-spec-check`
+///      (scripts/check-event-spec.mjs); CI fails on any drift.
 ///
-///      | Event                  | Topics                                              | Data                                                          | Soroban topic                  |
-///      |------------------------|-----------------------------------------------------|---------------------------------------------------------------|--------------------------------|
-///      | Locked                 | intentHash, solver, user                             | asset, amount, destination, destAsset, minDestAmount, deadline| `registered`                   |
-///      | Released               | intentHash, solver                                  | amount, fillAmount, fillLedger | `filled`                       |
-///      | Refunded               | intentHash, user                                    | amount, reason                | `cancelled`                    |
-///      | RefundedLocalTimeout   | intentHash, user                                    | amount                        | -                              |
-///      | PeerSet                | -                                                   | peer                          | `peer_set`                     |
-///      | EnforcedOptionsSet     | -                                                   | options                       | -                              |
-///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  | -                              |
-///      | GuardianSet            | guardian                                            | -                             | -                              |
-///      | PausedSet              | -                                                   | paused                        | `paused_set`                   |
-///      | OwnershipTransferStart | previousOwner, newOwner                             | -                             | `admin_transfer_started`       |
-///      | OwnershipTransferred   | previousOwner, newOwner                             | -                             | `admin_transfer_completed`     |
-///      | OwnershipTransferCancel| previousOwner                                       | -                             | -                              |
-///      | IntentRevoked          | intentHash, user                                    | -                             | -                              |
-///      | Skimmed                | token, to                                           | amount                        | -                              |
-///      | MaxIntentAmountSet     | -                                                   | maxAmount                     | `max_intent_amount_set`        |
-///      | RollingWindowCapSet    | -                                                   | duration, cap                 | `rolling_window_cap_set`       |
-///      | RollingWindowCapTriggered | windowStart                                      | accumulated                   | `rolling_window_cap_triggered` |
-///      | RollingWindowCapReset  | -                                                   | -                             | `rolling_window_cap_reset`     |
+///      | Event                       | Topics                   | Data                                                           | Soroban topic                  |
+///      |-----------------------------|--------------------------|----------------------------------------------------------------|--------------------------------|
+///      | Locked                      | intentHash, solver, user | asset, amount, destination, destAsset, minDestAmount, deadline | `registered`                   |
+///      | Released                    | intentHash, solver       | amount, fillAmount, fillLedger, minDestAmount                  | `filled`                       |
+///      | Refunded                    | intentHash, user         | amount, reason                                                 | `cancelled`                    |
+///      | RefundedLocalTimeout        | intentHash, user         | amount                                                         | -                              |
+///      | FillConfirmedIgnored        | intentHash               | reason                                                         | -                              |
+///      | CancelIgnored               | intentHash               | reason                                                         | `cancel_ignored`               |
+///      | PeerSet                     | -                        | peer                                                           | `peer_set`                     |
+///      | ConfirmationGraceSet        | -                        | secondsGrace                                                   | -                              |
+///      | GuardianSet                 | guardian                 | -                                                              | -                              |
+///      | PausedSet                   | -                        | paused                                                         | `paused_set`                   |
+///      | OwnershipTransferStarted    | previousOwner, newOwner  | -                                                              | `admin_transfer_started`       |
+///      | OwnershipTransferred        | previousOwner, newOwner  | -                                                              | `admin_transfer_completed`     |
+///      | OwnershipTransferCancelled  | previousOwner            | -                                                              | -                              |
+///      | Skimmed                     | token, to                | amount                                                         | -                              |
+///      | NativeSkimmed               | to                       | amount                                                         | -                              |
+///      | AssetAllowed                | asset                    | allowed                                                        | -                              |
+///      | MaxIntentAmountPerAssetSet  | asset                    | maxAmount                                                      | -                              |
+///      | RollingWindowCapPerAssetSet | asset                    | duration, cap                                                  | -                              |
+///      | RollingWindowCapTriggered   | -                        | windowStart, accumulated                                       | `rolling_window_cap_triggered` |
+///      | RollingWindowCapReset       | -                        | -                                                              | `rolling_window_cap_reset`     |
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
@@ -247,21 +251,16 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice Mapping of allowed source assets. Only assets in this allowlist can be locked.
     mapping(address => bool) public assetAllowed;
-    /// @notice Mapping of per-asset maximum lock amounts. Every allowlisted asset
-    ///         must have an explicit non-zero entry before it can be locked.
+    /// @notice Per-intent maximum lock amount for each asset (the only per-intent cap on EVM).
+    ///         Every allowlisted asset must have an explicit non-zero entry before it can be locked.
     mapping(address => uint256) public maxIntentAmountPerAsset;
 
     // --- Value caps (issue #145) -----------------------------------------------
 
-    /// @notice Maximum amount a single intent can lock. Zero means unlimited.
-    ///         Enforced at lock time. Timelock-governed.
-    uint256 public maxIntentAmount;
     /// @notice Time window (in seconds) for rolling throughput cap. Zero means disabled.
     uint256 public rollingWindowDuration;
-    /// @notice Deprecated protocol-wide value retained for ABI compatibility.
-    ///         Enforcement uses rollingWindowCapPerAsset instead.
-    uint256 public rollingWindowCap;
-    /// @notice Maximum rolling-window amount for each allowlisted asset.
+    /// @notice Maximum rolling-window amount for each allowlisted asset. This is the only
+    ///         rolling-window cap; there is no protocol-wide cap.
     mapping(address => uint256) public rollingWindowCapPerAsset;
     /// @notice Whether the rolling-window cap has been triggered (exceeded).
     ///         When true, new locks are paused until the admin resets this flag.
@@ -372,8 +371,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event OwnershipTransferCancelled(address indexed previousOwner);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
     event NativeSkimmed(address indexed to, uint256 amount);
-    event MaxIntentAmountSet(uint256 maxAmount);
-    event RollingWindowCapSet(uint256 duration, uint256 cap);
     event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
     event RollingWindowCapReset();
     event RollingWindowCapPerAssetSet(address indexed asset, uint256 duration, uint256 cap);
@@ -641,7 +638,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      be allowlisted, so governance cannot pre-stage caps for assets that
     ///      were never vetted. Reverts with {AssetNotAllowed} otherwise.
     /// @param asset Address of the ERC-20 token.
-    /// @param maxAmount Maximum lock amount for this asset, or 0 to use global cap.
+    /// @param maxAmount Maximum lock amount for this asset, in the token's native units.
     function setMaxIntentAmountPerAsset(address asset, uint256 maxAmount) external onlyOwner {
         if (!assetAllowed[asset]) revert AssetNotAllowed();
         maxIntentAmountPerAsset[asset] = maxAmount;
@@ -650,29 +647,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Value caps (issue #145) -----------------------------------------------
 
-    /// @notice Set the maximum amount a single intent can lock. Owner-only.
-    ///         Zero means unlimited. Starts conservative; raised as confidence grows.
-    /// @param maxAmount Maximum lock amount (in token's native units), or 0 for unlimited.
-    function setMaxIntentAmount(uint256 maxAmount) external onlyOwner {
-        maxIntentAmount = maxAmount;
-        emit MaxIntentAmountSet(maxAmount);
-    }
-
-    /// @notice Set the rolling-window aggregate throughput cap. Owner-only.
+    /// @notice Set the rolling-window cap for one allowlisted asset. Owner-only.
     ///         When exceeded, new locks are paused until the admin manually resets.
     ///         Existing in-flight settlement still completes (caps gate only new locks).
-    /// @param _windowDuration Duration of each rolling window in seconds (e.g., 1 day).
-    ///                        Zero disables the rolling-window cap.
-    /// @param _cap Maximum aggregate locked amount within each window (in token's native units).
-    ///             Zero means unlimited. Ignored if windowDuration is zero.
-    function setRollingWindowCap(uint256 _windowDuration, uint256 _cap) external onlyOwner {
-        if (_cap > 0 && _windowDuration == 0) revert InvalidDuration();
-        if (_windowDuration > block.timestamp) revert InvalidDuration();
-        rollingWindowDuration = _windowDuration;
-        rollingWindowCap = _cap;
-        emit RollingWindowCapSet(_windowDuration, _cap);
-    }
-    /// @notice Set the rolling-window cap for one allowlisted asset.
+    ///         The protocol-wide `setRollingWindowCap` was removed: it set no enforced cap.
     ///         Window accounting is isolated by asset; amounts from another
     ///         token can never consume this asset's bucket.
     /// @dev Shared precondition with {setMaxIntentAmountPerAsset}: the asset must
