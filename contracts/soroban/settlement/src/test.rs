@@ -1157,13 +1157,57 @@ fn accept_admin_rejects_when_no_pending() {
 fn admin_handover_can_be_cancelled_by_current_admin() {
     let s = setup();
     let nominee = Address::generate(&s.env);
-    let cancel_addr = Address::generate(&s.env); // any address
-                                                 // Nominate
+    // Nominate
     s.client.set_admin(&nominee);
-    // Cancel by overwriting with a different pending nominee
-    s.client.set_admin(&cancel_addr);
-    // accept_admin would now promote cancel_addr, not nominee.
-    // In tests we just verify the second set_admin doesn't panic.
+    // Issue #1073: a mistaken nomination is cancelled explicitly rather than
+    // silently overwritten by a second `set_admin`.
+    s.client.cancel_admin_transfer();
+    // The nomination is gone, so accepting must fail.
+    assert_eq!(
+        s.client.try_accept_admin(),
+        Err(Ok(PerihelionError::NotPendingAdmin))
+    );
+}
+
+// --- Issue #1073: pending admin hand-over can be cancelled -------------------
+
+#[test]
+fn cancel_admin_transfer_clears_pending_and_emits_event() {
+    let s = setup();
+    let nominee = Address::generate(&s.env);
+    s.client.set_admin(&nominee);
+
+    s.client.cancel_admin_transfer();
+
+    let events = s.env.events().all();
+    assert_event_with_symbol(&s.env, &events, "admin_transfer_cancelled", 1);
+
+    // The nominee can no longer accept.
+    assert_eq!(
+        s.client.try_accept_admin(),
+        Err(Ok(PerihelionError::NotPendingAdmin))
+    );
+    // And the current admin is still in control.
+    s.client.set_paused(&false);
+}
+
+#[test]
+fn cancel_admin_transfer_rejects_when_nothing_pending() {
+    let s = setup();
+    assert_eq!(
+        s.client.try_cancel_admin_transfer(),
+        Err(Ok(PerihelionError::NotPendingAdmin))
+    );
+}
+
+#[test]
+fn set_admin_rejects_current_admin() {
+    let s = setup();
+    let current = s.client.admin();
+    assert_eq!(
+        s.client.try_set_admin(&current),
+        Err(Ok(PerihelionError::InvalidAmount))
+    );
 }
 
 #[test]
@@ -1242,6 +1286,82 @@ fn peer_governance_cancel_clears_pending() {
         li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
     });
     assert!(s.client.try_confirm_peer(&s.src_eid).is_err());
+}
+
+// --- Issue #1071: expired proposals are cleared, not rolled back ------------
+
+#[test]
+fn expired_peer_proposal_confirm_returns_ok_and_emits_event() {
+    let s = setup();
+    let stale_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
+    s.client
+        .propose_peer(&s.src_eid, &stale_peer, &MIN_PEER_CHANGE_DELAY);
+
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE + 1;
+    });
+
+    // Expiry must commit its cleanup, so the call returns Ok rather than Err.
+    assert!(s.client.try_confirm_peer(&s.src_eid).is_ok());
+
+    let events = s.env.events().all();
+    assert_event_with_symbol(&s.env, &events, "peer_change_expired", 1);
+
+    // The pending entry is gone and the trusted peer is unchanged.
+    assert!(matches!(
+        s.client.try_get_pending_peer(&s.src_eid),
+        Ok(Ok(None))
+    ));
+    assert_eq!(s.client.get_peer(&s.src_eid), Some(s.peer.clone()));
+}
+
+#[test]
+fn expired_endpoint_proposal_confirm_returns_ok_and_emits_event() {
+    let s = setup();
+    let original = s.client.endpoint();
+    let stale_ep = Address::generate(&s.env);
+    s.client.propose_endpoint(&stale_ep);
+
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE + 1;
+    });
+
+    assert!(s.client.try_confirm_endpoint().is_ok());
+
+    let events = s.env.events().all();
+    assert_event_with_symbol(&s.env, &events, "endpoint_change_expired", 1);
+
+    assert!(matches!(
+        s.client.try_get_pending_endpoint(),
+        Ok(Ok(None))
+    ));
+    assert_eq!(s.client.endpoint(), original);
+
+    // A fresh proposal succeeds without a manual cancel.
+    let fresh_ep = Address::generate(&s.env);
+    assert!(s.client.try_propose_endpoint(&fresh_ep).is_ok());
+}
+
+#[test]
+fn expired_peer_proposal_allows_new_proposal_without_cancel() {
+    let s = setup();
+    let stale_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
+    let corrected_peer = BytesN::from_array(&s.env, &[0xFE; 32]);
+    s.client
+        .propose_peer(&s.src_eid, &stale_peer, &MIN_PEER_CHANGE_DELAY);
+
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE + 1;
+    });
+    assert!(s.client.try_confirm_peer(&s.src_eid).is_ok());
+
+    // No cancel_pending_peer call: the expired entry must already be gone.
+    assert!(
+        s.client
+            .try_propose_peer(&s.src_eid, &corrected_peer, &MIN_PEER_CHANGE_DELAY)
+            .is_ok(),
+        "a corrected peer must be proposable immediately after an expired proposal"
+    );
 }
 
 #[test]
@@ -3427,10 +3547,9 @@ fn expired_peer_proposal_is_cleared_and_allows_new_proposal() {
     s.env.ledger().with_mut(|li| {
         li.timestamp += MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE + 1;
     });
-    // The confirm attempt must not leave the stale proposal behind. An `Err`
-    // return would roll back the cleanup, so the pending entry has to be gone
-    // on its own merits.
-    let _ = s.client.try_confirm_peer(&s.src_eid);
+    // Issue #1071: expiry commits its cleanup and returns Ok, so the pending
+    // entry is gone on its own merits rather than being rolled back.
+    assert!(s.client.try_confirm_peer(&s.src_eid).is_ok());
 
     assert!(matches!(
         s.client.try_get_pending_peer(&s.src_eid),
@@ -3794,6 +3913,213 @@ fn expected_ewma(samples: &[u64]) -> u64 {
         });
     }
     ewma.unwrap()
+}
+
+// --- Issue #1072: guardian emergency pause -----------------------------------
+
+#[test]
+fn set_guardian_emits_event() {
+    let s = setup();
+    let guardian = Address::generate(&s.env);
+    s.client.set_guardian(&guardian);
+
+    let events = s.env.events().all();
+    assert_event_with_symbol(&s.env, &events, "guardian_set", 1);
+    assert_eq!(s.client.guardian(), Some(guardian));
+}
+
+#[test]
+fn guardian_can_pause() {
+    let s = setup();
+    let guardian = Address::generate(&s.env);
+    s.client.set_guardian(&guardian);
+
+    s.client.guardian_pause();
+
+    assert!(s.client.is_paused());
+    let events = s.env.events().all();
+    assert_event_with_symbol(&s.env, &events, "paused_set", 1);
+}
+
+#[test]
+fn guardian_pause_auto_expires_after_ttl() {
+    let s = setup();
+    let guardian = Address::generate(&s.env);
+    s.client.set_guardian(&guardian);
+
+    s.client.guardian_pause();
+    assert!(s.client.is_paused());
+
+    // Still paused just before the TTL lapses.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += GUARDIAN_PAUSE_TTL - 1;
+    });
+    assert!(s.client.is_paused());
+
+    // The pause lapses on its own once the TTL elapses.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += 2;
+    });
+    assert!(!s.client.is_paused());
+}
+
+#[test]
+fn guardian_pause_enforces_cooldown() {
+    let s = setup();
+    let guardian = Address::generate(&s.env);
+    s.client.set_guardian(&guardian);
+
+    s.client.guardian_pause();
+    // Let the pause lapse.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += GUARDIAN_PAUSE_TTL + 1;
+    });
+    assert!(!s.client.is_paused());
+
+    // A second pause inside the cooldown window is rejected.
+    assert_eq!(
+        s.client.try_guardian_pause(),
+        Err(Ok(PerihelionError::GuardianCooldown))
+    );
+
+    // After the cooldown it is accepted again.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += GUARDIAN_PAUSE_COOLDOWN;
+    });
+    assert!(s.client.try_guardian_pause().is_ok());
+    assert!(s.client.is_paused());
+}
+
+#[test]
+fn guardian_cannot_unpause() {
+    let s = setup();
+    let guardian = Address::generate(&s.env);
+    s.client.set_guardian(&guardian);
+    s.client.guardian_pause();
+
+    // Unpausing is admin-only; the guardian has no such entrypoint.
+    s.client.set_paused(&false);
+    assert!(!s.client.is_paused());
+}
+
+#[test]
+fn guardian_cannot_change_config() {
+    let s = setup();
+    let guardian = Address::generate(&s.env);
+    s.client.set_guardian(&guardian);
+
+    // The guardian has no config entrypoints; every config setter still
+    // requires the admin's authorization.
+    s.env.set_auths(&[]);
+    assert!(s.client.try_set_paused(&true).is_err());
+    assert!(s.client.try_set_endpoint(&Address::generate(&s.env)).is_err());
+    assert!(s.client.try_set_guardian(&guardian).is_err());
+}
+
+#[test]
+fn guardian_pause_rejects_when_no_guardian_configured() {
+    let s = setup();
+    assert_eq!(
+        s.client.try_guardian_pause(),
+        Err(Ok(PerihelionError::NoGuardian))
+    );
+}
+
+// --- Issue #1074: allowlist and per-eid pause flags live in persistent storage
+
+#[test]
+fn set_paused_eid_false_removes_the_key() {
+    let s = setup();
+    s.client.set_paused_eid(&s.src_eid, &true);
+    assert!(s.client.is_paused_eid(&s.src_eid));
+
+    s.client.set_paused_eid(&s.src_eid, &false);
+    assert!(!s.client.is_paused_eid(&s.src_eid));
+
+    // The flag is removed rather than stored as `false`, so instance storage
+    // does not accumulate one entry per eid ever paused.
+    let present = s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .has(&DataKey::PausedEid(s.src_eid))
+    });
+    assert!(!present, "PausedEid key must be removed, not set to false");
+}
+
+#[test]
+fn dest_token_allowlist_uses_persistent_storage() {
+    let s = setup();
+    let token_id = Address::generate(&s.env);
+    s.client.set_dest_token_allowed(&token_id, &true);
+
+    let in_instance = s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .has(&DataKey::AllowedDestToken(token_id.clone()))
+    });
+    assert!(
+        !in_instance,
+        "AllowedDestToken must not live in instance storage"
+    );
+
+    let in_persistent = s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .persistent()
+            .has(&DataKey::AllowedDestToken(token_id.clone()))
+    });
+    assert!(
+        in_persistent,
+        "AllowedDestToken must live in persistent storage"
+    );
+    assert!(s.client.is_dest_token_allowed(&token_id));
+}
+
+#[test]
+fn allowlist_size_does_not_grow_invocation_cost() {
+    let baselines = load_resource_baselines();
+    let threshold = baselines
+        .entrypoints
+        .get("lz_receive")
+        .expect("lz_receive baseline missing");
+
+    let measure = |allowlisted: u32| -> (u64, u64) {
+        let s = setup();
+        for i in 0..allowlisted {
+            let token_id = Address::generate(&s.env);
+            s.client.set_dest_token_allowed(&token_id, &true);
+            let _ = i;
+        }
+        let recipient = Address::generate(&s.env);
+        let h = hash(&s.env, 0xA0);
+        measure_entrypoint_budget(&s, |s| {
+            register_intent(s, &h, &recipient, 100_000, 5_000, 1, None);
+        })
+    };
+
+    let (cpu_small, mem_small) = measure(1);
+    let (cpu_large, mem_large) = measure(32);
+
+    // Instance storage is billed on every invocation, so a growing allowlist
+    // would make `lz_receive` steadily more expensive. Persistent per-token
+    // entries keep the cost flat.
+    assert!(
+        cpu_large <= cpu_small.saturating_mul(2),
+        "lz_receive CPU grew with allowlist size: {cpu_small} -> {cpu_large}"
+    );
+    assert!(
+        mem_large <= mem_small.saturating_mul(2),
+        "lz_receive memory grew with allowlist size: {mem_small} -> {mem_large}"
+    );
+    assert_budget_within(
+        "lz_receive",
+        cpu_large,
+        mem_large,
+        threshold,
+        baselines.tolerance_percent,
+    );
 }
 
 // --- Contract-native destination assets ---------------------------------------

@@ -34,6 +34,20 @@ pub enum DataKey {
     PendingAdmin,
     Endpoint,
     Paused,
+    /// Hot guardian address permitted to pause the contract (issue #1072).
+    /// Mirrors the EVM escrow's `guardian`: it can only pause, never unpause
+    /// or change configuration. Settable by admin only.
+    Guardian,
+    /// Ledger timestamp at which a guardian-initiated pause auto-expires
+    /// (issue #1072). Zero when the pause was not initiated by the guardian
+    /// (or when the contract is unpaused). Enforced on every state-changing
+    /// entry point so a compromised guardian cannot halt the contract
+    /// indefinitely.
+    GuardianPauseExpiry,
+    /// Ledger timestamp of the last guardian-initiated pause (issue #1072).
+    /// Used to enforce the cooldown between consecutive guardian pauses,
+    /// matching the EVM escrow semantics.
+    GuardianLastPauseAt,
     /// Trusted remote OApp (the EVM escrow) per source endpoint id.
     Peer(u32),
     /// Pending peer change proposed by admin, awaiting approval after delay.
@@ -48,6 +62,10 @@ pub enum DataKey {
     /// Per-corridor pause flag. When set for an eid, all inbound and outbound
     /// operations for that corridor are blocked independently of the global flag.
     /// Allows quarantining a single compromised chain without halting others.
+    ///
+    /// Persistent tier (issue #1074): kept out of instance storage so the
+    /// instance entry stays fixed-size. The key is removed on unpause rather
+    /// than written as `false`, and its TTL is extended on every write.
     PausedEid(u32),
     /// Native token (SAC) address for the settlement network (Testnet, Futurenet, or Pubnet).
     /// Required to pay keeper rewards. Issue #173.
@@ -84,10 +102,14 @@ pub enum DataKey {
     /// Latest memoized window start timestamp (for efficiency).
     LatestWindowStart,
 
-    // Instance tier (destination assets).
+    // Persistent tier (destination assets, issue #1074).
     /// Contract-native (SEP-41) token allowed as a `C...` `dest_asset`. Present
     /// (as `true`) iff the admin allowlisted it. `native` and `CODE:ISSUER`
     /// identifiers resolve without an entry; see `asset.rs`.
+    ///
+    /// Persistent tier (issue #1074): the allowlist is unbounded, so keeping
+    /// it in instance storage would grow the entry read on every invocation.
+    /// Entries are written with TTL management and removed on de-allowlisting.
     AllowedDestToken(Address),
 
     // Persistent tier (per-intent lifecycle).

@@ -36,11 +36,28 @@ incident response and must be executed under pressure with discipline.
 | **GuardianKeyCompromise** | Unauthorized pause + unpause cycle; unexplained guardian tx | **P0** | Immediate page + incident commander; start runbook #4 |
 | **ValueDivergence** | Reconciliation detects locked EVM ≠ settled Stellar | **P1** | Page oncall; start runbook #6 |
 
+### Roles: guardian vs. admin (both chains)
+
+Both the EVM escrow and the Soroban settlement contract expose the same two-tier
+incident-response model:
+
+| Role | EVM escrow | Soroban settlement | Powers |
+|------|-----------|--------------------|--------|
+| **Guardian** (hot key) | `guardian` | `guardian` | `pause()` only, auto-expiring after a TTL, rate-limited by a cooldown |
+| **Admin / owner** (slow key: timelock / multisig) | `owner` (timelock) | `admin` | Unpause, config changes (peers, endpoints, guardian), admin hand-over |
+
+The guardian exists so that a fast, single-key response is possible without
+putting every privileged operation on a hot key. The guardian **cannot** unpause
+or change any configuration; those remain admin-only on both chains. Soroban
+guardian pauses use the same TTL and cooldown semantics as the EVM escrow, so
+runbooks below apply identically to both chains.
+
 ### Equipment checklist
 
 Before any on-call shift, verify:
 
 - [ ] Access to all admin keys (encrypted in vault, not in Slack / email)
+- [ ] Access to the guardian key (HSM-backed; pause-only, hot)
 - [ ] Access to EVM timelock dashboard (e.g., Etherscan interface with custom UI)
 - [ ] Access to Stellar CLI and account operations
 - [ ] Access to monitoring dashboards (Grafana, alerting, logs)
@@ -350,9 +367,10 @@ double-settlement if the intent is re-locked after reorg recovery.
    # EVM: owner-controlled pause (requires timelock)
    # If this is a critical reorg, prepare emergency governance call
    
-   # Soroban: admin-controlled immediate pause
+   # Soroban: guardian can pause instantly (auto-expires after TTL);
+   # admin can also pause via set_paused
    stellar contract invoke --id <settlement-contract> \
-     -- set_paused --paused true
+     -- pause --guardian <guardian-address>
    ```
 
 2. **Post status to users:**
@@ -430,10 +448,13 @@ double-settlement if the intent is re-locked after reorg recovery.
 
 ### Scenario
 
-The EVM guardian key (used only for `pause()`) is compromised. An attacker
-repeatedly pauses and unpauses the protocol, creating a denial-of-service state
-where the protocol is locked indefinitely. Funds are NOT at risk (pause does not
-affect in-flight settlement or unpause capability), but liveness is destroyed.
+The guardian key (used only for `pause()`) is compromised on either chain — the
+EVM escrow `guardian` or the Soroban settlement `guardian`. An attacker
+repeatedly pauses the protocol, creating a denial-of-service state. Funds are NOT
+at risk (pause does not affect in-flight settlement, and only the admin can
+unpause or change config), but liveness is degraded. On both chains the guardian
+pause auto-expires after a TTL and is rate-limited by a cooldown, which bounds
+the damage an attacker can do before the key is rotated.
 
 ### Detection
 
@@ -469,25 +490,35 @@ affect in-flight settlement or unpause capability), but liveness is destroyed.
 **CRITICAL: Do NOT waste time on investigation. Rotate the key immediately.**
 
 1. **Revoke the compromised guardian immediately:**
-   - The owner (timelock) must call `setGuardian(address(0))` to clear the
-     guardian slot
-   - This requires a timelock proposal (prepare immediately)
+   - The admin/owner must clear the guardian slot on the affected chain(s)
+   - EVM: owner (timelock) calls `setGuardian(address(0))` via a timelock
+     proposal (prepare immediately)
+   - Soroban: admin calls `set_guardian` with the new address (admin-only;
+     emits a guardian-set event)
    ```bash
-   # Owner (timelock) action:
+   # EVM owner (timelock) action:
    stellar multisig propose \
      --operation "setGuardian(address(0))" \
      --contract <escrow>
    # Wait for M-of-N threshold of approvals, then execute after delay
+
+   # Soroban admin action (immediate):
+   stellar contract invoke --id <settlement-contract> \
+     -- set_guardian --guardian <new-guardian-address>
    ```
 
 2. **Spin up a new guardian key:**
    - Generate a new key in hardware wallet or hardware security module
    - Store securely (encrypted vault, not Slack/email/notes)
 
-3. **After timelock clears the old guardian, set the new one:**
+3. **After the old guardian is cleared, set the new one:**
    ```bash
-   # Owner action (after M-of-N + delay):
+   # EVM owner action (after M-of-N + delay):
    stellar multisig execute --operation "setGuardian(<new-key>)"
+
+   # Soroban admin action:
+   stellar contract invoke --id <settlement-contract> \
+     -- set_guardian --guardian <new-guardian-address>
    ```
 
 4. **Notify the team:**
@@ -514,11 +545,18 @@ While the key rotation is underway in parallel:
    ```bash
    cast call <escrow> "guardian()" --rpc-url $EVM_RPC
    # Should return the new guardian address
+
+   stellar contract invoke --id <settlement-contract> \
+     -- get_guardian
+   # Should return the new guardian address
    ```
 
 2. **Test the new guardian (in testnet first):**
-   - Call `pause()` from the new key to confirm it works
-   - Call `unpause()` from the owner to confirm recovery works
+   - Call `pause()` from the new key to confirm it works (and that the pause
+     auto-expires after the TTL)
+   - Confirm a second immediate `pause()` is rejected by the cooldown
+   - Call `unpause()` from the owner/admin to confirm recovery works (the
+     guardian cannot unpause)
 
 3. **Resume normal operations:**
    - No protocol pause is needed
@@ -583,10 +621,10 @@ settlement integrity.
 
 1. **Pause the protocol immediately (both chains):**
    ```bash
-   # EVM: owner-controlled pause (requires timelock)
-   # Soroban: admin-controlled immediate pause
+   # EVM: guardian emergency pause (instant, auto-expires) or owner via timelock
+   # Soroban: guardian emergency pause (instant, auto-expires) or admin
    stellar contract invoke --id <settlement-contract> \
-     -- set_paused --paused true
+     -- pause --guardian <guardian-address>
    ```
 
 2. **Alert users:**
@@ -602,6 +640,14 @@ settlement integrity.
    # EVM: owner-controlled (requires timelock)
    # Prepare governance call
    ```
+
+   **Note on pending proposals:** peer and endpoint changes go through a
+   propose/confirm flow with a grace window. If a proposal is left unconfirmed
+   past its grace window, the Soroban contract now clears it automatically on the
+   next `confirm_peer` / `confirm_endpoint` call and emits a
+   `peer_change_expired` event — no manual `cancel_pending_peer` is required, and
+   a new proposal can be made immediately. Watch for `peer_change_expired` in
+   logs; it indicates an operator missed the confirmation window.
 
 **If the peer was only slightly wrong (typo in address, not attacker-controlled):**
 - Proceed to correction without pausing (users are not at risk)
@@ -726,14 +772,17 @@ This is a **P0 incident requiring immediate incident commander escalation.**
    # EVM: owner-controlled pause (requires timelock OR guardian emergency pause)
    # If timelock is too slow, guardian can pause for up to 72 hours
    
-   # Soroban: admin-controlled immediate pause
+   # Soroban: guardian emergency pause (instant, auto-expires after TTL) or admin
    stellar contract invoke --id <settlement-contract> \
-     -- set_paused --paused true
+     -- pause --guardian <guardian-address>
    ```
 
 2. **Freeze all admin keys:**
    - Do NOT allow any peer/endpoint/guardian changes until root cause identified
    - Lock governance to prevent further config changes
+   - If an admin hand-over is in flight on Soroban and should not complete, the
+     admin can call `cancel_admin_transfer` (emits `admin_transfer_cancelled`)
+     to abort it; this is distinct from starting a new transfer
 
 3. **Notify users immediately:**
    - "Perihelion settlement is paused due to a suspected security incident. All
@@ -877,7 +926,9 @@ Run incident drills quarterly:
 **To invoke the controls mentioned in this runbook, see:**
 
 - [Deployment & Operations Runbook](./deployment.md) — pause/unpause procedures,
-  timelock operations, key rotation
+  timelock operations, key rotation, guardian setup (`set_guardian` on Soroban,
+  `setGuardian` on EVM), and admin hand-over (`set_admin` / `accept_admin` /
+  `cancel_admin_transfer` on Soroban)
 - [Threat Model](./threat-model.md) — role definitions, compromise scenarios,
   bounding mechanisms
 - [Relayer Runbook](./relayer-runbook.md) — relayer restart, cursor recovery,
@@ -900,6 +951,7 @@ Run incident drills quarterly:
 
 ---
 
-**Last updated:** July 2026  
+**Last updated:** July 2026 (Soroban guardian role, automatic expiry of pending
+peer/endpoint proposals, cancellable admin transfers)  
 **Owned by:** Perihelion Operations Team  
 **Review cadence:** Quarterly
