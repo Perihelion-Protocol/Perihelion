@@ -257,19 +257,19 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Value caps (issue #145) -----------------------------------------------
 
-    /// @notice Time window (in seconds) for rolling throughput cap. Zero means disabled.
-    uint256 public rollingWindowDuration;
-    /// @notice Maximum rolling-window amount for each allowlisted asset. This is the only
-    ///         rolling-window cap; there is no protocol-wide cap.
+    /// @notice Rolling-window length in seconds for each allowlisted asset. Zero disables
+    ///         that asset's rolling cap. Per-asset, so configuring one asset can never
+    ///         re-bucket or disable another asset's window (#1037).
+    mapping(address => uint256) public rollingWindowDurationPerAsset;
+    /// @notice Maximum rolling-window amount for each allowlisted asset.
     mapping(address => uint256) public rollingWindowCapPerAsset;
-    /// @notice Whether the rolling-window cap has been triggered (exceeded).
-    ///         When true, new locks are paused until the admin resets this flag.
-    bool public rollingWindowTriggered;
-    /// @notice Asset whose rolling-window breach engaged the breaker.
-    address public rollingWindowTriggeredAsset;
-    /// @notice Earliest timestamp at which rollingWindowTriggered may be reset.
+    /// @notice Per-asset breaker latch. Once an asset's rolling-window cap is exceeded,
+    ///         new locks of that asset revert until the owner resets it. Other assets are
+    ///         unaffected; a protocol-wide halt is {pause} (#1038).
+    mapping(address => bool) public rollingWindowTriggered;
+    /// @notice Per-asset earliest timestamp at which that asset's latch may be reset.
     ///         Prevents spam-resetting the cap within the same window.
-    uint256 public rollingWindowResetEarliestAt;
+    mapping(address => uint256) public rollingWindowResetEarliestAt;
 
     // --- State ---------------------------------------------------------------
 
@@ -371,8 +371,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event OwnershipTransferCancelled(address indexed previousOwner);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
     event NativeSkimmed(address indexed to, uint256 amount);
-    event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
-    event RollingWindowCapReset();
+    event RollingWindowCapTriggered(
+        address indexed asset, uint256 windowStart, uint256 accumulated
+    );
+    event RollingWindowCapReset(address indexed asset);
     event RollingWindowCapPerAssetSet(address indexed asset, uint256 duration, uint256 cap);
     event FillConfirmedIgnored(bytes32 indexed intentHash, uint8 reason);
     event CancelIgnored(bytes32 indexed intentHash, uint8 reason);
@@ -436,6 +438,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error ExceedsMaxIntentAmount();
     error RollingWindowCapAlreadyTriggered();
     error RollingWindowNotYetResettable();
+    /// @dev {resetRollingWindowCap} called for an asset whose breaker is not latched.
+    error RollingWindowNotTriggered();
     error InvalidDuration();
     error NativeTransferFailed();
     /// @dev skim() would draw into funds locked by active intents.
@@ -559,6 +563,18 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         emit GuardianSet(newGuardian);
     }
 
+    /// @notice Rotate the LayerZero endpoint delegate: the address that controls this
+    ///         OApp's security configuration (DVNs, libraries, skip/clear/nilify of
+    ///         inbound packets). The constructor sets it to the deployer, and ownership
+    ///         transfer does not move it, so the deployment runbook must call this to
+    ///         hand the delegate to the timelock (#1036). Owner-only.
+    /// @param newDelegate Address to become the endpoint delegate; must be non-zero.
+    function setDelegate(address newDelegate) external onlyOwner {
+        if (newDelegate == address(0)) revert ZeroAddress();
+        endpoint.setDelegate(newDelegate);
+        emit DelegateSet(newDelegate);
+    }
+
     /// @notice Emergency halt / resume. Blocks new locks only; local `cancelExpired`
     ///         refunds and inbound settlement remain available so in-flight funds
     ///         still resolve.
@@ -620,11 +636,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (!allowed) {
             delete maxIntentAmountPerAsset[asset];
             delete rollingWindowCapPerAsset[asset];
-            if (rollingWindowDuration > 0) {
-                uint256 windowStart =
-                    (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
+            uint256 duration = rollingWindowDurationPerAsset[asset];
+            if (duration > 0) {
+                uint256 windowStart = (block.timestamp / duration) * duration;
                 delete _rollingWindowBuckets[asset][windowStart];
             }
+            delete rollingWindowDurationPerAsset[asset];
             if (rollingWindowTriggeredAsset == asset) {
                 rollingWindowTriggeredAsset = address(0);
                 rollingWindowTriggered = false;
@@ -662,26 +679,28 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (!assetAllowed[asset]) revert AssetNotAllowed();
         if (_cap > 0 && _windowDuration == 0) revert InvalidDuration();
         if (_windowDuration > block.timestamp) revert InvalidDuration();
-        rollingWindowDuration = _windowDuration;
+        rollingWindowDurationPerAsset[asset] = _windowDuration;
         rollingWindowCapPerAsset[asset] = _cap;
         emit RollingWindowCapPerAssetSet(asset, _windowDuration, _cap);
     }
 
-    /// @notice Admin-only: reset the rolling-window cap trigger if it has been
-    ///         exceeded. Can only be called after rollingWindowResetEarliestAt passes
-    ///         to prevent spam. Increases the window start to the current time so a
-    ///         fresh window tracking begins.
-    function resetRollingWindowCap() external onlyOwner {
-        if (block.timestamp < rollingWindowResetEarliestAt) {
+    /// @notice Owner-only: clear one asset's breaker latch once its reset window has
+    ///         elapsed. Only that asset's latch and current bucket are touched; other
+    ///         assets stay latched if they were. The guardian cannot reset a latch: it
+    ///         may only pause (see {pause}). Reverts if the asset is not latched.
+    /// @param asset Allowlisted asset whose breaker should be reset.
+    function resetRollingWindowCap(address asset) external onlyOwner {
+        if (!rollingWindowTriggered[asset]) revert RollingWindowNotTriggered();
+        if (block.timestamp < rollingWindowResetEarliestAt[asset]) {
             revert RollingWindowNotYetResettable();
         }
-        rollingWindowTriggered = false;
-        if (rollingWindowDuration > 0 && rollingWindowTriggeredAsset != address(0)) {
-            uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
-            delete _rollingWindowBuckets[rollingWindowTriggeredAsset][windowStart];
+        rollingWindowTriggered[asset] = false;
+        uint256 duration = rollingWindowDurationPerAsset[asset];
+        if (duration > 0) {
+            uint256 windowStart = (block.timestamp / duration) * duration;
+            delete _rollingWindowBuckets[asset][windowStart];
         }
-        rollingWindowTriggeredAsset = address(0);
-        emit RollingWindowCapReset();
+        emit RollingWindowCapReset(asset);
     }
 
     /// @notice Begin a two-step ownership handover. `newOwner` must call
@@ -956,13 +975,14 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         }
 
         // Check 2: Rolling-window cap (disabled if duration is zero)
-        if (rollingWindowTriggered) {
+        if (rollingWindowTriggered[asset]) {
             revert RollingWindowCapAlreadyTriggered();
         }
         uint256 assetCap = rollingWindowCapPerAsset[asset];
-        if (rollingWindowDuration > 0 && assetCap > 0) {
+        uint256 duration = rollingWindowDurationPerAsset[asset];
+        if (duration > 0 && assetCap > 0) {
             // Calculate current window start. Each window spans [windowStart, windowStart + duration).
-            uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
+            uint256 windowStart = (block.timestamp / duration) * duration;
 
             // If time has moved to a new window, existing bucket for this window is 0.
             uint256 currentBucket = windowStart > _latestWindowStart[asset]
@@ -972,10 +992,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             uint256 projected = currentBucket + sourceAmount;
             if (projected > assetCap) {
                 // Do not revert: a revert would roll back the latch and event.
-                rollingWindowTriggered = true;
-                rollingWindowTriggeredAsset = asset;
-                rollingWindowResetEarliestAt = block.timestamp + rollingWindowDuration;
-                emit RollingWindowCapTriggered(windowStart, projected);
+                rollingWindowTriggered[asset] = true;
+                rollingWindowResetEarliestAt[asset] = block.timestamp + duration;
+                emit RollingWindowCapTriggered(asset, windowStart, projected);
                 return false;
             }
         }
@@ -985,8 +1004,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @dev Commit the measured delta (actual received tokens) to the rolling-window bucket.
     ///      Ensures fee-on-transfer tokens do not cause accumulator drift.
     function _commitValueCaps(address asset, uint256 receivedAmount) private {
-        if (rollingWindowDuration > 0 && rollingWindowCapPerAsset[asset] > 0) {
-            uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
+        uint256 duration = rollingWindowDurationPerAsset[asset];
+        if (duration > 0 && rollingWindowCapPerAsset[asset] > 0) {
+            uint256 windowStart = (block.timestamp / duration) * duration;
             if (windowStart > _latestWindowStart[asset]) {
                 _latestWindowStart[asset] = windowStart;
                 // In a new window; prior buckets are orphaned and expire implicitly.

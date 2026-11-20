@@ -35,7 +35,8 @@ keys for each deployment environment.
 
 | Key role | Layer | Held by | Purpose | Signing frequency | Sensitivity |
 |---|---|---|---|---|---|
-| **Timelock owners** | EVM | M-of-N multisig (hardware wallets) | Governance: `setPeer`, `setGuardian`, `setConfirmationGrace`, `setPaused`, ownership rotation | Low (≤1 tx per week typically) | Critical |
+| **Timelock owners** | EVM | M-of-N multisig (hardware wallets) | Governance: `setPeer`, `setGuardian`, `setConfirmationGrace`, `setPaused`, `setDelegate`, ownership rotation | Low (≤1 tx per week typically) | Critical |
+| **LayerZero delegate** | EVM | `PerihelionTimelock` (set via `setDelegate`; was the deployer EOA until handed over) | Controls the escrow's LayerZero security config: DVN set, send/receive libraries, and skip/clear/nilify of inbound packets | Very low (only on DVN or library changes) | Critical |
 | **Guardian** | EVM | Hot key or 1-of-N Safe | Emergency pause: `pause()` | Very low (only during incidents) | High |
 | **Soroban admin** | Stellar | Multisig account | Settlement contract config: `propose_endpoint`/`confirm_endpoint`, `set_peer`, `set_admin`, `set_paused` | Low (≤1 tx per month typically) | Critical |
 | **Relayer signing key** | Off-chain | Relayer operator | Signs LayerZero messages for replay guards | Medium (1+ tx per transfer) | High |

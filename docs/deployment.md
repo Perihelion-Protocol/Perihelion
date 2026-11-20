@@ -201,6 +201,28 @@ forge script script/VerifyDeployment.s.sol --rpc-url "$RPC"
 Run it before any lock is accepted. Until the handover completes it reverts
 with `owner is not the timelock` by design.
 
+### 4.3a Hand the LayerZero delegate to the timelock
+
+The endpoint delegate controls the escrow's LayerZero security configuration
+(DVNs, libraries, and skip/clear/nilify of inbound packets). The constructor
+sets it to the deployer EOA, and `transferOwnership` / `acceptOwnership` do not
+move it. Until this step is done, the deployer key can still alter cross-chain
+verification. Run it through the same timelock flow as 4.3:
+
+```bash
+DELEGATE=$(cast calldata "setDelegate(address)" $TIMELOCK)
+SALT=0x0000000000000000000000000000000000000000000000000000000000000002
+cast send $TIMELOCK "propose(address,uint256,bytes,bytes32)" $ESCROW 0 $DELEGATE $SALT --private-key $OWNER1
+ID=$(cast call $TIMELOCK "hashOperation(address,uint256,bytes,bytes32)" $ESCROW 0 $DELEGATE $SALT)
+cast send $TIMELOCK "confirm(bytes32)" $ID --private-key $OWNER2
+# ...wait out PERIHELION_TL_DELAY...
+cast send $TIMELOCK "execute(address,uint256,bytes,bytes32)" $ESCROW 0 $DELEGATE $SALT --private-key $OWNER1
+
+# Verify: the endpoint must now list the timelock as the escrow's delegate.
+cast call $PERIHELION_ENDPOINT "delegates(address)(address)" $ESCROW
+# -> must equal $TIMELOCK; do not mark the deployment complete otherwise.
+```
+
 ### 4.4 Record the deployment
 
 There is no automated sync between a deployment and the SDK. In the same PR:
