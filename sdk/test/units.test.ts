@@ -4,8 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { toSmallestUnits, fromSmallestUnits } from "../src/units.js";
-import { evmAddressToBytes32 } from "../src/evmAddress.js";
+import { toSmallestUnits, fromSmallestUnits, evmAddressToBytes32 } from "../src/units.js";
 
 // ---------------------------------------------------------------------------
 // Issue #533 — fromSmallestUnits mishandles negative input and lacks string
@@ -100,7 +99,7 @@ test("evmAddressToBytes32 returns exactly 32 bytes", () => {
 
 test("evmAddressToBytes32 zero-pads the first 12 bytes and copies the address into the last 20", () => {
   const addr = "0x1234567890abcdef1234567890abcdef12345678";
-  const out = evmAddressToBytes32(addr);
+  const out = Buffer.from(evmAddressToBytes32(addr));
   assert.equal(out.length, 32);
   for (let i = 0; i < 12; i++) {
     assert.equal(out[i], 0, `byte ${i} should be zero`);
@@ -110,7 +109,7 @@ test("evmAddressToBytes32 zero-pads the first 12 bytes and copies the address in
 });
 
 test("evmAddressToBytes32 produces the golden vector for 0x...aa", () => {
-  const out = evmAddressToBytes32("0x00000000000000000000000000000000000000aa");
+  const out = Buffer.from(evmAddressToBytes32("0x00000000000000000000000000000000000000aa"));
   assert.equal(
     "0x" + out.toString("hex"),
     "0x00000000000000000000000000000000000000000000000000000000000000aa",
@@ -126,7 +125,7 @@ test("evmAddressToBytes32 matches the solver_evm word in the shared wire vector"
   // solver_evm occupies bytes 34-65 of the FillConfirmed message.
   const solverWord = vector.subarray(34, 66);
   const addr = "0x" + solverWord.subarray(12).toString("hex");
-  const out = evmAddressToBytes32(addr);
+  const out = Buffer.from(evmAddressToBytes32(addr));
   assert.deepEqual(out, solverWord);
   // Sanity: the upper 12 bytes must be zero, as the EVM decoder requires.
   assert.deepEqual(solverWord.subarray(0, 12), Buffer.alloc(12));
