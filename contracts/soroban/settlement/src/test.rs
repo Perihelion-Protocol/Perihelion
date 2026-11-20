@@ -2774,6 +2774,172 @@ fn rolling_window_keeps_one_bucket_across_quiet_windows() {
     }
 }
 
+// --- Issue #1061: cancel markers honour the admin-configured max TTL ---------
+
+/// The `Cancelled` tombstone written by an inbound cancel must live as long as
+/// the admin-configured `max_ttl`, not the compile-time `MAX_TTL` default.
+#[test]
+fn inbound_cancel_marker_uses_configured_max_ttl() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0x61);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    // Raise the retention above the compile-time default.
+    let configured = MAX_TTL_DEFAULT + 500_000;
+    assert!(configured > MAX_TTL_DEFAULT);
+    assert!(configured <= MAX_TTL_CEILING);
+    s.client.set_max_ttl(&configured);
+    assert_eq!(s.client.max_ttl(), configured);
+
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 2,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+
+    assert!(s.client.is_cancelled(&h));
+    let live_until = s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Cancelled(h.clone()))
+    });
+    let expected = s.env.ledger().sequence() + configured;
+    assert_eq!(
+        live_until, expected,
+        "cancel marker must be extended to the configured max_ttl"
+    );
+    assert!(
+        live_until > s.env.ledger().sequence() + MAX_TTL_DEFAULT,
+        "cancel marker must outlive the compile-time default"
+    );
+}
+
+/// The cancel-before-registration tombstone must also use `max_ttl(env)`.
+#[test]
+fn cancel_before_registration_tombstone_uses_configured_max_ttl() {
+    let s = setup();
+    let configured = MAX_TTL_DEFAULT + 250_000;
+    s.client.set_max_ttl(&configured);
+
+    let h = hash(&s.env, 0x62);
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 1,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+
+    assert!(s.client.is_cancelled(&h));
+    let live_until = s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Cancelled(h.clone()))
+    });
+    assert_eq!(live_until, s.env.ledger().sequence() + configured);
+}
+
+// --- Issue #1062: a value-cap breach must not silently drop the intent ------
+
+/// A breaching FillInstruction leaves a terminal `Cancelled` marker with
+/// `CANCEL_REASON_INVALID`, emits an event carrying the intent hash, and does
+/// not count the rejected amount towards the rolling bucket.
+#[test]
+fn value_cap_breach_records_terminal_marker_and_emits_hash() {
+    let s = setup();
+    s.client.set_rolling_window_cap(&3_600, &1_000);
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0x71);
+
+    try_deliver_fill_bytes(&s, &h, &recipient, 1_200, 1)
+        .expect("a breach must be acknowledged, not rolled back");
+
+    // Terminal marker: the intent is cancelled with the invalid reason.
+    assert!(s.client.is_cancelled(&h));
+    assert_eq!(
+        s.client.get_cancel_reason(&h),
+        Some(CANCEL_REASON_INVALID as u32)
+    );
+    assert!(s.client.get_intent(&h).is_none());
+
+    // The emitted event carries the intent hash.
+    let events = s.env.events().all();
+    let expected = Symbol::new(&s.env, "rolling_window_cap_triggered");
+    let mut found_hash = false;
+    for (_, topics, data) in events.iter() {
+        let is_trigger = topics.iter().any(|t| {
+            Symbol::try_from_val(&s.env, &t)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        });
+        if !is_trigger {
+            continue;
+        }
+        let carries_hash = topics.iter().any(|t| {
+            BytesN::<32>::try_from_val(&s.env, &t)
+                .map(|b| b == h)
+                .unwrap_or(false)
+        }) || BytesN::<32>::try_from_val(&s.env, &data)
+            .map(|b| b == h)
+            .unwrap_or(false);
+        if carries_hash {
+            found_hash = true;
+        }
+    }
+    assert!(
+        found_hash,
+        "rolling_window_cap_triggered event must carry the intent hash"
+    );
+
+    // The bucket holds only accepted amounts: a 1_000 amount still fits.
+    s.client.reset_rolling_window_cap();
+    try_deliver_fill_bytes(&s, &hash(&s.env, 0x72), &recipient, 1_000, 2)
+        .expect("the rejected amount must not have consumed the window");
+}
+
+/// A rejected intent can be pushed to a cross-chain refund before the local
+/// timeout, either by the keeper path or by the permissionless entrypoint.
+#[test]
+fn rejected_intent_reaches_cross_chain_refund() {
+    let s = setup();
+    s.client.set_rolling_window_cap(&3_600, &1_000);
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 0x73);
+
+    try_deliver_fill_bytes(&s, &h, &recipient, 1_200, 1)
+        .expect("a breach must be acknowledged, not rolled back");
+    assert!(s.client.is_cancelled(&h));
+    assert_eq!(s.mock.sent(), 0, "no CancelIntent dispatched yet");
+
+    // A keeper (or the user) pushes the refund; the mock endpoint records it.
+    let keeper = Address::generate(&s.env);
+    s.client.cancel_rejected_intent(&keeper, &h, &0);
+
+    assert_eq!(
+        s.mock.sent(),
+        1,
+        "a CancelIntent must be dispatched for the rejected intent"
+    );
+    let last = s.mock.last();
+    assert_eq!(
+        last.dst_eid, s.src_eid,
+        "the CancelIntent must target the source chain"
+    );
+}
+
 #[test]
 fn rolling_window_latch_rejects_until_admin_reset() {
     let s = setup();

@@ -146,6 +146,154 @@ contract PerihelionTimelockTest is Test {
         assertEq(target.lastMsgValue(), 0.5 ether);
     }
 
+    // --- Proposed event payload (issue #1059) --------------------------------
+    //
+    // The full calldata and salt must be recoverable from logs so co-signers
+    // can verify what they are confirming without trusting off-chain data.
+
+    /// @notice AC (#1059): Proposed carries target, value, data and salt, and
+    ///         recomputing hashOperation from the logged fields yields the id.
+    function test_Proposed_EventCarriesCalldataAndSalt() public {
+        bytes memory data = _setValueData(1234);
+        uint256 value = 0.25 ether;
+
+        vm.recordLogs();
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), value, data, SALT);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        // The Proposed event is the only log emitted by propose().
+        assertEq(logs.length, 1, "propose must emit exactly one log");
+
+        // topic0 = event signature, topic1 = id, topic2 = proposer.
+        assertEq(
+            logs[0].topics[0],
+            keccak256("Proposed(bytes32,address,address,uint256,bytes,bytes32)"),
+            "event signature"
+        );
+        assertEq(logs[0].topics[1], id, "indexed id");
+        assertEq(
+            logs[0].topics[2], bytes32(uint256(uint160(a))), "indexed proposer"
+        );
+
+        // Non-indexed payload: target, value, data, salt.
+        (address loggedTarget, uint256 loggedValue, bytes memory loggedData, bytes32 loggedSalt) =
+            abi.decode(logs[0].data, (address, uint256, bytes, bytes32));
+        assertEq(loggedTarget, address(target), "logged target");
+        assertEq(loggedValue, value, "logged value");
+        assertEq(loggedData, data, "logged data");
+        assertEq(loggedSalt, SALT, "logged salt");
+
+        // The logged fields must reproduce the indexed id.
+        assertEq(
+            tl.hashOperation(loggedTarget, loggedValue, loggedData, loggedSalt),
+            id,
+            "hashOperation from logged fields must equal id"
+        );
+    }
+
+    /// @notice AC (#1059): vm.expectEmit with the full payload matches.
+    function test_Proposed_ExpectEmitFullPayload() public {
+        bytes memory data = _setValueData(4321);
+        bytes32 id = tl.hashOperation(address(target), 0, data, SALT);
+
+        vm.expectEmit(true, true, false, true, address(tl));
+        emit PerihelionTimelock.Proposed(id, a, address(target), 0, data, SALT);
+        vm.prank(a);
+        tl.propose(address(target), 0, data, SALT);
+    }
+
+    // --- msg.value reconciliation on execute (issue #1060) -------------------
+
+    /// @notice AC (#1060): execute with msg.value == value succeeds and the
+    ///         value is forwarded to the target.
+    function test_Execute_MsgValueEqualsValue_Forwards() public {
+        bytes memory data = _setValueData(55);
+        uint256 value = 0.5 ether;
+        bytes32 id = tl.hashOperation(address(target), value, data, SALT);
+
+        vm.prank(a);
+        tl.propose(address(target), value, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+
+        vm.deal(a, value);
+        vm.prank(a);
+        tl.execute{ value: value }(address(target), value, data, SALT);
+
+        assertEq(target.lastMsgValue(), value, "value forwarded to target");
+        assertEq(address(tl).balance, 0, "no ETH stranded in timelock");
+    }
+
+    /// @notice AC (#1060): execute with msg.value == 0 succeeds when the
+    ///         timelock is pre-funded via receive().
+    function test_Execute_MsgValueZero_Prefunded_Succeeds() public {
+        bytes memory data = _setValueData(66);
+        uint256 value = 0.5 ether;
+        bytes32 id = tl.hashOperation(address(target), value, data, SALT);
+
+        vm.prank(a);
+        tl.propose(address(target), value, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+
+        // Fund the timelock directly.
+        vm.deal(address(tl), value);
+
+        vm.prank(a);
+        tl.execute{ value: 0 }(address(target), value, data, SALT);
+
+        assertEq(target.lastMsgValue(), value, "value forwarded from pre-funded balance");
+        assertEq(address(tl).balance, 0, "pre-funded balance fully spent");
+    }
+
+    /// @notice AC (#1060): a msg.value that is neither 0 nor equal to value
+    ///         reverts with the dedicated error.
+    function test_RevertWhen_ExecuteMsgValueMismatch() public {
+        bytes memory data = _setValueData(77);
+        uint256 value = 0.5 ether;
+        bytes32 id = tl.hashOperation(address(target), value, data, SALT);
+
+        vm.prank(a);
+        tl.propose(address(target), value, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+
+        // Partial payment: neither 0 nor value.
+        vm.deal(a, 1 ether);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.MsgValueMismatch.selector);
+        tl.execute{ value: 0.1 ether }(address(target), value, data, SALT);
+
+        // Overpayment: also rejected.
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.MsgValueMismatch.selector);
+        tl.execute{ value: 1 ether }(address(target), value, data, SALT);
+    }
+
+    /// @notice AC (#1060): a stray msg.value on a zero-value operation is not
+    ///         silently accepted; it reverts and no ETH is stranded.
+    function test_RevertWhen_ExecuteStrayMsgValueOnZeroValueOp() public {
+        bytes memory data = _setValueData(88);
+        bytes32 id = tl.hashOperation(address(target), 0, data, SALT);
+
+        vm.prank(a);
+        tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id);
+        vm.warp(block.timestamp + DELAY);
+
+        vm.deal(a, 1 ether);
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.MsgValueMismatch.selector);
+        tl.execute{ value: 1 ether }(address(target), 0, data, SALT);
+
+        assertEq(address(tl).balance, 0, "no ETH stranded in timelock");
+    }
+
     // --- Guards --------------------------------------------------------------
 
     function test_RevertWhen_NonOwnerProposes() public {

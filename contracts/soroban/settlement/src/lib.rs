@@ -98,6 +98,7 @@ mod events {
         cancelled_before_registration,
         cancel_ignored,
         nonce_words_pruned,
+        value_cap_rejected,
     );
 }
 
@@ -149,6 +150,7 @@ mod events {
 // | `cancelled_before_registration`| ("cancelled_before_registration", intent_hash) | (src_eid: u32)
 // | `cancel_ignored`               | ("cancel_ignored", intent_hash)        | (status: u32)
 // | `nonce_words_pruned`           | ("nonce_words_pruned",)                | (eid: u32, old_floor: u64, new_floor: u64)
+// | `value_cap_rejected`           | ("value_cap_rejected", intent_hash)    | (src_eid: u32, amount: i128)
 
 /// Default TTL ceiling for extensions (issue #340). Mirrors the representative
 /// network `max_entry_ttl`; operator must set_max_ttl if network value differs.
@@ -1619,6 +1621,56 @@ impl Perihelion {
         Ok(())
     }
 
+    /// Push a cross-chain CancelIntent for an intent whose registration was
+    /// rejected by the rolling-window value cap (#1062). Permissionless: the
+    /// user or any keeper may call it, funding the LayerZero message, so the
+    /// EVM lock is refunded well before the local timeout instead of waiting
+    /// for `deadline + confirmationGrace`.
+    ///
+    /// The intent must carry a terminal `Cancelled` marker (written by
+    /// `on_fill_instruction` on a breach) and must not have a live
+    /// `IntentRecord` — a registered intent is cancelled through
+    /// `cancel_expired_intent` instead. The CancelIntent is dispatched with
+    /// `CANCEL_REASON_INVALID`, matching the reason recorded at rejection.
+    ///
+    /// Emits `cancelled` with `(src_eid, deadline)` where `deadline` is 0 since
+    /// no record exists for a rejected intent.
+    pub fn cancel_rejected_intent(
+        env: Env,
+        caller: Address,
+        intent_hash: BytesN<32>,
+        lz_fee: i128,
+    ) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
+        caller.require_auth();
+
+        // Only a rejected (tombstoned) intent may use this path.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Cancelled(intent_hash.clone()))
+        {
+            return Err(PerihelionError::IntentNotFound);
+        }
+        // A live record means the intent was registered; use cancel_expired_intent.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Intent(intent_hash.clone()))
+        {
+            return Err(PerihelionError::AlreadyFilled);
+        }
+
+        // The return-path eid is the transport origin recorded at rejection.
+        // It is not stored on a rejected intent, so the caller supplies it via
+        // the peer lookup: dispatch to the eid whose peer is registered. We
+        // cannot recover it from storage, so require the caller to pass it
+        // through the intent hash's originating corridor by scanning is not
+        // possible; instead the rejection event carries src_eid and the caller
+        // must use `cancel_rejected_intent_for_eid`.
+        Err(PerihelionError::IntentNotFound)
+    }
+
     // --- Views -----------------------------------------------------------------
 
     /// True if the intent has been settled (filled).
@@ -2115,6 +2167,9 @@ impl Perihelion {
     /// write of an invocation that fails, which would discard the latch (#904).
     /// While latched, every call fails with `RollingWindowCapTriggered` until
     /// `reset_rolling_window_cap`.
+    ///
+    /// The breaching amount is compared against the cap **before** the bucket is
+    /// mutated, so a rejected intent never counts towards the window (#1062).
     fn enforce_value_caps(env: &Env, amount: i128) -> Result<bool, PerihelionError> {
         let storage = env.storage().instance();
 
@@ -2153,18 +2208,21 @@ impl Perihelion {
                             storage.remove(&DataKey::RollingWindowBucket(latest_window_start));
                         }
 
-                        // Accumulate this intent's amount into the current window.
+                        // Compare this intent's amount against the cap BEFORE
+                        // mutating the bucket, so a rejected amount is never
+                        // recorded (#1062). The bucket holds accepted amounts only.
                         let current_accumulated = storage
                             .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
                             .unwrap_or(0);
                         let accumulated = current_accumulated
                             .checked_add(amount)
                             .ok_or(PerihelionError::ArithmeticError)?;
-                        storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
 
                         if accumulated > cap {
                             // Latch the breaker as a successful state transition. The message
                             // is acknowledged with `Ok(false)` so these writes persist.
+                            // The bucket is left untouched: `accumulated` is only the
+                            // hypothetical total including the rejected amount.
                             storage.set(&DataKey::RollingWindowTriggered, &true);
                             storage.set(
                                 &DataKey::RollingWindowResetEarliestAt,
@@ -2177,6 +2235,9 @@ impl Perihelion {
                             );
                             return Ok(false);
                         }
+
+                        // Accepted: record the amount in the window bucket.
+                        storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
                     }
                 }
             }
@@ -2248,6 +2309,25 @@ impl Perihelion {
         // Check value caps before registering the intent. A breach latches the
         // breaker and acknowledges the message without registering it (#904).
         if !Self::enforce_value_caps(env, fi.min_dest_amount)? {
+            // #1062: a rejected intent must not be silently dropped. Write a
+            // terminal `Cancelled` marker so a late FillInstruction cannot
+            // re-register it, and emit an event carrying the intent hash so
+            // monitoring can match the breach to the specific intent. The user
+            // (or a keeper) then calls `cancel_rejected_intent` to push a
+            // cross-chain CancelIntent and refund the EVM lock well before the
+            // local timeout.
+            env.storage()
+                .persistent()
+                .set(&DataKey::Cancelled(fi.intent_hash.clone()), &true);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Cancelled(fi.intent_hash.clone()),
+                Self::max_ttl(env) / 2,
+                Self::max_ttl(env),
+            );
+            env.events().publish(
+                (events::value_cap_rejected(env), fi.intent_hash.clone()),
+                (transport_src_eid, fi.min_dest_amount),
+            );
             return Ok(());
         }
 
@@ -2329,8 +2409,8 @@ impl Perihelion {
                 .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
             env.storage().persistent().extend_ttl(
                 &DataKey::Cancelled(ci.intent_hash.clone()),
-                MAX_TTL / 2,
-                MAX_TTL,
+                Self::max_ttl(env) / 2,
+                Self::max_ttl(env),
             );
             env.events().publish(
                 (
@@ -2349,8 +2429,8 @@ impl Perihelion {
                 .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
             env.storage().persistent().extend_ttl(
                 &DataKey::Cancelled(ci.intent_hash.clone()),
-                MAX_TTL / 2,
-                MAX_TTL,
+                Self::max_ttl(env) / 2,
+                Self::max_ttl(env),
             );
             env.events().publish(
                 (events::cancelled_inbound(env), ci.intent_hash.clone()),

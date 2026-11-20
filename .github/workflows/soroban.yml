@@ -82,6 +82,17 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
+      # Enforces #1061: every TTL extension must use the admin-configurable
+      # `Self::max_ttl(env)` rather than the compile-time `MAX_TTL` constant.
+      - name: No extend_ttl calls using MAX_TTL
+        working-directory: .
+        run: |
+          if grep -rn 'extend_ttl' contracts/soroban/settlement/src | grep 'MAX_TTL'; then
+            echo "::error::extend_ttl must use Self::max_ttl(env), not the MAX_TTL constant (see #1061)"
+            exit 1
+          fi
+          echo "no extend_ttl calls reference MAX_TTL directly."
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 

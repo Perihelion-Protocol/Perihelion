@@ -175,7 +175,37 @@ These indicate anomalies that require investigation but may have benign explanat
   - Check if destination chain message delivery is stuck
   - If rate remains elevated, escalate (possible attack or griefing)
 
-#### Alert H5: Timelock Revoke/Re-confirm Griefing (issue #283)
+#### Alert H5: Timelock `Proposed` Payload Verification (issue #1059)
+- **Condition:** Any `Proposed(id, proposer, target, value, data, salt)` event
+  from the timelock (`contracts/evm/src/PerihelionTimelock.sol`) where:
+  - the 4-byte selector of `data` does not decode against the escrow ABI
+    (`PerihelionEscrow`) or the timelock's own ABI (self-admin calls), or
+  - `target` is not a known escrow/timelock address, or
+  - `keccak256(abi.encode(target, value, data, salt))` does not equal the
+    indexed `id`.
+- **Why it matters:** The event now carries the full calldata and salt, so
+  owners and watchers can verify from chain data alone what a pending
+  operation will do. A mismatch between the logged payload and `id`, or an
+  unknown selector/target, means the proposal cannot be safely confirmed.
+- **Trigger:** Immediate alert on any `Proposed` log failing a check above.
+- **Action:**
+  - Do not confirm the operation; notify all owners out-of-band.
+  - If the hash mismatch is reproducible, treat as a malicious proposal and
+    escalate to the security team.
+  - If the selector is unknown, decode `data` manually and confirm the target
+    contract is the expected deployment before any owner confirms.
+- **Monitoring query:**
+  ```sql
+  -- Proposals whose recomputed id does not match the indexed id
+  SELECT id, proposer, target, value, data, salt, block_time
+  FROM timelock_events
+  WHERE event_name = 'Proposed'
+    AND recomputed_id <> id
+  ORDER BY block_time DESC;
+  ```
+
+#### Alert H6: Timelock Revoke/Re-confirm Griefing (issue #283)
+=======
 - **Condition:** The same operation id emits `ConfirmationRevoked` followed by
   `Confirmed` (or `Ready`) more than **2 times within any 24-hour window**,
   or a `Ready` event is emitted for an id that already emitted `Ready` previously.
@@ -253,7 +283,42 @@ These indicate degraded performance or minor anomalies.
   - Log event; may indicate mempool congestion or bad nonce
   - No action; solver will eventually succeed or refund
 
-#### Alert M4: Nonce-Word Rent Growth Stalled (Soroban, issue #718)
+#### Alert M4: Rolling-Window Value-Cap Breach (Soroban, issue #1062)
+- **Condition:** A `rolling_window_cap_triggered` event is emitted by the
+  settlement contract's `enforce_value_caps` breaker. The event carries the
+  intent hash so a breach can be matched to a specific intent.
+- **Why it matters:** A breaching `FillInstruction` is rejected and the
+  intent is marked terminal (`Cancelled` with reason `CANCEL_REASON_INVALID`)
+  rather than settled. The EVM lock stays live until the cross-chain refund
+  completes (or the local timeout at `deadline + confirmationGrace`), so the
+  breach must be tracked to its refund.
+- **Trigger:** Immediate alert on `rolling_window_cap_triggered`.
+- **Action:**
+  - Look up the intent hash from the event and confirm a terminal
+    `Cancelled(hash, "invalid")` marker is recorded on Soroban.
+  - Track the corresponding `CancelIntent` / `RefundBridge` dispatch and the
+    EVM `Refunded` receipt; escalate if the refund is not observed well before
+    the local timeout.
+  - If no refund path is available, use the permissionless
+    `cancel_rejected_intent(hash, lz_fee)` entry point to push the refund.
+  - Confirm the rejected amount was **not** added to the rolling-window
+    bucket (only accepted amounts should count).
+- **Monitoring query:**
+  ```sql
+  -- Breaching intents without a matching refund within SLA
+  SELECT b.intent_hash, b.block_time AS breach_ts, c.block_time AS cancelled_ts
+  FROM soroban_events b
+  LEFT JOIN soroban_events c
+    ON c.intent_hash = b.intent_hash AND c.event_name = 'Cancelled'
+  LEFT JOIN evm_events r
+    ON r.intent_hash = b.intent_hash AND r.event_name = 'Refunded'
+  WHERE b.event_name = 'rolling_window_cap_triggered'
+    AND r.intent_hash IS NULL
+    AND b.block_time > NOW() - INTERVAL 24 HOURS
+  ORDER BY b.block_time DESC;
+  ```
+
+#### Alert M5: Nonce-Word Rent Growth Stalled (Soroban, issue #718)
 - **Condition:** The contract's inbound-nonce storage footprint grows without
   being reclaimed. Inbound-nonce bitmap words (`InboundNonceWord(eid, w)`)
   carry `MAX_TTL` rent until pruned; without reclamation the rent liability of
@@ -349,7 +414,7 @@ The **Perihelion Watcher** is an off-chain service that:
 #### Alert Manager
 - **Input:** Reconciliation report
 - **Process:**
-  - Evaluate alert conditions (C1–C3, H1–H4, M1–M3)
+  - Evaluate alert conditions (C1–C3, H1–H6, M1–M5)
   - Filter duplicates (throttle repeated alerts)
   - Determine severity and action
 - **Output:** Structured alert logs, circuit-breaker signals
@@ -512,7 +577,7 @@ Alerts are routed based on severity:
 - [ ] Reference watcher deployment
 
 **Phase 2 (Post-launch, first 30 days):**
-- [ ] High alerts (H1–H4) with tuned thresholds
+- [ ] High alerts (H1–H6) with tuned thresholds
 - [ ] Dashboard and public API
 - [ ] Message latency monitoring
 - [ ] PagerDuty integration
