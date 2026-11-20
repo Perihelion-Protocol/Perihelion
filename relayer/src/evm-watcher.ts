@@ -40,7 +40,7 @@
  * 0       1     PROTOCOL_VERSION (0x01)
  * 1       1     MSG_FILL_INSTRUCTION (0x01)
  * 2       32    intentHash
- * 34      4     stellarEid (uint32, big-endian)
+ * 34      4     reserved (uint32, always zero; the origin eid comes from transport)
  * 38      56    recipient (Stellar strkey, right-zero-padded)
  * 94      69    destAsset (asset identifier string, right-zero-padded)
  * 163     16    minDestAmount (uint128, non-negative)
@@ -110,7 +110,8 @@ function canonicalFillInstruction(
   out[0] = 0x01;
   out[1] = 0x01;
   Buffer.from(intentHash.slice(2), "hex").copy(out, 2);
-  out.writeUInt32BE(stellarEid, 34);
+  // Offset 34 is `reserved` and must be zero; the escrow writes the same value (#1051).
+  out.writeUInt32BE(0, 34);
   recipient.copy(out, 38);
   asset.copy(out, 94);
   Buffer.from(minDestAmount.toString(16).padStart(32, "0"), "hex").copy(out, 163);

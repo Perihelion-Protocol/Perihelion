@@ -78,11 +78,11 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
         nonce++;
         PerihelionEscrow.Intent memory intent = PerihelionEscrow.Intent({
             user: user,
-            destination: "GUSERSTELLAR",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(token),
             sourceAmount: amount,
-            destAsset: "USDC:GA5Z",
+            destAsset: "USDC:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             minDestAmount: amount,
             deadline: block.timestamp + 600,
             nonce: nonce,

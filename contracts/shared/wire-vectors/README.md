@@ -18,7 +18,7 @@ for the 16-byte wire-field bounds.
 
 ## `fill_instruction.hex` (227 bytes)
 
-`version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)`
+`version(1) | type(1) | intent_hash(32) | reserved(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)`
 
 This is the **source → Stellar** payload that registers a locked intent on the
 Soroban settlement contract. All integers are big-endian.
@@ -51,7 +51,7 @@ other value, including a bare `G...` account strkey, is `MalformedPayload`.
 | `version`          | 0           | 1             | Unsigned integer; must equal `0x01`              | Both sides   |
 | `type`             | 1           | 1             | Unsigned integer; `0x01` = FillInstruction       | Both sides   |
 | `intent_hash`      | 2           | 32            | Raw bytes (EIP-712 keccak256 hash)               | Soroban      |
-| `src_eid`          | 34          | 4             | Big-endian `u32`                                 | Soroban      |
+| `reserved`         | 34          | 4             | Always zero (`0x00000000`); ignored by the decoder | Soroban (dropped) |
 | `recipient`        | 38          | 56            | ASCII strkey (`G...` or `C...`), right-zero-padded | Soroban    |
 | `dest_asset`       | 94          | 69            | ASCII `native`, `CODE:ISSUER` or `C...` strkey, right-zero-padded | Soroban |
 | `min_dest_amount`  | 163         | 16            | Big-endian `u128`                                | Soroban      |
@@ -72,7 +72,7 @@ encodes to `CDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZLND`.
 | `version`          | `0x01`                                                                 |
 | `type`             | `0x01` (FillInstruction)                                               |
 | `intent_hash`      | 32 bytes of `0xAA`                                                     |
-| `src_eid`          | `30316` (u32, big-endian) — canonical Stellar LayerZero eid            |
+| `reserved`         | `0` (u32, big-endian). The locking chain's eid is the authenticated transport origin, not a body field (#1051) |
 | `recipient`        | `CC53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53WQD5` (56 ASCII bytes) — strkey of `[0xBB; 32]` contract id |
 | `dest_asset`       | `CDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZLND` (56 ASCII bytes) followed by 13 zero-padding bytes — strkey of `[0xCC; 32]` contract id |
 | `min_dest_amount`  | `1_000_000_000` (u128, big-endian)                                     |

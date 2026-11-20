@@ -25,7 +25,7 @@ use soroban_sdk::{
 };
 
 // Re-use test harness from main test module
-use crate::test::{evm_solver, hash, register_intent, setup, Setup};
+use crate::test::{evm_solver, hash, register_intent, setup};
 
 /// Advance the ledger by `ledgers` ledgers, incrementing both sequence and timestamp.
 /// Assumes a 5-second ledger close time for timestamp progression.
@@ -110,9 +110,9 @@ fn fill_intent_succeeds_after_manual_restore() {
     // The entry might be archived, but in test environment it's still accessible.
     // In production, the caller must include the Intent key in the restore footprint.
     // We document this requirement and verify the fill still works.
-    
+
     let solver_evm = evm_solver(&s.env, 0x11);
-    
+
     // Fill should succeed if the entry is restored
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
 
@@ -391,7 +391,7 @@ fn document_client_restore_footprint_requirement() {
 
     // In our test environment, entries aren't actually archived, but we verify
     // the contract logic handles the restored-entry case correctly:
-    
+
     let solver_evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
 
@@ -531,7 +531,6 @@ fn inbound_nonce_archival_resets_replay_protection() {
         &BytesN::from_array(&s.env, &[0u8; 32]),
         &LzMessage::FillInstruction(FillInstruction {
             intent_hash: h3,
-            src_eid: s.src_eid,
             recipient: recipient.clone(),
             dest_asset: s.asset.clone(),
             min_dest_amount: 1,

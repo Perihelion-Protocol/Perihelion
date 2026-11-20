@@ -104,7 +104,6 @@ fn deliver_fill_instruction(
 ) {
     let fi = FillInstruction {
         intent_hash: h.clone(),
-        src_eid: s.src_eid,
         recipient: recipient.clone(),
         dest_asset: dest_asset.clone(),
         min_dest_amount: 100,
@@ -152,8 +151,7 @@ fn assert_event_shape(env: &Env, expected_topic: &str, expected_topic_count: u32
     });
     assert!(
         found,
-        "expected an event with topic '{}' and {} topic(s), none found",
-        expected_topic, expected_topic_count
+        "expected an event with topic '{expected_topic}' and {expected_topic_count} topic(s), none found"
     );
 }
 

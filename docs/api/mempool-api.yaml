@@ -490,7 +490,7 @@ paths:
         '404':
           description: |
             No intent with this hash is known to the mempool, or the intent is
-            already in a terminal status (`settled`, `refunded`, `expired`)
+            already in a terminal status (`settled`, `refunded`, `expired`, `cancelled`)
             and can no longer change.
           content:
             application/json:
@@ -536,9 +536,12 @@ components:
     IntentStatus:
       type: string
       description: |
-        The five statuses this mempool assigns. `claimed` and `settling` are
+        The six statuses this mempool assigns. `claimed` and `settling` are
         part of the broader on-chain/SDK lifecycle but are never assigned by
         this reference implementation.
+
+        `cancelled` is terminal: the user revoked the intent on the source chain
+        with `cancelIntent` before any solver locked it (#1053).
 
         `filled` is intermediate: the solver has delivered on Stellar but the
         source chain has not yet released. `settled` is terminal and is only
@@ -549,6 +552,7 @@ components:
         - settled
         - refunded
         - expired
+        - cancelled
 
     SignedIntent:
       type: object

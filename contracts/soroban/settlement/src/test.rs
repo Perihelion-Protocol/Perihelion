@@ -267,7 +267,6 @@ fn register_intent_with_window(
 ) {
     let fi = FillInstruction {
         intent_hash: h.clone(),
-        src_eid: s.src_eid,
         recipient: recipient.clone(),
         dest_asset: s.asset.clone(),
         min_dest_amount: min,
@@ -419,8 +418,7 @@ fn cancel_before_fill_instruction_blocks_late_registration() {
         nonce: 1,
     };
     let guid = BytesN::from_array(&s.env, &[0u8; 32]);
-    s.client
-        .lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
 
     // The FillInstruction arrives afterwards on a later nonce.
     register_intent(&s, &h, &recipient, 100_000, 9_000, 2, None);
@@ -481,8 +479,16 @@ fn rejects_malformed_solver_evm_before_any_transfer() {
     }
 
     let token = token::TokenClient::new(&s.env, &s.asset);
-    assert_eq!(token.balance(&solver), 1_000_000, "solver must keep its funds");
-    assert_eq!(token.balance(&recipient), 0, "no destination asset may move");
+    assert_eq!(
+        token.balance(&solver),
+        1_000_000,
+        "solver must keep its funds"
+    );
+    assert_eq!(
+        token.balance(&recipient),
+        0,
+        "no destination asset may move"
+    );
     assert_eq!(s.client.status(&h), Some(IntentStatus::Locked));
 }
 
@@ -557,7 +563,6 @@ fn rejects_message_from_untrusted_peer() {
     let recipient = Address::generate(&s.env);
     let fi = FillInstruction {
         intent_hash: hash(&s.env, 8),
-        src_eid: s.src_eid,
         recipient,
         dest_asset: s.asset.clone(),
         min_dest_amount: 1,
@@ -662,7 +667,6 @@ fn nonce_unbounded_replay_returns_stale_nonce() {
         // A different intent hash with the same nonce.
         let fi = FillInstruction {
             intent_hash: h.clone(),
-            src_eid: s.src_eid,
             recipient: recipient.clone(),
             dest_asset: s.asset.clone(),
             min_dest_amount: 1,
@@ -684,8 +688,7 @@ fn nonce_unbounded_replay_returns_stale_nonce() {
             .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
         assert!(
             result.is_err(),
-            "re-delivery of nonce {} must be rejected as StaleNonce",
-            n
+            "re-delivery of nonce {n} must be rejected as StaleNonce"
         );
     }
 }
@@ -726,7 +729,6 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
         let h = BytesN::from_array(&s.env, &hash_bytes);
         let fi = FillInstruction {
             intent_hash: h.clone(),
-            src_eid: s.src_eid,
             recipient: recipient.clone(),
             dest_asset: s.asset.clone(),
             min_dest_amount: 1,
@@ -753,8 +755,7 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
         let h = BytesN::from_array(&s.env, &hash_bytes);
         assert!(
             s.client.get_intent(&h).is_some(),
-            "intent for nonce {} was silently dropped",
-            n
+            "intent for nonce {n} was silently dropped"
         );
     }
 
@@ -766,7 +767,6 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
         let h = BytesN::from_array(&s.env, &hash_bytes);
         let fi = FillInstruction {
             intent_hash: h.clone(),
-            src_eid: s.src_eid,
             recipient: recipient.clone(),
             dest_asset: s.asset.clone(),
             min_dest_amount: 1,
@@ -784,7 +784,7 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
         let result = s
             .client
             .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
-        assert!(result.is_err(), "replay of nonce {} must be rejected", n);
+        assert!(result.is_err(), "replay of nonce {n} must be rejected");
     }
 }
 
@@ -814,7 +814,6 @@ fn try_deliver_nonce(
     let h = BytesN::from_array(&s.env, &hb);
     let fi = FillInstruction {
         intent_hash: h,
-        src_eid: eid,
         recipient: Address::generate(&s.env),
         dest_asset: s.asset.clone(),
         min_dest_amount: 1,
@@ -1016,49 +1015,46 @@ fn prune_noop_when_nothing_to_reclaim() {
 }
 
 #[test]
-fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
+fn fill_instruction_reserved_slot_is_ignored_and_transport_eid_routes() {
+    // Offset 34 of a FillInstruction is `reserved` (#1051). A body that writes an
+    // eid there must have no effect: the record routes by the authenticated
+    // LayerZero origin, never by the body.
     let s = setup();
     let recipient = Address::generate(&s.env);
     let h = hash(&s.env, 50);
 
-    // Body declares a different src_eid (e.g. a different chain). Issue #15
-    // requires a peer to already be configured for the body-declared src_eid
-    // (registration is otherwise rejected as UntrustedPeer — see
-    // `registration_rejected_when_no_peer_for_src_eid`), so the attacker eid
-    // here has to be a *legitimately configured* peer for this test to reach
-    // the override logic it's actually checking: that the intent record uses
-    // the transport-authenticated eid, not the body-declared one, even when
-    // the body-declared eid is itself a trusted peer.
     let attacker_eid = 99999u32;
     let attacker_peer = BytesN::from_array(&s.env, &[0xAA; 32]);
-    // The helper restores the clock afterwards so this test's own
-    // `deadline: 5_000` fixture isn't already expired.
     register_peer(&s.env, &s.client, attacker_eid, &attacker_peer);
 
     let fi = FillInstruction {
         intent_hash: h.clone(),
-        src_eid: attacker_eid, // body-declared, must be ignored
         recipient: recipient.clone(),
         dest_asset: s.asset.clone(),
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
-        locked_solver: None,
+        locked_solver: Some(BytesN::from_array(&s.env, &[0x22; 32])),
         reservation_window: 0,
     };
+    s.client.set_dest_token_allowed(&s.asset, &true);
+    let mut message = crate::messages::encode_fill_instruction(&s.env, &fi);
+    for (i, b) in attacker_eid.to_be_bytes().iter().enumerate() {
+        message.set(34 + i as u32, *b);
+    }
     let origin = Origin {
         src_eid: s.src_eid, // transport-authenticated
         sender: s.peer.clone(),
         nonce: 1,
     };
     let guid = BytesN::from_array(&s.env, &[0u8; 32]);
-    s.client
-        .lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+    s.client.lz_receive_bytes(&origin, &guid, &message);
 
-    // The stored record must use transport src_eid, not the body-declared one.
     let rec = s.client.get_intent(&h).unwrap();
-    assert_eq!(rec.src_eid, s.src_eid,
-        "src_eid must be overridden to transport origin.src_eid, not the body-declared attacker_eid");
+    assert_eq!(
+        rec.src_eid, s.src_eid,
+        "routing eid must be the transport origin, not the reserved-slot value"
+    );
 }
 
 // --- Issue #910: configuration is set by the constructor, not a separate call ---
@@ -1423,7 +1419,7 @@ fn assert_event_with_symbol(
                 .unwrap_or(false)
         })
     });
-    assert!(found, "event '{}' not found", expected_sym);
+    assert!(found, "event '{expected_sym}' not found");
 }
 
 /// Assert `registered` event: topics = ("registered", intent_hash), data = (src_eid, deadline)
@@ -1805,11 +1801,13 @@ fn cancel_ignored_event_shape() {
 fn registration_rejected_when_no_peer_for_src_eid() {
     let s = setup();
     let recipient = Address::generate(&s.env);
-    // Use an eid for which no peer has been configured
+    // The intent's source eid is the transport origin (#1051). An origin with no
+    // configured peer must be rejected before the intent is registered, so the
+    // solver is never left holding a fill that cannot settle back.
     let unknown_eid = 99999u32;
+    let h = hash(&s.env, 42);
     let fi = FillInstruction {
-        intent_hash: hash(&s.env, 42),
-        src_eid: unknown_eid,
+        intent_hash: h.clone(),
         recipient,
         dest_asset: s.asset.clone(),
         min_dest_amount: 1,
@@ -1818,21 +1816,22 @@ fn registration_rejected_when_no_peer_for_src_eid() {
         locked_solver: None,
         reservation_window: 0,
     };
-    // Deliver via the registered peer for s.src_eid (transport origin is fine),
-    // but the intent's src_eid has no configured peer — must be rejected.
     let origin = Origin {
-        src_eid: s.src_eid,
+        src_eid: unknown_eid,
         sender: s.peer.clone(),
         nonce: 1,
     };
     let guid = BytesN::from_array(&s.env, &[0u8; 32]);
-    // Expect UntrustedPeer(163) because fi.src_eid has no peer entry
     let result = s
         .client
         .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
     assert!(
         result.is_err(),
-        "expected error for unknown src_eid but got success"
+        "expected UntrustedPeer for an origin eid with no peer but got success"
+    );
+    assert!(
+        s.client.get_intent(&h).is_none(),
+        "intent must not be registered when its origin has no peer"
     );
 }
 
@@ -2118,7 +2117,7 @@ fn nibble(c: u8) -> u8 {
 fn assert_bytes_eq(actual: &soroban_sdk::Bytes, expected: &[u8]) {
     assert_eq!(actual.len(), expected.len() as u32, "length");
     for (i, b) in expected.iter().enumerate() {
-        assert_eq!(actual.get(i as u32).unwrap(), *b, "byte {}", i);
+        assert_eq!(actual.get(i as u32).unwrap(), *b, "byte {i}");
     }
 }
 
@@ -2179,8 +2178,8 @@ fn fill_dispatches_evm_decodable_confirmation() {
     let sb = solver_evm.to_array();
     for (i, (hbyte, sbyte)) in hb.iter().zip(sb.iter()).enumerate() {
         let off = i as u32;
-        assert_eq!(msg.get(2 + off).unwrap(), *hbyte, "intent_hash byte {}", i);
-        assert_eq!(msg.get(34 + off).unwrap(), *sbyte, "solver_evm byte {}", i);
+        assert_eq!(msg.get(2 + off).unwrap(), *hbyte, "intent_hash byte {i}");
+        assert_eq!(msg.get(34 + off).unwrap(), *sbyte, "solver_evm byte {i}");
     }
 }
 
@@ -2204,8 +2203,7 @@ fn cancel_dispatches_evm_decodable_cancel() {
         assert_eq!(
             msg.get(2 + i as u32).unwrap(),
             *hbyte,
-            "intent_hash byte {}",
-            i
+            "intent_hash byte {i}"
         );
     }
     assert_eq!(msg.get(34).unwrap(), CANCEL_REASON_EXPIRED);
@@ -2673,7 +2671,6 @@ fn cancel_succeeds_without_native_token_configured() {
     let dest_asset = dest_sac.address();
     let fi = FillInstruction {
         intent_hash: h.clone(),
-        src_eid,
         recipient,
         dest_asset,
         min_dest_amount: 100_000,
@@ -2746,8 +2743,8 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         let fill = s
             .client
             .try_fill_intent(&solver, &solver_evm, h, &amount, &0);
-        assert_eq!(deliver, Err(Ok(expected)), "{}: deliver_intent", case);
-        assert_eq!(fill, Err(Ok(expected)), "{}: fill_intent", case);
+        assert_eq!(deliver, Err(Ok(expected)), "{case}: deliver_intent");
+        assert_eq!(fill, Err(Ok(expected)), "{case}: fill_intent");
     };
 
     // Test 1: expired intent
@@ -2817,7 +2814,6 @@ fn try_deliver_fill_bytes(
 ) -> Result<(), PerihelionError> {
     let fi = FillInstruction {
         intent_hash: h.clone(),
-        src_eid: s.src_eid,
         recipient: recipient.clone(),
         dest_asset: s.asset.clone(),
         min_dest_amount: min,
@@ -3604,7 +3600,6 @@ fn rolling_window_cap_does_not_sum_across_destination_assets() {
         .address();
     let fi = FillInstruction {
         intent_hash: hash(&s.env, 0x92),
-        src_eid: s.src_eid,
         recipient: Address::generate(&s.env),
         dest_asset: other_asset,
         min_dest_amount: 800,
@@ -4267,7 +4262,6 @@ fn try_deliver_fill_with_asset_id(
 ) -> Result<(), PerihelionError> {
     let fi = FillInstruction {
         intent_hash: h.clone(),
-        src_eid: s.src_eid,
         recipient: recipient.clone(),
         // Ignored: the encoder writes `asset_id` into the dest_asset field.
         dest_asset: s.asset.clone(),

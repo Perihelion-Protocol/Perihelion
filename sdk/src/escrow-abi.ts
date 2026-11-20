@@ -183,10 +183,47 @@ export const ESCROW_ABI = [
   },
   {
     "type": "function",
+    "name": "cancelIntent",
+    "inputs": [
+      {
+        "name": "intentHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "cancelOwnershipTransfer",
     "inputs": [],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cancelledIntent",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1209,6 +1246,25 @@ export const ESCROW_ABI = [
   },
   {
     "type": "event",
+    "name": "IntentRevoked",
+    "inputs": [
+      {
+        "name": "intentHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "user",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Locked",
     "inputs": [
       {
@@ -1656,6 +1712,11 @@ export const ESCROW_ABI = [
   },
   {
     "type": "error",
+    "name": "IntentCancelled",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "IntentExpired",
     "inputs": []
   },
@@ -1667,6 +1728,16 @@ export const ESCROW_ABI = [
   {
     "type": "error",
     "name": "InvalidSignature",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MalformedDestAsset",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MalformedDestination",
     "inputs": []
   },
   {
@@ -1777,6 +1848,11 @@ export const ESCROW_ABI = [
   {
     "type": "error",
     "name": "TransferFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UndeployedSmartAccount",
     "inputs": []
   },
   {

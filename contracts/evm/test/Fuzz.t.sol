@@ -42,7 +42,7 @@ contract PerihelionEscrowFuzzTest is Test {
     {
         return PerihelionEscrow.Intent({
             user: user,
-            destination: "GUSERSTELLAR",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(token),
             sourceAmount: amount,
@@ -168,9 +168,8 @@ contract PerihelionEscrowFuzzTest is Test {
         uint128 amount,
         uint64 ledger
     ) public {
-        bytes memory message = abi.encodePacked(
-            bytes1(0x01), bytes1(0x02), intentHash, solverWord, amount, ledger
-        );
+        bytes memory message =
+            abi.encodePacked(bytes1(0x01), bytes1(0x02), intentHash, solverWord, amount, ledger);
 
         // Call lzReceive from a random non-endpoint address — must revert NotEndpoint
         vm.prank(address(0xDEAD));

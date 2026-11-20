@@ -151,9 +151,9 @@ contract ForkTest is Test {
     /// @notice The escrow bytecode must match the known-good baseline.
     function test_ReproducibleBytecode_Escrow() public {
         bytes32 codehash;
-        address addr = address(escrow);
+        address escrowAddr = address(escrow);
         assembly {
-            codehash := extcodehash(addr)
+            codehash := extcodehash(escrowAddr)
         }
         // Log the actual codehash for baseline updates
         emit log_named_bytes32("Escrow codehash", codehash);
@@ -165,9 +165,9 @@ contract ForkTest is Test {
     /// @notice The timelock bytecode must match the known-good baseline.
     function test_ReproducibleBytecode_Timelock() public {
         bytes32 codehash;
-        address addr = address(timelock);
+        address timelockAddr = address(timelock);
         assembly {
-            codehash := extcodehash(addr)
+            codehash := extcodehash(timelockAddr)
         }
         emit log_named_bytes32("Timelock codehash", codehash);
         assertEq(codehash, codehash, "Timelock bytecode mismatch - update baseline");
@@ -178,11 +178,11 @@ contract ForkTest is Test {
     function _intent(uint256 nonce_) internal view returns (PerihelionEscrow.Intent memory) {
         return PerihelionEscrow.Intent({
             user: user,
-            destination: "GUSERSTELLAR",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(token),
             sourceAmount: 100_000,
-            destAsset: "USDC:GA5Z",
+            destAsset: "USDC:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             minDestAmount: 99_000,
             deadline: block.timestamp + 600,
             nonce: nonce_,

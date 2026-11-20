@@ -33,7 +33,7 @@ use soroban_sdk::{Address, Bytes, BytesN, Env};
 use crate::strkey;
 use crate::types::{
     CancelInstruction, FillInstruction, CANCEL_INTENT_LENGTH, CANCEL_REASON_ADMIN,
-    CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID, FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH,
+    CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID, FILL_INSTRUCTION_LENGTH,
     MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
 };
 
@@ -221,7 +221,6 @@ fn read_field<const N: usize>(
 #[derive(Clone)]
 pub struct WireFillInstruction {
     pub intent_hash: BytesN<32>,
-    pub src_eid: u32,
     pub recipient: Address,
     pub dest_asset: Bytes,
     pub min_dest_amount: i128,
@@ -236,7 +235,6 @@ impl WireFillInstruction {
     pub fn into_fill_instruction(self, dest_asset: Address) -> FillInstruction {
         FillInstruction {
             intent_hash: self.intent_hash,
-            src_eid: self.src_eid,
             recipient: self.recipient,
             dest_asset,
             min_dest_amount: self.min_dest_amount,
@@ -290,7 +288,6 @@ pub fn decode_message(
             );
             let dummy = WireFillInstruction {
                 intent_hash: ci.intent_hash.clone(),
-                src_eid: 0,
                 recipient: zero_addr,
                 dest_asset: Bytes::new(env),
                 min_dest_amount: 0,
@@ -306,7 +303,10 @@ pub fn decode_message(
 }
 
 /// Decode the canonical `FillInstruction` payload (227 bytes):
-/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | locked_solver(32) | reservation_window(8)`.
+/// `version(1) | type(1) | intent_hash(32) | reserved(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | locked_solver(32) | reservation_window(8)`.
+///
+/// `reserved` (offset 34) is ignored on receipt: the eid of the locking chain is
+/// the authenticated LayerZero origin, so the body never supplies one (#1051).
 ///
 /// # Address decoding
 ///
@@ -344,9 +344,8 @@ fn decode_fill_instruction(
     let intent_hash_bytes: [u8; 32] = read_field(message, 2)?;
     let intent_hash = BytesN::from_array(env, &intent_hash_bytes);
 
-    // Extract src_eid (offset 34, 4 bytes, big-endian)
-    let src_eid_bytes: [u8; 4] = read_field(message, 34)?;
-    let src_eid = u32::from_be_bytes(src_eid_bytes);
+    // Offset 34 is `reserved` (4 bytes). It is deliberately not read: routing uses
+    // the transport origin eid, so a body-supplied value has no effect (#1051).
 
     // Extract recipient (offset 38, 56 bytes): ASCII strkey characters right-zero-padded.
     // Strip trailing zeros and decode as a Stellar strkey (G... or C...).
@@ -402,7 +401,6 @@ fn decode_fill_instruction(
 
     Ok(WireFillInstruction {
         intent_hash,
-        src_eid,
         recipient,
         dest_asset,
         min_dest_amount,
@@ -457,7 +455,7 @@ fn trimmed_len(padded: &[u8]) -> usize {
 fn strkey_field<const N: usize>(addr: &Address) -> [u8; N] {
     let s = addr.to_string();
     let len = s.len() as usize;
-    assert!(len <= N, "strkey does not fit the {}-byte wire field", N);
+    assert!(len <= N, "strkey does not fit the {N}-byte wire field");
     let mut out = [0u8; N];
     s.copy_into_slice(&mut out[..len]);
     out
@@ -498,7 +496,8 @@ pub(crate) fn encode_fill_instruction_with_dest_asset(
     b.push_back(PROTOCOL_VERSION);
     b.push_back(MSG_FILL_INSTRUCTION);
     b.append(&Bytes::from_array(env, &fi.intent_hash.to_array()));
-    b.append(&Bytes::from_array(env, &fi.src_eid.to_be_bytes()));
+    // reserved (offset 34): always zero on the wire, see the decoder note above.
+    b.append(&Bytes::from_array(env, &[0u8; 4]));
     b.append(&Bytes::from_array(env, &strkey_field::<56>(&fi.recipient)));
     b.append(&Bytes::from_array(env, &dest_asset_field));
     b.append(&Bytes::from_array(
@@ -755,7 +754,6 @@ mod tests {
         let fi = decode_fill_instruction(&env, &msg).expect("golden vector must decode");
 
         // Values match the canonical table in wire-vectors/README.md.
-        assert_eq!(fi.src_eid, 30316);
         assert_eq!(fi.min_dest_amount, 1_000_000_000);
         assert_eq!(fi.deadline, 9_999_999_999);
         assert!(fi.preferred_solver.is_none());

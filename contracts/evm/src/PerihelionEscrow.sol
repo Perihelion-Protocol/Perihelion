@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { IERC20 } from "./IERC20.sol";
+import { StellarStrKey } from "./StellarStrKey.sol";
 import {
     Origin,
     MessagingParams,
@@ -13,7 +14,10 @@ import {
 /// @dev Minimal ERC-1271 interface for smart-contract wallet signature validation.
 interface IERC1271 {
     /// @notice Returns the magic value `0x1626ba7e` when `hash` is validly signed by this account.
-    function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4);
+    function isValidSignature(bytes32 hash, bytes calldata signature)
+        external
+        view
+        returns (bytes4);
 }
 
 /// @title Perihelion Escrow
@@ -62,6 +66,7 @@ interface IERC1271 {
 ///      | OwnershipTransferStart | previousOwner, newOwner                             | -                             | `admin_transfer_started`       |
 ///      | OwnershipTransferred   | previousOwner, newOwner                             | -                             | `admin_transfer_completed`     |
 ///      | OwnershipTransferCancel| previousOwner                                       | -                             | -                              |
+///      | IntentRevoked          | intentHash, user                                    | -                             | -                              |
 ///      | Skimmed                | token, to                                           | amount                        | -                              |
 ///      | MaxIntentAmountSet     | -                                                   | maxAmount                     | `max_intent_amount_set`        |
 ///      | RollingWindowCapSet    | -                                                   | duration, cap                 | `rolling_window_cap_set`       |
@@ -263,6 +268,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice intentHash => escrow position.
     mapping(bytes32 => Lock) public locks;
+    /// @notice user => intentHash => revoked before any lock (#1053). Keyed by the
+    ///         signer so only the user who signed an intent can revoke it.
+    mapping(address => mapping(bytes32 => bool)) public cancelledIntent;
     /// @notice token => aggregate of all un-finalised Lock.amount values for that token.
     ///         Incremented in lock(), decremented in _onFillConfirmed, _onCancelIntent,
     ///         and cancelExpired. Allows skim() to compute the genuine on-chain surplus
@@ -362,6 +370,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event FillConfirmedIgnored(bytes32 indexed intentHash, uint8 reason);
     event CancelIgnored(bytes32 indexed intentHash, uint8 reason);
     event AssetAllowed(address indexed asset, bool allowed);
+    /// @dev Emitted by {cancelIntent}: the user revoked an unlocked intent.
+    event IntentRevoked(bytes32 indexed intentHash, address indexed user);
     event MaxIntentAmountPerAssetSet(address indexed asset, uint256 maxAmount);
 
     // --- Errors --------------------------------------------------------------
@@ -369,6 +379,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error AlreadyLocked();
     error NotLocked();
     error InvalidSignature();
+    /// @dev The intent is signed by a counterfactual (not yet deployed) smart account
+    ///      with an ERC-6492 wrapper (#1054). The escrow does not deploy accounts, so
+    ///      the solver must deploy the account first (see {lock}) and then retry.
+    error UndeployedSmartAccount();
     error IntentExpired();
     error WrongChain();
     error NotEndpoint();
@@ -399,6 +413,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error ZeroAddress();
     error SourceChainMismatch();
     error StringFieldEmpty();
+    /// @dev `destination` is not a valid 56-char G.../C... strkey (#1052).
+    error MalformedDestination();
+    /// @dev `destAsset` is not `native`, `CODE:G...` or a `C...` strkey (#1052).
+    error MalformedDestAsset();
     error StringFieldTooLong();
     error GuardianCooldown();
     error PauseNotGuardianInitiated();
@@ -417,6 +435,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @dev A uint256 intent field cannot fit in the narrower wire/storage type
     ///      without wrapping (minDestAmount/sourceAmount vs uint128, deadline vs uint64).
     error AmountTooLarge();
+    /// @dev The intent was revoked by its user with {cancelIntent} before locking.
+    error IntentCancelled();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -727,11 +747,26 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // (#857). Order of checks, effects and interactions is unchanged.
         bytes32 intentHash = _validateIntent(intent, signature);
         uint256 received = _pullFunds(intent);
-        // Cap breach: the latch is already persisted and msg.value refunded, so
-        // stop here. Continuing would record a zero-amount lock and dispatch a fill.
+        // A zero amount means a rolling-cap breach refused the pull (see
+        // {_checkValueCaps}); the breaker latch was persisted and any native value
+        // refunded, so no lock is recorded and nothing is dispatched.
         if (received == 0) return;
         _recordLock(intentHash, intent, received);
         _dispatchFillInstruction(intentHash, intent);
+    }
+
+    /// @notice Revoke one of your own signed intents before a solver locks it (#1053).
+    /// @dev Only the signer can revoke: the mapping is keyed by `msg.sender`, and a
+    ///      different caller only writes an unused slot. Once revoked, {lock} reverts
+    ///      with {IntentCancelled}. Revocation after a lock is refused with
+    ///      {AlreadyLocked}, because the lock already exists and the funds follow the
+    ///      normal release or refund path. Not pausable: a user must always be able to
+    ///      withdraw consent. Idempotent for an unlocked intent.
+    /// @param intentHash EIP-712 hash of the intent, as returned by {hashIntent}.
+    function cancelIntent(bytes32 intentHash) external {
+        if (locks[intentHash].user != address(0)) revert AlreadyLocked();
+        cancelledIntent[msg.sender][intentHash] = true;
+        emit IntentRevoked(intentHash, msg.sender);
     }
 
     /// @dev Stateless validation of a signed intent; returns its EIP-712 hash.
@@ -755,6 +790,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         uint256 assetLen = bytes(intent.destAsset).length;
         if (assetLen == 0) revert StringFieldEmpty();
         if (assetLen > MAX_DEST_ASSET_LEN) revert StringFieldTooLong();
+        // Full strkey and asset-form validation, mirroring the Soroban decoder. Without
+        // it a malformed intent is accepted here, the fee is paid, and the Soroban side
+        // rejects the FillInstruction permanently while the user's funds stay locked.
+        if (!StellarStrKey.isValidStrKey(bytes(intent.destination))) revert MalformedDestination();
+        if (!StellarStrKey.isValidDestAsset(bytes(intent.destAsset))) revert MalformedDestAsset();
 
         if (!assetAllowed[intent.sourceAsset]) revert AssetNotAllowed();
 
@@ -767,6 +807,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         intentHash = hashIntent(intent);
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
+        if (cancelledIntent[intent.user][intentHash]) revert IntentCancelled();
+        // A counterfactual account (no code yet) cannot be validated on-chain without
+        // deploying it. Fail with a dedicated error so the solver knows to deploy the
+        // account from the wrapper's factory call first, instead of a generic failure.
+        if (intent.user.code.length == 0 && _isERC6492(signature)) revert UndeployedSmartAccount();
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
     }
 
@@ -1148,7 +1193,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @dev Encode a FillInstruction payload (227 bytes) using the fixed big-endian
     ///      layout from architecture spec §3.3, matching the Soroban decoder byte-for-byte:
     ///
-    ///      version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56)
+    ///      version(1) | type(1) | intent_hash(32) | reserved(4) | recipient(56)
     ///        | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
     ///        | reservation_window(8)
     ///
@@ -1166,38 +1211,30 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         Intent calldata intent,
         address lockingSolver
     ) internal view returns (bytes memory) {
-        // Split into two packs: a single abi.encodePacked over all ten fields
-        // exceeds the legacy codegen's stack limit ("stack too deep").
-        // Head: destination is a fixed 56-byte field and destAsset a fixed 69-byte
-        // field, both right-zero-padded. A 69-byte destAsset field avoids truncating
-        // CODE:ISSUER assets whose ISSUER bytes extend past position 32.
-        bytes memory head = abi.encodePacked(
+        // Right-zero-pad the strkey and asset identifier to their fixed wire widths.
+        // The helper keeps this frame under the legacy codegen's stack limit.
+        return abi.encodePacked(
             PROTOCOL_VERSION, // 1  byte  offset 0
             MSG_FILL_INSTRUCTION, // 1  byte  offset 1
             intentHash, // 32 bytes offset 2
-            uint32(stellarEid), // 4  bytes offset 34
+            uint32(0), // 4  bytes offset 34: reserved, always zero; the Soroban
+                //    decoder ignores it and takes the origin eid from transport
             _padRight(bytes(intent.destination), 56), // 56 bytes offset 38
-            _padRight(bytes(intent.destAsset), 69) // 69 bytes offset 94
-        );
-
-        // Tail. The locking solver (not the user preference) is encoded: it is the
-        // cross-chain exclusivity binding and is never an alias/payout field.
-        // reservation_window is explicit and zero until the signed EVM intent schema
-        // adds it.
-        return abi.encodePacked(
-            head,
+            _padRight(bytes(intent.destAsset), 69), // 69 bytes offset 94
             uint128(intent.minDestAmount), // 16 bytes offset 163
             uint64(intent.deadline), // 8  bytes offset 179
+            // Encode the canonical locking solver, not the user preference. This field
+            // is the cross-chain exclusivity binding and is never an alias/payout field.
             bytes32(uint256(uint160(lockingSolver))), // 32 bytes offset 187
-            uint64(0) // 8  bytes offset 219; total 227
+            uint64(0) // 8 bytes offset 219; no reservation in legacy EVM intents
+                // reservation_window is explicit and zero until the signed EVM intent schema adds it.
+                //                                 total       227
         );
-    }
 
-    /// @dev Copy `src` into a fresh `size`-byte buffer, right-zero-padded and
-    ///      truncated to `size` if longer. Used for fixed-width wire fields.
-    function _padRight(bytes memory src, uint256 size) private pure returns (bytes memory out) {
-        out = new bytes(size);
-        uint256 n = src.length < size ? src.length : size;
+    /// @dev Right-zero-pad `src` to exactly `width` bytes, truncating if longer.
+    function _padRight(bytes memory src, uint256 width) private pure returns (bytes memory out) {
+        out = new bytes(width);
+        uint256 n = src.length < width ? src.length : width;
         for (uint256 i = 0; i < n; i++) {
             out[i] = src[i];
         }
@@ -1294,9 +1331,30 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: signature & token safety ----------------------------------
 
+    /// @dev ERC-6492 magic suffix: a signature wrapped for a counterfactual account is
+    ///      `abi.encode(factory, factoryCalldata, innerSig) ‖ MAGIC` (#1054).
+    bytes32 private constant ERC6492_MAGIC =
+        0x6492649264926492649264926492649264926492649264926492649264926492;
+
+    /// @dev True iff `signature` ends with the ERC-6492 magic suffix.
+    function _isERC6492(bytes calldata signature) private pure returns (bool) {
+        return signature.length >= 32
+            && keccak256(signature[signature.length - 32:])
+                == keccak256(abi.encodePacked(ERC6492_MAGIC));
+    }
+
+    /// @dev Strip the ERC-6492 wrapper and return the inner signature the account
+    ///      itself validates. Reverts on a malformed wrapper.
+    function _unwrapERC6492(bytes calldata signature) private pure returns (bytes memory inner) {
+        bytes memory body = signature[:signature.length - 32];
+        (,, inner) = abi.decode(body, (address, bytes, bytes));
+    }
+
     /// @dev Verify an intent signature. Contract accounts (Safe, ERC-4337 smart
     ///      accounts) are validated via ERC-1271 with a bounded gas stipend; EOAs use
-    ///      the 65-byte ECDSA path. Returns false rather than reverting on failure.
+    ///      the 65-byte ECDSA path. An ERC-6492-wrapped signature from a deployed account
+    ///      is unwrapped first, so the account validates only its own signature. Returns
+    ///      false rather than reverting on failure.
     function _verify(bytes32 digest, address signer, bytes calldata signature)
         private
         view
@@ -1304,10 +1362,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     {
         // ERC-1271 path for smart-contract wallets.
         if (signer.code.length > 0) {
+            bytes memory accountSig = _isERC6492(signature) ? _unwrapERC6492(signature) : signature;
             uint256 gasStipend = gasleft();
             if (gasStipend > 100_000) gasStipend = 100_000;
             (bool ok, bytes memory ret) = signer.staticcall{ gas: gasStipend }(
-                abi.encodeWithSelector(IERC1271.isValidSignature.selector, digest, signature)
+                abi.encodeWithSelector(IERC1271.isValidSignature.selector, digest, accountSig)
             );
             if (!ok || ret.length < 32) return false;
             return abi.decode(ret, (bytes4)) == IERC1271.isValidSignature.selector;

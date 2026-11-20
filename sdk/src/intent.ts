@@ -18,6 +18,7 @@ import {
   type PublicClient,
   type TypedDataDomain,
 } from "viem";
+import { verifyTypedData } from "viem/actions";
 import type { Address, Hex, Intent } from "./types.js";
 import { isStellarAddress, isStellarAsset } from "./stellar.js";
 import { IntentValidationError, PerihelionValidationError } from "./errors.js";
@@ -476,6 +477,21 @@ export const ERC1271_ABI = [
 ] as const;
 
 /**
+ * ERC-6492 magic suffix (32 bytes, `0x6492` repeated). A signature wrapped for a
+ * counterfactual (not yet deployed) smart account ends with this value (#1054).
+ */
+export const ERC6492_MAGIC_SUFFIX =
+  "0x6492649264926492649264926492649264926492649264926492649264926492" as const;
+
+/** True iff `signature` carries the ERC-6492 magic suffix. */
+export function isErc6492Signature(signature: Hex): boolean {
+  return (
+    signature.length >= 2 + 64 &&
+    signature.toLowerCase().endsWith(ERC6492_MAGIC_SUFFIX.slice(2))
+  );
+}
+
+/**
  * Options for {@link verifyIntent}.
  */
 export interface VerifyIntentOptions {
@@ -521,6 +537,11 @@ export interface VerifyIntentOptions {
  *     length, rejecting the high-s (`s > n/2`) malleable counterpart of every
  *     signature.
  *
+ * - **ERC-6492-wrapped signatures** (counterfactual smart accounts, e.g. an ERC-4337
+ *   wallet that has not been deployed yet): verified with viem's `verifyTypedData`,
+ *   which unwraps the wrapper and validates undeployed accounts without deploying
+ *   them. Requires `client`; without one the check fails closed.
+ *
  * @param domain  Must be built with {@link perihelionDomain}.
  * @param options See {@link VerifyIntentOptions}. Supply `client` (or
  *                `isContract`) when the user may be a contract wallet.
@@ -531,6 +552,23 @@ export async function verifyIntent(
   domain: TypedDataDomain,
   options?: VerifyIntentOptions,
 ): Promise<boolean> {
+  if (isErc6492Signature(signature)) {
+    if (!options?.client) return false;
+    try {
+      return await verifyTypedData(options.client, {
+        address: intent.user as Address,
+        domain,
+        types: INTENT_TYPES,
+        primaryType: "Intent",
+        message: toMessage(intent),
+        signature,
+      });
+    } catch {
+      // A malformed wrapper or failed validation is an invalid signature.
+      return false;
+    }
+  }
+
   // Determine whether the user account is a contract. An explicit override
   // wins; otherwise ask the chain when a client is available.
   let isContract = options?.isContract;

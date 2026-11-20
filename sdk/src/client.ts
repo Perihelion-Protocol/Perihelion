@@ -246,7 +246,7 @@ export class PerihelionClient {
   /**
    * Report a status transition for an intent (e.g. `"filled"`, `"settled"`).
    * `status` must be one of the {@link MempoolIntentStatus} values the mempool
-   * accepts — `pending`, `filled`, `settled`, `refunded` or `expired` — anything
+   * accepts — `pending`, `filled`, `settled`, `refunded`, `expired` or `cancelled` — anything
    * else is rejected with `400`.
    * Restricted server-side to holders of the mempool's shared status token —
    * intended for relayer/solver services, not end users.

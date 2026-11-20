@@ -131,11 +131,11 @@ contract AmountBoundaryTest is Test {
     function _baseIntent() internal view returns (PerihelionEscrow.Intent memory) {
         return PerihelionEscrow.Intent({
             user: address(0xA1),
-            destination: "GUSER",
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             sourceChainId: block.chainid,
             sourceAsset: address(0xB2),
             sourceAmount: 1_000_000,
-            destAsset: "USDC:GISSUER",
+            destAsset: "USDC:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
             minDestAmount: 990_000,
             deadline: block.timestamp + 600,
             nonce: 1,
