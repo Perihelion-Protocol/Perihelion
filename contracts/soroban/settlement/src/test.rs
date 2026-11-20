@@ -1189,9 +1189,15 @@ fn set_admin_emits_transfer_started_event() {
 fn set_endpoint_emits_event() {
     let s = setup();
     let new_ep = Address::generate(&s.env);
-    s.client.set_endpoint(&new_ep);
+    // Issue #908/#1069: the trusted endpoint only rotates through the delayed
+    // propose/confirm path, so the event is emitted by `confirm_endpoint`.
+    s.client.propose_endpoint(&new_ep);
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+    s.client.confirm_endpoint();
     let events = s.env.events().all();
-    assert!(!events.is_empty(), "expected events after set_endpoint");
+    assert!(!events.is_empty(), "expected events after confirm_endpoint");
 }
 
 #[test]
@@ -3345,6 +3351,283 @@ fn propose_endpoint_succeeds_after_cancel_of_pending_proposal() {
     s.client.cancel_pending_endpoint();
 
     assert!(s.client.try_propose_endpoint(&second).is_ok());
+}
+
+// --- Issue #1069: no entrypoint may rotate the endpoint without the delay ----
+
+#[test]
+fn no_entrypoint_rotates_endpoint_without_delay() {
+    let s = setup();
+    let original = s.client.endpoint();
+    let attacker = Address::generate(&s.env);
+
+    // The instant path must be gone entirely.
+    assert!(
+        s.client.try_set_endpoint(&attacker).is_err(),
+        "set_endpoint must not exist as an instant rotation path"
+    );
+    assert_eq!(s.client.endpoint(), original);
+
+    // Proposing alone must not change the trusted endpoint.
+    s.client.propose_endpoint(&attacker);
+    assert_eq!(
+        s.client.endpoint(),
+        original,
+        "propose_endpoint must not rotate the endpoint"
+    );
+
+    // Confirming before the delay must fail and leave the endpoint untouched.
+    assert!(s.client.try_confirm_endpoint().is_err());
+    assert_eq!(s.client.endpoint(), original);
+
+    // Only after the delay does the rotation take effect.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+    assert!(s.client.try_confirm_endpoint().is_ok());
+    assert_eq!(s.client.endpoint(), attacker);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #134)")] // AdminEndpointCollision
+fn propose_endpoint_rejects_admin_collision() {
+    let s = setup();
+    // The admin address is the deployer; recover it from the initialized event
+    // is awkward, so instead assert the collision check via the constructor
+    // invariant: proposing the admin must be rejected at propose time.
+    let admin = s.client.get_admin();
+    s.client.propose_endpoint(&admin);
+}
+
+#[test]
+fn propose_endpoint_collision_is_checked_at_propose_time() {
+    let s = setup();
+    let admin = s.client.get_admin();
+    let err = s
+        .client
+        .try_propose_endpoint(&admin)
+        .expect_err("proposing the admin as endpoint must be rejected")
+        .unwrap();
+    assert_eq!(err, PerihelionError::AdminEndpointCollision);
+    // No pending proposal was recorded.
+    assert!(matches!(
+        s.client.try_get_pending_endpoint(),
+        Ok(Ok(None))
+    ));
+}
+
+#[test]
+fn propose_endpoint_rejects_double_propose() {
+    let s = setup();
+    let first = Address::generate(&s.env);
+    let second = Address::generate(&s.env);
+
+    s.client.propose_endpoint(&first);
+    let err = s
+        .client
+        .try_propose_endpoint(&second)
+        .expect_err("a second proposal while one is pending must be rejected")
+        .unwrap();
+    assert_eq!(err, PerihelionError::PendingPeerChangeExists);
+
+    // The original proposal survives untouched.
+    let (pending, _, _, _) = s
+        .client
+        .try_get_pending_endpoint()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending, first);
+}
+
+#[test]
+fn propose_endpoint_accepts_bounded_custom_delay() {
+    let s = setup();
+    let new_ep = Address::generate(&s.env);
+    let custom_delay = MIN_PEER_CHANGE_DELAY + 3_600;
+
+    s.client.propose_endpoint_with_delay(&new_ep, &custom_delay);
+
+    // Not ready before the custom delay elapses.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += custom_delay - 1;
+    });
+    assert!(s.client.try_confirm_endpoint().is_err());
+
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += 2;
+    });
+    assert!(s.client.try_confirm_endpoint().is_ok());
+    assert_eq!(s.client.endpoint(), new_ep);
+}
+
+#[test]
+fn propose_endpoint_rejects_delay_below_minimum() {
+    let s = setup();
+    let new_ep = Address::generate(&s.env);
+    assert!(
+        s.client
+            .try_propose_endpoint_with_delay(&new_ep, &(MIN_PEER_CHANGE_DELAY - 1))
+            .is_err(),
+        "a delay below MIN_PEER_CHANGE_DELAY must be rejected"
+    );
+}
+
+// --- Issue #1067: dispatch cutoff must leave a positive latency margin -------
+
+/// The dispatch cutoff (`deadline + MIN_DISPATCH_WINDOW`) must leave at least
+/// `CROSS_CHAIN_LATENCY_BUDGET` seconds before the EVM `MIN_CONFIRMATION_GRACE`
+/// opens `cancelExpired`. Otherwise a FillConfirmed dispatched just before the
+/// cutoff can land after the user has already been refunded.
+#[test]
+fn dispatch_cutoff_leaves_positive_latency_margin() {
+    let evm_grace = read_evm_min_confirmation_grace();
+    let cutoff = MIN_DISPATCH_WINDOW;
+    assert!(
+        cutoff + CROSS_CHAIN_LATENCY_BUDGET <= evm_grace,
+        "dispatch cutoff {cutoff}s + latency budget {CROSS_CHAIN_LATENCY_BUDGET}s \
+         must fit inside the EVM grace {evm_grace}s"
+    );
+    assert!(
+        CROSS_CHAIN_LATENCY_BUDGET > 0,
+        "the latency budget must be strictly positive"
+    );
+    assert!(
+        evm_grace > cutoff,
+        "the EVM grace must be strictly larger than the dispatch cutoff"
+    );
+}
+
+/// Cross-language constant test: reads `MIN_CONFIRMATION_GRACE` from the EVM
+/// contract source and asserts the documented inequality against the Soroban
+/// `MIN_DISPATCH_WINDOW` / `CROSS_CHAIN_LATENCY_BUDGET`. Fails if either side
+/// changes without the other.
+#[test]
+fn cross_language_grace_constants_are_consistent() {
+    let evm_grace = read_evm_min_confirmation_grace();
+    assert_eq!(
+        MIN_DISPATCH_WINDOW + CROSS_CHAIN_LATENCY_BUDGET,
+        evm_grace,
+        "MIN_DISPATCH_WINDOW ({MIN_DISPATCH_WINDOW}) + CROSS_CHAIN_LATENCY_BUDGET \
+         ({CROSS_CHAIN_LATENCY_BUDGET}) must equal the EVM MIN_CONFIRMATION_GRACE \
+         ({evm_grace}); update both contracts together"
+    );
+}
+
+/// Parse `MIN_CONFIRMATION_GRACE` out of `contracts/evm/src/PerihelionEscrow.sol`.
+fn read_evm_min_confirmation_grace() -> u64 {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("evm")
+        .join("src")
+        .join("PerihelionEscrow.sol");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {:?}: {err}", path));
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("uint256") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix("public") {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix("constant") {
+                    let rest = rest.trim_start();
+                    if let Some(rest) = rest.strip_prefix("MIN_CONFIRMATION_GRACE") {
+                        let rest = rest.trim_start();
+                        if let Some(rest) = rest.strip_prefix('=') {
+                            let value: std::string::String = rest
+                                .chars()
+                                .take_while(|c| c.is_ascii_digit() || *c == '_')
+                                .filter(|c| *c != '_')
+                                .collect();
+                            return value
+                                .parse()
+                                .unwrap_or_else(|_| panic!("unparsable MIN_CONFIRMATION_GRACE: {rest}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    panic!("MIN_CONFIRMATION_GRACE not found in {:?}", path);
+}
+
+// --- Issue #1068: solver reputation latency is measured from registration ---
+
+#[test]
+fn solver_reputation_ewma_averages_registration_to_fill_delays() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let solver_evm = evm_solver(&s.env, 0x33);
+
+    // Fill 1: 10 ledgers after registration.
+    let h1 = hash(&s.env, 0xA1);
+    register_intent(&s, &h1, &recipient, 100_000, 9_000, 1, None);
+    advance_ledgers(&s, 10);
+    s.client.fill_intent(&solver, &solver_evm, &h1, &100_000, &0);
+
+    let rep = s.client.get_solver_reputation(&solver_evm).unwrap();
+    assert_eq!(rep.fill_count, 1);
+    assert_eq!(rep.ewma_latency, 10, "first sample seeds the EWMA");
+
+    // Fill 2: 30 ledgers after registration.
+    let h2 = hash(&s.env, 0xA2);
+    register_intent(&s, &h2, &recipient, 100_000, 9_000, 2, None);
+    advance_ledgers(&s, 30);
+    s.client.fill_intent(&solver, &solver_evm, &h2, &100_000, &0);
+
+    let rep = s.client.get_solver_reputation(&solver_evm).unwrap();
+    assert_eq!(rep.fill_count, 2);
+    // EWMA with the contract's smoothing factor over samples 10 and 30.
+    let expected = expected_ewma(&[10, 30]);
+    assert_eq!(rep.ewma_latency, expected);
+}
+
+#[test]
+fn solver_reputation_zero_latency_fill_does_not_reset_ewma() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let solver_evm = evm_solver(&s.env, 0x34);
+
+    // Seed with a non-trivial delay.
+    let h1 = hash(&s.env, 0xA3);
+    register_intent(&s, &h1, &recipient, 100_000, 9_000, 1, None);
+    advance_ledgers(&s, 20);
+    s.client.fill_intent(&solver, &solver_evm, &h1, &100_000, &0);
+    let seeded = s.client.get_solver_reputation(&solver_evm).unwrap().ewma_latency;
+    assert_eq!(seeded, 20);
+
+    // A fill in the same ledger as registration (latency 0) must be treated as
+    // a real sample, not as the "unset" sentinel.
+    let h2 = hash(&s.env, 0xA4);
+    register_intent(&s, &h2, &recipient, 100_000, 9_000, 2, None);
+    s.client.fill_intent(&solver, &solver_evm, &h2, &100_000, &0);
+
+    let rep = s.client.get_solver_reputation(&solver_evm).unwrap();
+    assert_eq!(rep.fill_count, 2);
+    assert_eq!(rep.ewma_latency, expected_ewma(&[20, 0]));
+    assert!(
+        rep.ewma_latency < seeded,
+        "a zero-latency sample must pull the average down, not reset it"
+    );
+}
+
+/// Mirror of the contract's EWMA smoothing so tests can assert exact values.
+fn expected_ewma(samples: &[u64]) -> u64 {
+    let mut ewma: Option<u64> = None;
+    for &sample in samples {
+        ewma = Some(match ewma {
+            None => sample,
+            Some(prev) => (prev * (REPUTATION_EWMA_WEIGHT_DENOM - REPUTATION_EWMA_WEIGHT_NUM)
+                + sample * REPUTATION_EWMA_WEIGHT_NUM)
+                / REPUTATION_EWMA_WEIGHT_DENOM,
+        });
+    }
+    ewma.unwrap()
 }
 
 // --- Contract-native destination assets ---------------------------------------

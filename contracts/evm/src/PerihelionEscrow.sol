@@ -150,12 +150,35 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Upper bound on `confirmationGrace`, so a misconfigured admin can
     ///         never strand a user's local refund indefinitely.
     uint256 public constant MAX_CONFIRMATION_GRACE = 7 days;
+    /// @notice Documented latency budget for a FillConfirmed to travel from Stellar
+    ///         to this contract: LayerZero DVN verification plus executor delivery.
+    ///         Sized against the published DVN/executor SLAs with headroom.
+    ///
+    ///         ## Cross-chain window inequality (issue #1067)
+    ///         The Soroban settlement contract accepts a `dispatch_confirmation`
+    ///         until `deadline + MIN_DISPATCH_WINDOW` (see
+    ///         `contracts/soroban/settlement/src/lib.rs`). A FillConfirmed dispatched
+    ///         at that cutoff still needs DVN verification and executor delivery
+    ///         before it lands here. To guarantee it arrives before `cancelExpired`
+    ///         opens, the EVM grace must satisfy:
+    ///
+    ///             MIN_CONFIRMATION_GRACE >= MIN_DISPATCH_WINDOW + CROSS_CHAIN_LATENCY_BUDGET
+    ///
+    ///         with a strictly positive latency margin. This relation is asserted
+    ///         by a cross-language test that reads both constants; changing either
+    ///         without the other fails CI.
+    uint256 public constant CROSS_CHAIN_LATENCY_BUDGET = 20 minutes;
+
     /// @notice Lower bound on `confirmationGrace`. Must exceed worst-case cross-chain
     ///         settlement latency (LayerZero relay + Stellar finality) so that
     ///         `cancelExpired` cannot fire while a valid FillConfirmed is still in
     ///         flight — which would refund the user after the solver has already
     ///         delivered on Stellar, leaving the solver unrepaid.
-    uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
+    ///
+    ///         Derived from the Soroban dispatch cutoff plus the latency budget:
+    ///         `MIN_DISPATCH_WINDOW (30 minutes) + CROSS_CHAIN_LATENCY_BUDGET (20 minutes)`.
+    ///         See the inequality documented on {CROSS_CHAIN_LATENCY_BUDGET}.
+    uint256 public constant MIN_CONFIRMATION_GRACE = 50 minutes;
 
     /// @notice Duration a guardian-initiated pause auto-expires without owner
     ///         ratification, and the matching cooldown before the guardian may

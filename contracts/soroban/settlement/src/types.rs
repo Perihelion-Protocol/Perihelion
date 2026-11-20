@@ -153,6 +153,10 @@ pub enum DataKey {
     /// Timestamp when the current pending endpoint change was proposed.
     /// Used to enforce `MIN_PEER_CHANGE_DELAY` / `PEER_CHANGE_GRACE`.
     PendingEndpointTime,
+    /// Configurable delay (in seconds) for the current pending endpoint change.
+    /// Validated to be between MIN_PEER_CHANGE_DELAY and MAX_PEER_CHANGE_DELAY.
+    /// Mirrors `PendingPeerDelay` for the analogous two-step endpoint flow.
+    PendingEndpointDelay,
 }
 
 /// Lifecycle state of a registered intent.
@@ -188,6 +192,11 @@ pub struct IntentRecord {
     pub solver_evm: Option<BytesN<32>>,
     pub fill_amount: i128,
     pub fill_ledger: u32,
+    /// Ledger sequence at which the intent was registered (the start event for
+    /// the solver fill-latency metric). Reputation latency is measured as
+    /// `fill_ledger - registered_ledger`, i.e. the number of ledgers between
+    /// registration and fill, independent of when the solver was dispatched.
+    pub registered_ledger: u32,
 }
 
 /// PROPOSED Phase 3: Aggregate reputation metrics for a solver.
@@ -199,9 +208,16 @@ pub struct SolverReputationRecord {
     pub fill_count: u64,
     /// Number of fills that completed successfully (reached ConfirmationSent).
     pub success_count: u64,
+    /// Number of latency samples folded into `ewma_latency`. Zero means the
+    /// EWMA is uninitialised (no sentinel value is stored in `ewma_latency`),
+    /// so a genuine zero-latency fill is still recorded correctly.
+    pub samples: u64,
     /// Exponential weighted moving average (EWMA) of fill latency in ledgers.
+    /// Latency is measured from the documented start event — the ledger at
+    /// which the intent was registered (`IntentRecord::registered_ledger`) —
+    /// to the ledger at which it was filled (`IntentRecord::fill_ledger`).
     /// Computed as: ewma = 0.9 * ewma + 0.1 * latency (legacy smooth factor).
-    /// Stored as i128 fixed-point or direct ledger count.
+    /// Only meaningful when `samples > 0`; the first sample initialises it.
     pub ewma_latency: i128,
 }
 

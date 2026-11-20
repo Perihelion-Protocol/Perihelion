@@ -27,7 +27,8 @@ pub enum PerihelionError {
     ReservedForSolver = 132,
     /// Caller is not the pending admin nominee (accept_admin guard).
     NotPendingAdmin = 133,
-    /// Admin and endpoint addresses must be distinct (initialize guard, issue #18).
+    /// Admin and endpoint addresses must be distinct (initialize, set_endpoint,
+    /// propose_endpoint and confirm_endpoint guards, issues #18 / #1069 / #1070).
     AdminEndpointCollision = 134,
     /// No pending peer change exists for the given eid (confirm_peer guard, issue #165).
     NotPendingPeerChange = 135,
@@ -69,10 +70,12 @@ pub enum PerihelionError {
     /// #500). Placed here rather than the 13x authorization band, which is
     /// fully allocated.
     EndpointChangeExpired = 151,
-    /// Peer change delay outside the valid range (issue #715).
+    /// Peer or endpoint change delay outside the valid range (issues #715 / #1070).
     InvalidDelay = 152,
     /// A peer change is already pending for this eid, must cancel first (issue #715).
     PendingPeerChangeExists = 153,
+    /// An endpoint change is already pending, must cancel first (issue #1070).
+    PendingEndpointChangeExists = 154,
 
     // --- Messaging ---
     /// Payload failed structural validation.

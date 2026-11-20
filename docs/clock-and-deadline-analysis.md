@@ -181,16 +181,90 @@ confirmationGrace  >  T_relay_p99  +  T_soroban_confirm  +  Δ_skew_worst
 | `Δ_skew_worst` | 60 s | §2.1 above |
 | **Required minimum** | **690 s ≈ 11.5 min** | Sum of the above |
 
-### 3.2 Current parameter values vs. the bound
+### 3.2 The dispatch cutoff and the latency budget `L`
+
+The Soroban settlement contract does not allow a fill arbitrarily close to the
+deadline. `fill_intent` rejects when `now + MIN_DISPATCH_WINDOW > deadline`, so
+the latest instant at which a fill can be dispatched is:
+
+```
+dispatch cutoff  =  deadline − MIN_DISPATCH_WINDOW
+```
+
+A FillConfirmed dispatched at that cutoff still has to traverse the outbound
+LayerZero leg (DVN verification + executor delivery) and the Soroban
+confirmation buffer before it lands on EVM. If the EVM refund path opens at
+`deadline + MIN_CONFIRMATION_GRACE` and the return trip takes up to `L`
+seconds, the message can arrive *after* `cancelExpired` has already refunded the
+user — the solver delivered on Soroban, the escrow refunded the user, and the
+solver loses principal.
+
+To close that race the protocol reserves an explicit **cross-chain latency
+budget `L`** between the dispatch cutoff and the EVM refund opening:
+
+```
+MIN_CONFIRMATION_GRACE  ≥  MIN_DISPATCH_WINDOW  +  L
+```
+
+Equivalently, the effective dispatch cutoff relative to the EVM grace is:
+
+```
+dispatch cutoff  =  deadline + MIN_CONFIRMATION_GRACE − L − MIN_DISPATCH_WINDOW
+```
+
+which must be `≤ deadline` for the margin to be non-negative. The margin
+`MIN_CONFIRMATION_GRACE − MIN_DISPATCH_WINDOW` is the slack available for the
+return trip; it must be at least `L`.
+
+`L` is defined as `CROSS_CHAIN_LATENCY_BUDGET` and is sized against the
+LayerZero DVN and executor SLAs:
+
+| Component of `L` | Value | Source |
+|------------------|-------|--------|
+| LayerZero DVN verification + executor delivery (P99) | 600 s (10 min) | `./MONITORING.md` — baseline SLA 10 min |
+| Soroban confirmation buffer | 30 s | `./ECONOMICS.md` — 30 s confirmation |
+| Clock skew `Δ_skew_worst` | 60 s | §2.1 above |
+| Safety headroom (retries, congestion) | 510 s | 2× the relay SLA minus the above |
+| **`CROSS_CHAIN_LATENCY_BUDGET` (`L`)** | **1 200 s (20 min)** | Sum of the above |
+
+The 20-minute budget is deliberately larger than the 690 s hard minimum derived
+in §3.1: it covers the P95 alert threshold (20 min) from `./MONITORING.md`
+rather than only the 10-minute baseline SLA, so a message that trips the
+monitoring alert still lands before the refund path opens.
+
+### 3.3 Current parameter values vs. the bound
 
 | Parameter | Current value | Required minimum | Status |
 |-----------|---------------|-----------------|--------|
-| `MIN_CONFIRMATION_GRACE` (`PerihelionEscrow.sol`) | 1 800 s (30 min) | 690 s | ✅ SUFFICIENT — 2.6× headroom |
-| Default `confirmationGrace` | 7 200 s (2 h) | 690 s | ✅ SUFFICIENT — 10× headroom |
+| `MIN_DISPATCH_WINDOW` (`lib.rs`) | 1 800 s (30 min) | — | Dispatch cutoff anchor |
+| `MIN_CONFIRMATION_GRACE` (`PerihelionEscrow.sol`) | 1 800 s (30 min) | `MIN_DISPATCH_WINDOW + L` = 3 000 s | ⚠️ **INSUFFICIENT** — margin is 0 s, not `L` |
+| Default `confirmationGrace` | 7 200 s (2 h) | `MIN_DISPATCH_WINDOW + L` = 3 000 s | ✅ SUFFICIENT — 4 200 s margin over `L` |
 | `MAX_CONFIRMATION_GRACE` | 604 800 s (7 days) | — | ✅ (upper bound, not a safety floor) |
 
-**No contract changes are required.** The current parameters comfortably satisfy
-the derived constraint.
+With the current constants the margin
+`MIN_CONFIRMATION_GRACE − MIN_DISPATCH_WINDOW` is **0 s**, so a FillConfirmed
+dispatched at `deadline + 1 799 s` on Stellar has no budget for DVN verification
+and executor delivery before `cancelExpired` opens at `deadline + 1 800 s`. The
+fix is to raise `MIN_CONFIRMATION_GRACE` to `MIN_DISPATCH_WINDOW + L`
+(3 000 s), or to shorten the dispatch window by `L` so the cutoff is
+`deadline − MIN_DISPATCH_WINDOW` with `MIN_CONFIRMATION_GRACE ≥
+MIN_DISPATCH_WINDOW + L` still holding. Either way the inequality above must
+hold with a strictly positive margin of at least `L`.
+
+### 3.4 Enforcement: cross-language constant test
+
+The inequality is encoded in a shared constant test that reads both
+`contracts/evm/src/PerihelionEscrow.sol` and
+`contracts/soroban/settlement/src/lib.rs` and asserts:
+
+```
+MIN_CONFIRMATION_GRACE  ≥  MIN_DISPATCH_WINDOW  +  CROSS_CHAIN_LATENCY_BUDGET
+```
+
+The test fails if either constant changes without the other, so the two windows
+cannot drift apart silently. Any change to `MIN_DISPATCH_WINDOW`,
+`MIN_CONFIRMATION_GRACE`, or `CROSS_CHAIN_LATENCY_BUDGET` must be made together
+and must update this document.
 
 ### 3.3 `GRACE_LEDGERS` is a TTL parameter, not a safety parameter
 
@@ -327,7 +401,9 @@ premature or delayed refund suggestion, not fund loss.
 | Finding | Verdict |
 |---------|---------|
 | `MIN_CONFIRMATION_GRACE` (1 800 s) vs. required minimum (690 s) | ✅ Sufficient — 2.6× headroom |
+| `MIN_CONFIRMATION_GRACE` (1 800 s) vs. `MIN_DISPATCH_WINDOW + L` (3 000 s) | ⚠️ **Insufficient** — margin is 0 s; see §3.2–§3.4 |
 | Default `confirmationGrace` (7 200 s) vs. required minimum (690 s) | ✅ Sufficient — 10× headroom |
+| Default `confirmationGrace` (7 200 s) vs. `MIN_DISPATCH_WINDOW + L` (3 000 s) | ✅ Sufficient — 4 200 s margin over `L` |
 | `GRACE_LEDGERS` (TTL parameter only) — no safety bound required | ✅ Not applicable |
 | SDK `isExpired` JSDoc recommendation (+30 s) vs. derived ε\_min (660 s) | ⚠️ **Under-specified** — see §5.1 and the updated JSDoc; no contract change needed |
 | `isRefundable` client-clock tolerance (±60 s vs. 1 800 s grace) | ✅ Acceptable |
@@ -335,10 +411,15 @@ premature or delayed refund suggestion, not fund loss.
 | Stellar ledger timestamp monotonicity | ✅ Guaranteed by SCP consensus |
 | SDK wall-clock backward-movement handling | ✅ Conservative by design |
 
-**No contract logic or deadline values were changed.** The grace parameters
-already satisfy the derived bounds. The only actionable output is the corrected
-`isExpired` JSDoc (in `sdk/src/intent.ts`), which now cites this document and
-gives the correct solver-path recommendation of +660 s rather than +30 s.
+**Contract changes are required.** The default `confirmationGrace` satisfies the
+derived bounds, but `MIN_CONFIRMATION_GRACE` (1 800 s) equals
+`MIN_DISPATCH_WINDOW` (1 800 s), leaving a zero-second margin for the outbound
+LayerZero return trip. The inequality
+`MIN_CONFIRMATION_GRACE ≥ MIN_DISPATCH_WINDOW + CROSS_CHAIN_LATENCY_BUDGET`
+(§3.2) must hold with `L = 1 200 s`, and the cross-language constant test
+(§3.4) enforces it. The corrected `isExpired` JSDoc (in `sdk/src/intent.ts`)
+cites this document and gives the solver-path recommendation of +660 s rather
+than +30 s.
 
 ---
 

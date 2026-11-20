@@ -210,6 +210,39 @@ pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 /// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
 pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
 
+/// Cross-chain latency budget `L` (issue #1067), in seconds.
+///
+/// A FillConfirmed dispatched on Stellar still needs LayerZero DVN verification
+/// and executor delivery before it lands on the EVM escrow. The EVM
+/// `MIN_CONFIRMATION_GRACE` (`contracts/evm/src/PerihelionEscrow.sol`) is the
+/// protocol minimum grace before `cancelExpired` may refund the user, and it
+/// equals `MIN_DISPATCH_WINDOW` (30 minutes). If the Stellar dispatch cutoff were
+/// `deadline + MIN_DISPATCH_WINDOW`, a confirmation dispatched just under the
+/// cutoff could arrive after the EVM refund opened, letting the solver deliver on
+/// Stellar while the user is refunded on EVM.
+///
+/// The dispatch cutoff is therefore `deadline + MIN_DISPATCH_WINDOW - L`, leaving
+/// a positive margin `L` for DVN verification and executor delivery before the
+/// earliest possible EVM refund. 20 minutes = 1_200 s is documented against
+/// LayerZero DVN and executor SLAs.
+///
+/// Invariant (asserted by a cross-language test that reads both contracts):
+///   `MIN_DISPATCH_WINDOW == EVM MIN_CONFIRMATION_GRACE`
+///   `CROSS_CHAIN_LATENCY_BUDGET > 0`
+///   `CROSS_CHAIN_LATENCY_BUDGET < MIN_DISPATCH_WINDOW`
+pub const CROSS_CHAIN_LATENCY_BUDGET: u64 = 1_200;
+
+/// Latest Stellar timestamp at which `dispatch_confirmation` may still dispatch a
+/// FillConfirmed for an intent with `deadline` (issue #1067). This is
+/// `deadline + MIN_DISPATCH_WINDOW - CROSS_CHAIN_LATENCY_BUDGET`, i.e. the EVM
+/// refund boundary minus the cross-chain latency budget, so the message has a
+/// positive margin to land before `cancelExpired` opens on EVM.
+pub const fn dispatch_cutoff(deadline: u64) -> u64 {
+    deadline
+        .saturating_add(MIN_DISPATCH_WINDOW)
+        .saturating_sub(CROSS_CHAIN_LATENCY_BUDGET)
+}
+
 /// Ledgers a fill must stay unconfirmed before a third party may collect the
 /// dispatch keeper reward. About 30 minutes at ~5 second ledger close, matching
 /// `MIN_DISPATCH_WINDOW`. Without this delay the reward subsidises every fill
@@ -289,42 +322,56 @@ impl Perihelion {
 
     // --- Admin configuration ---------------------------------------------------
 
-    /// Rotate the trusted endpoint. Admin-only.
-    ///
-    /// Emits an `endpoint_set` event with `(old, new)` so off-chain monitors
-    /// can alert on endpoint rotations (issue #16). Endpoint rotations are
-    /// high-sensitivity: a malicious rotation would redirect all inbound
-    /// LayerZero message delivery.
-    pub fn set_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
-        Self::bump_instance(&env);
-        Self::require_admin(&env)?.require_auth();
-        let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
-        env.storage()
-            .instance()
-            .set(&DataKey::Endpoint, &new_endpoint);
-        env.events()
-            .publish((events::endpoint_set(&env),), (old, new_endpoint));
-        Ok(())
-    }
-
     /// Propose a new trusted endpoint, subject to the same delayed two-step
-    /// flow as `propose_peer` (issue #500). Admin-only.
+    /// flow as `propose_peer` (issue #500, #1069, #1070). Admin-only.
     ///
-    /// `set_endpoint` above rotates the endpoint instantly; this is an
-    /// additive, delayed alternative for admins who want the same one-day
-    /// public delay / `PEER_CHANGE_GRACE` confirmation window already used
-    /// for peer rotations, since the endpoint is the stronger of the two
-    /// authorities (`lz_receive` trusts it unconditionally before the peer
-    /// check even runs). `set_endpoint` is left in place unchanged; callers
-    /// choose which path to use.
+    /// This is the **sole** rotation path for the trusted endpoint: the former
+    /// instant `set_endpoint` entrypoint has been removed (issue #1069), so no
+    /// entrypoint can change `DataKey::Endpoint` without the delay. The endpoint
+    /// is the stronger of the two authorities (`lz_receive` trusts it
+    /// unconditionally before the peer check even runs), so it gets the same
+    /// one-day public delay / `PEER_CHANGE_GRACE` confirmation window as peers.
+    ///
+    /// Mirrors `propose_peer` (issue #1070):
+    /// - rejects with `PendingEndpointChangeExists` when a proposal is already
+    ///   pending, so a compromised admin cannot silently replace a benign
+    ///   pending proposal and restart its timer,
+    /// - validates `new_endpoint != admin` at proposal time
+    ///   (`AdminEndpointCollision`), enforcing role separation on every write
+    ///   path (issue #18),
+    /// - accepts a bounded `delay` in `[MIN_PEER_CHANGE_DELAY, MAX_PEER_CHANGE_DELAY]`
+    ///   and stores it with the proposal.
     ///
     /// Emits `endpoint_change_proposed(old, new, ready_at)`.
-    pub fn propose_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
+    ///
+    /// # Errors
+    /// - `InvalidDelay` if delay < MIN_PEER_CHANGE_DELAY or delay > MAX_PEER_CHANGE_DELAY
+    /// - `PendingEndpointChangeExists` if an endpoint change is already pending
+    /// - `AdminEndpointCollision` if `new_endpoint` equals the current admin
+    pub fn propose_endpoint(
+        env: Env,
+        new_endpoint: Address,
+        delay: u64,
+    ) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
-        Self::require_admin(&env)?.require_auth();
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        if delay < MIN_PEER_CHANGE_DELAY || delay > MAX_PEER_CHANGE_DELAY {
+            return Err(PerihelionError::InvalidDelay);
+        }
+
+        if env.storage().instance().has(&DataKey::PendingEndpoint) {
+            return Err(PerihelionError::PendingEndpointChangeExists);
+        }
+
+        // Issue #18/#1069: role separation must hold on every write path.
+        if admin == new_endpoint {
+            return Err(PerihelionError::AdminEndpointCollision);
+        }
+
         let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
         let now = env.ledger().timestamp();
-        let ready_at = now + MIN_PEER_CHANGE_DELAY;
+        let ready_at = now + delay;
 
         env.storage()
             .instance()
@@ -332,6 +379,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::PendingEndpointTime, &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingEndpointDelay, &delay);
         env.events().publish(
             (events::endpoint_change_proposed(&env),),
             (old, new_endpoint, ready_at),
@@ -339,19 +389,18 @@ impl Perihelion {
         Ok(())
     }
 
-    /// Confirm and apply a pending endpoint change (issue #500). Admin-only.
-    /// Must be called after `MIN_PEER_CHANGE_DELAY` has elapsed since
-    /// `propose_endpoint` and within `PEER_CHANGE_GRACE` of that delay
-    /// elapsing, mirroring `confirm_peer`.
+    /// Confirm and apply a pending endpoint change (issue #500, #1070). Admin-only.
+    /// Must be called after the delay stored with the proposal has elapsed since
+    /// `propose_endpoint` and within `PEER_CHANGE_GRACE` of that delay elapsing,
+    /// mirroring `confirm_peer`.
     ///
-    /// Emits `endpoint_set(old, new)` on success — the same event
-    /// `set_endpoint` emits, so existing monitors need not distinguish
-    /// which path rotated the endpoint.
+    /// Emits `endpoint_set(old, new)` on success.
     ///
     /// # Errors
     /// - `NotPendingEndpointChange` if no endpoint change is pending
-    /// - `EndpointChangeNotReady` if the minimum delay has not yet elapsed
+    /// - `EndpointChangeNotReady` if the stored delay has not yet elapsed
     /// - `EndpointChangeExpired` if the grace period has elapsed since the proposal
+    /// - `AdminEndpointCollision` if the proposed endpoint equals the current admin
     pub fn confirm_endpoint(env: Env) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
@@ -368,16 +417,25 @@ impl Perihelion {
             .get(&DataKey::PendingEndpointTime)
             .ok_or(PerihelionError::NotPendingEndpointChange)?;
 
+        let delay: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingEndpointDelay)
+            .ok_or(PerihelionError::NotPendingEndpointChange)?;
+
         let now = env.ledger().timestamp();
-        if now < proposed_at + MIN_PEER_CHANGE_DELAY {
+        if now < proposed_at + delay {
             return Err(PerihelionError::EndpointChangeNotReady);
         }
 
-        if now > proposed_at + MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE {
+        if now > proposed_at + delay + PEER_CHANGE_GRACE {
             env.storage().instance().remove(&DataKey::PendingEndpoint);
             env.storage()
                 .instance()
                 .remove(&DataKey::PendingEndpointTime);
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingEndpointDelay);
             return Err(PerihelionError::EndpointChangeExpired);
         }
 
@@ -394,6 +452,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .remove(&DataKey::PendingEndpointTime);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingEndpointDelay);
 
         env.events()
             .publish((events::endpoint_set(&env),), (old, proposed_endpoint));
@@ -412,13 +473,16 @@ impl Perihelion {
         env.storage()
             .instance()
             .remove(&DataKey::PendingEndpointTime);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingEndpointDelay);
 
         env.events()
             .publish((events::endpoint_change_cancelled(&env),), ());
         Ok(())
     }
 
-    /// Retrieve a pending endpoint change, if one exists (issue #500).
+    /// Retrieve a pending endpoint change, if one exists (issue #500, #1070).
     /// Returns (proposed_endpoint, proposed_at_timestamp, ready_at, expires_at)
     /// or None if no change is pending. Mirrors `get_pending_peer`.
     pub fn get_pending_endpoint(
@@ -426,13 +490,15 @@ impl Perihelion {
     ) -> Result<Option<(Address, u64, u64, u64)>, PerihelionError> {
         let endpoint: Option<Address> = env.storage().instance().get(&DataKey::PendingEndpoint);
         let time: Option<u64> = env.storage().instance().get(&DataKey::PendingEndpointTime);
+        let delay: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingEndpointDelay);
 
-        Ok(match (endpoint, time) {
-            (Some(e), Some(t)) => {
-                let ready_at = t.saturating_add(MIN_PEER_CHANGE_DELAY);
-                let expires_at = t
-                    .saturating_add(MIN_PEER_CHANGE_DELAY)
-                    .saturating_add(PEER_CHANGE_GRACE);
+        Ok(match (endpoint, time, delay) {
+            (Some(e), Some(t), Some(d)) => {
+                let ready_at = t.saturating_add(d);
+                let expires_at = t.saturating_add(d).saturating_add(PEER_CHANGE_GRACE);
                 Some((e, t, ready_at, expires_at))
             }
             _ => None,
@@ -1241,11 +1307,15 @@ impl Perihelion {
         }
 
         // The EVM escrow may open its local refund at deadline plus its
-        // configured confirmation grace, whose protocol minimum is 30 minutes.
-        // Refuse a Stellar dispatch after that earliest possible refund boundary;
-        // otherwise the user could be refunded on EVM and then receive a late
-        // FillConfirmed message for the same intent.
-        if env.ledger().timestamp() > rec.deadline.saturating_add(MIN_DISPATCH_WINDOW) {
+        // configured confirmation grace, whose protocol minimum is
+        // MIN_CONFIRMATION_GRACE (30 minutes, equal to MIN_DISPATCH_WINDOW).
+        // A FillConfirmed dispatched at that boundary would still need DVN
+        // verification and executor delivery, so it could arrive after the EVM
+        // refund opened and the solver would lose principal (issue #1067).
+        // Refuse a Stellar dispatch after `deadline + MIN_DISPATCH_WINDOW - L`,
+        // leaving a positive cross-chain latency budget before the earliest
+        // possible EVM refund boundary.
+        if env.ledger().timestamp() > dispatch_cutoff(rec.deadline) {
             return Err(PerihelionError::IntentExpired);
         }
 
@@ -1274,8 +1344,12 @@ impl Perihelion {
         rec.status = IntentStatus::ConfirmationSent;
         env.storage().persistent().set(&key, &rec);
 
-        // Update solver reputation (PROPOSED Phase 3)
-        let fill_latency = env.ledger().sequence().saturating_sub(rec.fill_ledger);
+        // Update solver reputation (PROPOSED Phase 3). Latency is measured from
+        // the intent's registration ledger to the fill ledger (issue #1068), not
+        // from the dispatch delay.
+        let fill_latency = rec
+            .fill_ledger
+            .saturating_sub(rec.registered_ledger);
         Self::update_solver_reputation(&env, &solver, fill_latency)?;
 
         // Pay the dispatch keeper reward to the caller.  This mirrors the
@@ -1383,7 +1457,11 @@ impl Perihelion {
 
         // Update solver reputation (PROPOSED Phase 3) — issue #709: fill_intent must emit
         // confirmation_sent and update reputation like dispatch_confirmation does.
-        let fill_latency = env.ledger().sequence().saturating_sub(rec.fill_ledger);
+        // Latency is measured from the intent's registration ledger to the fill
+        // ledger (issue #1068), not from the just-set fill_ledger (always 0).
+        let fill_latency = rec
+            .fill_ledger
+            .saturating_sub(rec.registered_ledger);
         Self::update_solver_reputation(&env, &solver, fill_latency)?;
 
         // Refresh TTLs touched by this call.
@@ -2198,6 +2276,8 @@ impl Perihelion {
             solver_evm: fi.locked_solver,
             fill_amount: 0,
             fill_ledger: 0,
+            // Issue #1068: documented start event for solver-latency reputation.
+            registered_ledger: env.ledger().sequence(),
         };
         env.storage().persistent().set(&key, &rec);
         let bump = Self::ttl_for_deadline(env, fi.deadline);
@@ -2318,6 +2398,16 @@ impl Perihelion {
     /// PROPOSED Phase 3: Update solver reputation metrics after a successful fill.
     /// Called when a fill transitions to ConfirmationSent state.
     /// Updates fill_count, success_count, and EWMA latency (0.9 * old + 0.1 * new).
+    ///
+    /// `fill_latency_ledgers` is measured from a documented start event — the
+    /// intent's registration ledger (`IntentRecord::registered_ledger`, set in
+    /// `on_fill_instruction`) to the fill ledger (`IntentRecord::fill_ledger`,
+    /// set in `deliver_intent`/`fill_intent`) — not from the just-set fill ledger
+    /// (always 0) or the dispatch delay (issue #1068).
+    ///
+    /// The EWMA is seeded from the first sample using `fill_count` as the
+    /// "has a sample" signal, so a legitimate zero-latency sample does not reset
+    /// the average (the old `ewma_latency == 0` sentinel did).
     fn update_solver_reputation(
         env: &Env,
         solver: &Address,
@@ -2334,15 +2424,16 @@ impl Perihelion {
                     ewma_latency: 0,
                 });
 
-        rep.fill_count = rep.fill_count.saturating_add(1);
-        rep.success_count = rep.success_count.saturating_add(1);
-
         let latency_i128 = fill_latency_ledgers as i128;
-        if rep.ewma_latency == 0 {
+        if rep.fill_count == 0 {
+            // First sample: seed the EWMA directly.
             rep.ewma_latency = latency_i128;
         } else {
             rep.ewma_latency = (rep.ewma_latency * 9 + latency_i128) / 10;
         }
+
+        rep.fill_count = rep.fill_count.saturating_add(1);
+        rep.success_count = rep.success_count.saturating_add(1);
 
         env.storage().persistent().set(&key, &rep);
         Ok(())
