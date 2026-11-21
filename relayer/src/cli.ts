@@ -24,40 +24,14 @@ import { HybridDeadLetterStore } from "./file-dead-letter-store.js";
 import { createLogger } from "@perihelion/node-common";
 import { HealthServer } from "./health-server.js";
 
-/**
- * Refuse to run endpoint-impersonation mode against a public network.
- *
- * The reference relayer signs `lz_receive` as the trusted endpoint, so its
- * Stellar key carries full authority over the settlement contract. That is a
- * development-only stand-in for the LayerZero executor/DVN stack and must
- * never be pointed at Pubnet without an explicit, deliberate override.
- */
-function assertSafeRelayerMode(config: ReturnType<typeof loadConfig>): void {
-  const mode = (process.env.PERIHELION_RELAYER_MODE ?? "").toLowerCase();
-  const override = (process.env.PERIHELION_ALLOW_PUBNET_DEV_RELAYER ?? "").toLowerCase();
-  const isPubnet = /pubnet|public/i.test(config.stellarNetwork);
-
-  if (mode !== "dev") return;
-  if (!isPubnet) return;
-  if (override === "1" || override === "true" || override === "yes") return;
-
-  throw new Error(
-    "PERIHELION_RELAYER_MODE=dev refuses to start against Stellar Pubnet: " +
-      "the reference relayer is a development-only stand-in for the LayerZero " +
-      "executor and signs lz_receive as the trusted endpoint, so its key holds " +
-      "full authority over the settlement contract. Production must use a real " +
-      "LayerZero endpoint/adapter on Stellar. Set " +
-      "PERIHELION_ALLOW_PUBNET_DEV_RELAYER=1 only if you fully understand the risk.",
-  );
-}
-
 async function main(): Promise<void> {
   // Structured JSON logger — replaces console for production-grade output.
   const log = createLogger({ component: "relayer" });
+  // loadConfig is the single place that enforces the relayer mode and the
+  // Pubnet impersonation guard; it throws before anything starts.
   const config = loadConfig(process.env, log);
 
-  assertSafeRelayerMode(config);
-  if ((process.env.PERIHELION_RELAYER_MODE ?? "").toLowerCase() === "dev") {
+  if (config.relayerMode === "dev") {
     log.warn(
       "running in development endpoint-impersonation mode: the relayer key " +
         "acts as the trusted endpoint and carries full authority over the " +
