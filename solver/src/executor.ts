@@ -65,6 +65,25 @@ export class DefiniteFailureError extends Error {
 }
 
 /**
+ * Thrown when the escrow already holds a lock for the intent that is owned by
+ * a different solver. This solver can never complete the fill, so the solver
+ * retires the intent rather than retrying it.
+ *
+ * Extends {@link DefiniteFailureError}: no lock of ours was created, so the
+ * inventory reservation is released immediately.
+ */
+export class LockOwnedByOtherError extends DefiniteFailureError {
+  /** The solver address that owns the existing lock. */
+  readonly owner: `0x${string}`;
+
+  constructor(intentHash: string, owner: `0x${string}`) {
+    super(`intent ${intentHash} already locked by another solver ${owner}`);
+    this.name = "LockOwnedByOtherError";
+    this.owner = owner;
+  }
+}
+
+/**
  * Derive the solver's EVM address from a configured private key.
  *
  * The escrow enforces `preferredSolver == msg.sender`, so the address the
@@ -283,9 +302,7 @@ export class Executor {
             solver: existing.solver,
           });
           await this.setStage(hash, "lost");
-          throw new DefiniteFailureError(
-            `intent ${hash} already locked by another solver ${existing.solver}`,
-          );
+          throw new LockOwnedByOtherError(hash, existing.solver);
         }
         if (existing.released || existing.refunded) {
           throw new DefiniteFailureError(

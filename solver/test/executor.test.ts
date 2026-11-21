@@ -20,7 +20,12 @@ import { test } from "node:test";
 import { buildIntent, hashIntent, perihelionDomain } from "@perihelion/sdk";
 import type { Hex, SignedIntent } from "@perihelion/sdk";
 import { nativeToScVal, scvU32, scvVoid } from "@stellar/stellar-sdk";
-import { Executor, type ExecutorConfig, type Logger } from "../src/executor.js";
+import {
+  Executor,
+  LockOwnedByOtherError,
+  type ExecutorConfig,
+  type Logger,
+} from "../src/executor.js";
 
 // ─── Wire vector (#946) ───────────────────────────────────────────────────────
 //
@@ -978,4 +983,25 @@ test("getLock: returns undefined when the lock's user is the zero address", asyn
     () => exec.getLock(LOCK_HASH),
   );
   assert.equal(lock, undefined);
+});
+
+// ─── #1086: lock owned by another solver raises LockOwnedByOtherError ─────────
+
+test("fill: a lock owned by another solver throws LockOwnedByOtherError with the owner", async () => {
+  const otherSolver = "0x00000000000000000000000000000000000000ff" as const;
+  const exec = expose();
+  // Not filled yet, so fill proceeds to the lock stage.
+  exec.checkFillStatus = async () => ({ filled: false });
+
+  const signed = makeSignedIntent();
+  const err = await withEthCallResult(
+    encodeLockWords({ ...LOCK_BASE, solver: otherSolver }),
+    () => exec.fill(signed).then(
+      () => assert.fail("fill should have thrown"),
+      (e: unknown) => e,
+    ),
+  );
+
+  assert.ok(err instanceof LockOwnedByOtherError, "expected LockOwnedByOtherError");
+  assert.equal(err.owner, otherSolver);
 });
