@@ -19,12 +19,14 @@ export { SeenLRU } from "./seen-lru.js";
 export {
   RATE_SCALE,
   computeProceeds,
+  createDecimalsLookup,
   defaultDecimalsLookup,
   defaultFeeEstimator,
   defaultPriceOracle,
   escrowSourceNativeCost,
   evaluate,
   isSolverEligible,
+  UnsupportedAssetError,
 } from "./quote.js";
 export type { SolverConfig } from "./config.js";
 export type { ExecutorConfig } from "./executor.js";
