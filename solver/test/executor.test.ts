@@ -72,7 +72,8 @@ function makeIntent() {
     sourceAmount: "1000000",
     destAsset: "native",
     minDestAmount: "990000",
-    deadline: Math.floor(Date.now() / 1000) + 600,
+    // Must exceed the executor's fill headroom (1920 s, the contract's dispatch window).
+    deadline: Math.floor(Date.now() / 1000) + 3600,
     nonce: "42",
   });
 }
@@ -878,3 +879,87 @@ function bytesToHex(bytes: Uint8Array): string {
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
 }
+
+// ─── loadExecutorConfig tuning knobs ─────────────────────────────────────────
+
+const VALID_EXECUTOR_ENV = {
+  PERIHELION_EVM_RPC_URL: "http://localhost:8545",
+  PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
+  PERIHELION_EVM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+  PERIHELION_SOROBAN_SECRET_KEY:
+    "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+  PERIHELION_ESCROW_ADDRESS: ESCROW_ADDRESS,
+  PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
+  PERIHELION_SOURCE_CHAIN_ID: "8453",
+  STELLAR_NETWORK: STELLAR_NETWORK,
+};
+
+test("loadExecutorConfig: parses the three tuning knobs", async () => {
+  const { loadExecutorConfig } = await import("../src/executor-config.js");
+  const config = loadExecutorConfig({
+    ...VALID_EXECUTOR_ENV,
+    PERIHELION_LZ_FEE_BUFFER_BPS: "500",
+    PERIHELION_REGISTRATION_POLL_INTERVAL_MS: "750",
+    PERIHELION_MIN_FILL_HEADROOM_SECS: "2000",
+  });
+  assert.equal(config.lzFeeBufferBps, 500);
+  assert.equal(config.registrationPollIntervalMs, 750);
+  assert.equal(config.minFillHeadroomSecs, 2000);
+});
+
+test("loadExecutorConfig: tuning knobs default when unset", async () => {
+  const { loadExecutorConfig } = await import("../src/executor-config.js");
+  const { MIN_FILL_HEADROOM_SECS } = await import("@perihelion/sdk");
+  const config = loadExecutorConfig({ ...VALID_EXECUTOR_ENV });
+  assert.equal(config.lzFeeBufferBps, 0);
+  assert.equal(config.registrationPollIntervalMs, 2_000);
+  assert.equal(config.minFillHeadroomSecs, MIN_FILL_HEADROOM_SECS);
+});
+
+test("loadExecutorConfig: reports invalid tuning knob values", async () => {
+  const { loadExecutorConfig } = await import("../src/executor-config.js");
+  assert.throws(
+    () =>
+      loadExecutorConfig({
+        ...VALID_EXECUTOR_ENV,
+        PERIHELION_LZ_FEE_BUFFER_BPS: "10001",
+        PERIHELION_REGISTRATION_POLL_INTERVAL_MS: "0",
+        PERIHELION_MIN_FILL_HEADROOM_SECS: "abc",
+      }),
+    (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return (
+        msg.includes("PERIHELION_LZ_FEE_BUFFER_BPS must be at most 10000") &&
+        msg.includes("PERIHELION_REGISTRATION_POLL_INTERVAL_MS must be greater than 0") &&
+        msg.includes("PERIHELION_MIN_FILL_HEADROOM_SECS must be a non-negative integer")
+      );
+    },
+  );
+});
+
+test("loadExecutorConfig: rejects headroom below the contract dispatch window", async () => {
+  const { loadExecutorConfig } = await import("../src/executor-config.js");
+  assert.throws(
+    () =>
+      loadExecutorConfig({
+        ...VALID_EXECUTOR_ENV,
+        PERIHELION_MIN_FILL_HEADROOM_SECS: "60",
+      }),
+    /PERIHELION_MIN_FILL_HEADROOM_SECS must be at least 1920/,
+  );
+});
+
+// ─── fill headroom single source of truth ────────────────────────────────────
+
+test("Executor: rejects a fill headroom below the SDK / contract dispatch window", async () => {
+  const { Executor } = await import("../src/executor.js");
+  const { MIN_FILL_HEADROOM_SECS } = await import("@perihelion/sdk");
+  assert.throws(
+    () => new Executor({ ...BASE_CONFIG, minFillHeadroomSecs: MIN_FILL_HEADROOM_SECS - 1 }),
+    /must be at least 1920/,
+  );
+  // The SDK value itself is accepted.
+  assert.doesNotThrow(
+    () => new Executor({ ...BASE_CONFIG, minFillHeadroomSecs: MIN_FILL_HEADROOM_SECS }),
+  );
+});
