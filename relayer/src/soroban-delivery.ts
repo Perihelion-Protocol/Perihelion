@@ -26,8 +26,33 @@ import {
   submitWithFeeEscalation,
   type InclusionFeePolicy,
 } from "@perihelion/sdk";
+import { encodePacked, keccak256, type Hex } from "viem";
 import { FatalError, type DestinationDelivery } from "./relayer.js";
 import { noopLogger, type Logger } from "@perihelion/node-common";
+
+/**
+ * Per-message GUID passed to `lz_receive_bytes`. Uses the message's own GUID
+ * when it carries a valid 32-byte one; otherwise derives
+ * `keccak256(uint32 srcEid | uint64 nonce | bytes payload)`, which is unique
+ * per source endpoint, nonce and payload.
+ */
+export function deliveryGuid(message: {
+  readonly srcEid: number;
+  readonly nonce: number | bigint;
+  readonly rawPayload: Hex;
+  readonly guid?: Hex;
+}): Buffer {
+  if (message.guid && /^0x[0-9a-fA-F]{64}$/.test(message.guid) && !/^0x0{64}$/.test(message.guid)) {
+    return Buffer.from(message.guid.slice(2), "hex");
+  }
+  const guid = keccak256(
+    encodePacked(
+      ["uint32", "uint64", "bytes"],
+      [message.srcEid, BigInt(message.nonce), message.rawPayload],
+    ),
+  );
+  return Buffer.from(guid.slice(2), "hex");
+}
 import {
   CANCEL_INTENT_LENGTH,
   FILL_INSTRUCTION_LENGTH,
@@ -368,7 +393,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
         val: nativeToScVal(srcEid, { type: "u32" }),
       }),
     ]);
-    const guidScVal = xdr.ScVal.scvBytes(Buffer.alloc(32));
+    const guidScVal = xdr.ScVal.scvBytes(deliveryGuid(message));
     builder.addOperation(
       contract.call(
         "lz_receive_bytes",
