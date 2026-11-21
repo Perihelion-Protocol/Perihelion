@@ -70,6 +70,12 @@ export interface BridgeMessage {
   readonly deadline: bigint;
   /** Exact LayerZero message bytes observed on the source chain. */
   readonly rawPayload: Hex;
+  /**
+   * The message's LayerZero GUID (32 bytes), when the source watcher recovered
+   * it, e.g. from the endpoint's `PacketSent` event. Optional: consumers derive
+   * a deterministic fallback when absent.
+   */
+  readonly guid?: Hex;
 }
 
 /** A {@link BridgeMessage} observed on-chain, awaiting relay to its destination. */
