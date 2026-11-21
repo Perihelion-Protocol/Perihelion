@@ -3,6 +3,7 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  keccak256,
   type Abi,
   type Address,
   type Hash,
@@ -244,8 +245,8 @@ export class EvmDestinationDelivery implements DestinationDelivery {
   }
 
   /**
-   * Derives the LayerZero-style GUID for a message. The relayer uses the
-   * message id when present; otherwise it hashes the encoded payload.
+   * Returns the GUID for a message: the message's own 32-byte guid when
+   * present, otherwise the keccak256 of its payload (see {@link payloadHash}).
    */
   private guidFor(message: Message): Hex {
     if (message.guid && message.guid.startsWith("0x") && message.guid.length === 66) {
@@ -254,14 +255,11 @@ export class EvmDestinationDelivery implements DestinationDelivery {
     return this.payloadHash(message);
   }
 
+  /** keccak256 over the raw payload bytes, as a 32-byte hex value. */
   private payloadHash(message: Message): Hex {
-    // keccak256 over the raw payload bytes. viem's `keccak256` is not imported
-    // here to keep the dependency surface small; the relayer's message id is
-    // already a 32-byte hex string in practice, so we normalise it.
     const raw = message.payload.startsWith("0x")
-      ? message.payload.slice(2)
-      : message.payload;
-    const padded = raw.padEnd(64, "0").slice(0, 64);
-    return `0x${padded}` as Hex;
+      ? message.payload
+      : `0x${message.payload}`;
+    return keccak256(raw as Hex);
   }
 }
