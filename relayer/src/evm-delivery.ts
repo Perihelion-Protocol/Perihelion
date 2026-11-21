@@ -3,6 +3,7 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  keccak256,
   type Abi,
   type Address,
   type Hash,
@@ -237,19 +238,12 @@ export class EvmDestinationDelivery implements DestinationDelivery {
   }
 
   private typeCode(type: MessageType): number {
-    switch (type) {
-      case "FillConfirmed":
-        return 1;
-      case "CancelIntent":
-        return 2;
-      default:
-        throw new Error(`Unsupported outbound message type: ${type}`);
-    }
+    return outboundTypeCode(type);
   }
 
   /**
-   * Derives the LayerZero-style GUID for a message. The relayer uses the
-   * message id when present; otherwise it hashes the encoded payload.
+   * Returns the message's GUID: the explicit id when one is set, otherwise
+   * {@link messageGuid} over the message type and body.
    */
   private guidFor(message: Message): Hex {
     if (message.guid && message.guid.startsWith("0x") && message.guid.length === 66) {
@@ -259,13 +253,31 @@ export class EvmDestinationDelivery implements DestinationDelivery {
   }
 
   private payloadHash(message: Message): Hex {
-    // keccak256 over the raw payload bytes. viem's `keccak256` is not imported
-    // here to keep the dependency surface small; the relayer's message id is
-    // already a 32-byte hex string in practice, so we normalise it.
-    const raw = message.payload.startsWith("0x")
-      ? message.payload.slice(2)
-      : message.payload;
-    const padded = raw.padEnd(64, "0").slice(0, 64);
-    return `0x${padded}` as Hex;
+    return messageGuid(message.type, this.bodyOf(message));
+  }
+
+  private bodyOf(message: Message): Hex {
+    return (message.payload.startsWith("0x") ? message.payload : `0x${message.payload}`) as Hex;
+  }
+}
+
+/**
+ * Fallback GUID for an outbound message: keccak256 over the message-type byte
+ * followed by the body. Including the type keeps FillConfirmed and CancelIntent
+ * for the same intent distinct.
+ */
+export function messageGuid(type: MessageType, body: Hex): Hex {
+  const typeByte = outboundTypeCode(type).toString(16).padStart(2, "0");
+  return keccak256(`0x${typeByte}${body.slice(2)}` as Hex);
+}
+
+function outboundTypeCode(type: MessageType): number {
+  switch (type) {
+    case "FillConfirmed":
+      return 1;
+    case "CancelIntent":
+      return 2;
+    default:
+      throw new Error(`Unsupported outbound message type: ${type}`);
   }
 }

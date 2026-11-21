@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { EvmDestinationDelivery, type EvmDestinationDeliveryConfig } from "../src/evm-delivery.js";
+import {
+  EvmDestinationDelivery,
+  messageGuid,
+  type EvmDestinationDeliveryConfig,
+} from "../src/evm-delivery.js";
 
 const PRIVATE_KEY = `0x${"11".repeat(32)}` as const;
 const ENDPOINT = "0x1111111111111111111111111111111111111111" as const;
@@ -47,5 +51,26 @@ describe("EvmDestinationDelivery config validation", () => {
       () => new EvmDestinationDelivery(validConfig({ srcSender: `0x${"00".repeat(32)}` as typeof SRC_SENDER })),
       /srcSender/,
     );
+  });
+});
+
+describe("messageGuid", () => {
+  const BODY_A = "0x0102030405";
+  const BODY_B = "0x0102030406";
+
+  it("returns a 32-byte hash", () => {
+    assert.match(messageGuid("FillConfirmed", BODY_A), /^0x[0-9a-f]{64}$/);
+  });
+
+  it("gives distinct GUIDs for distinct payloads", () => {
+    assert.notEqual(messageGuid("FillConfirmed", BODY_A), messageGuid("FillConfirmed", BODY_B));
+  });
+
+  it("gives distinct GUIDs for the same body under different message types", () => {
+    assert.notEqual(messageGuid("FillConfirmed", BODY_A), messageGuid("CancelIntent", BODY_A));
+  });
+
+  it("is deterministic", () => {
+    assert.equal(messageGuid("CancelIntent", BODY_A), messageGuid("CancelIntent", BODY_A));
   });
 });
