@@ -16,7 +16,8 @@ import { hasExecutorConfig, loadExecutorConfig } from "./executor-config.js";
 import { Solver } from "./solver.js";
 import { Executor, type ExecutorConfig } from "./executor.js";
 import { ReleasedWatcher } from "./released-watcher.js";
-import { ViemReleasedEventSource } from "./escrow-released-source.js";
+import { ViemTerminalEventSource } from "./escrow-terminal-source.js";
+import { FileCheckpointStore } from "./file-checkpoint-store.js";
 import { PerihelionClient } from "@perihelion/sdk";
 import { SolverMetrics } from "./metrics.js";
 import { createLogger } from "@perihelion/node-common";
@@ -188,12 +189,16 @@ async function main(): Promise<void> {
   let releasedWatcher: ReleasedWatcher | undefined;
   if (config.mempoolStatusToken && executorConfig) {
     releasedWatcher = new ReleasedWatcher({
-      source: ViemReleasedEventSource.fromRpcUrl(
+      source: ViemTerminalEventSource.fromRpcUrl(
         executorConfig.evmRpcUrl,
         executorConfig.escrowAddress,
       ),
       client: new PerihelionClient({ mempoolUrl: config.mempoolUrl }),
       statusToken: config.mempoolStatusToken,
+      confirmations: executorConfig.sourceConfirmations ?? 1,
+      checkpoint: new FileCheckpointStore(
+        process.env.PERIHELION_RELEASED_CHECKPOINT_FILE ?? "released-watcher-checkpoint.json",
+      ),
       logger: log,
     });
     releasedWatcher.start();
