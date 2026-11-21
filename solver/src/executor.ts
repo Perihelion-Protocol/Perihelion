@@ -702,5 +702,10 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
+/** Resolve after `ms` milliseconds. Used for registration and confirmation polling. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** The zero address, used to detect the absence of an escrow lock. */
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
