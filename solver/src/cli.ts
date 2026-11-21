@@ -14,7 +14,11 @@
 import { loadConfig } from "./config.js";
 import { hasExecutorConfig, loadExecutorConfig } from "./executor-config.js";
 import { Solver } from "./solver.js";
-import { Executor } from "./executor.js";
+import { Executor, type ExecutorConfig } from "./executor.js";
+import { ReleasedWatcher } from "./released-watcher.js";
+import { ViemTerminalEventSource } from "./escrow-terminal-source.js";
+import { FileCheckpointStore } from "./file-checkpoint-store.js";
+import { PerihelionClient } from "@perihelion/sdk";
 import { SolverMetrics } from "./metrics.js";
 import { createLogger } from "@perihelion/node-common";
 import { createServer } from "node:http";
@@ -37,6 +41,7 @@ async function main(): Promise<void> {
   }
 
   let executor: Executor | undefined;
+  let executorConfig: ExecutorConfig | undefined;
   if (watchOnly) {
     // Watch-only mode: evaluate and log decisions, never invoke the executor.
     // The explicit PERIHELION_SOLVER_ADDRESS (if any) is used for eligibility.
@@ -50,7 +55,7 @@ async function main(): Promise<void> {
         "missing executor configuration: set PERIHELION_EVM_RPC_URL, PERIHELION_EVM_PRIVATE_KEY and PERIHELION_STELLAR_SECRET (or run with PERIHELION_SOLVER_MODE=watch for a dry run)",
       );
     }
-    const executorConfig = loadExecutorConfig();
+    executorConfig = loadExecutorConfig();
 
     // The escrow enforces preferredSolver == msg.sender, so the address used
     // for eligibility decisions must be the one derived from the signing key.
@@ -178,12 +183,37 @@ async function main(): Promise<void> {
     }
   });
 
+  // Promotes intents to `settled` once the escrow's `Released` event is seen.
+  // Needs the escrow RPC (executor config) and the mempool status token; in
+  // watch-only mode there is no RPC configured, so it is not started.
+  let releasedWatcher: ReleasedWatcher | undefined;
+  if (config.mempoolStatusToken && executorConfig) {
+    releasedWatcher = new ReleasedWatcher({
+      source: ViemTerminalEventSource.fromRpcUrl(
+        executorConfig.evmRpcUrl,
+        executorConfig.escrowAddress,
+      ),
+      client: new PerihelionClient({ mempoolUrl: config.mempoolUrl }),
+      statusToken: config.mempoolStatusToken,
+      confirmations: executorConfig.sourceConfirmations ?? 1,
+      checkpoint: new FileCheckpointStore(
+        process.env.PERIHELION_RELEASED_CHECKPOINT_FILE ?? "released-watcher-checkpoint.json",
+      ),
+      logger: log,
+    });
+    releasedWatcher.start();
+    log.info("released watcher started");
+  } else if (config.mempoolStatusToken) {
+    log.warn("released watcher not started: requires executor configuration (not watch mode)");
+  }
+
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info("shutting down solver", { signal });
     solver.stop();
+    await releasedWatcher?.stop();
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });

@@ -27,6 +27,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import {
+  PerihelionEscrowClient,
   ESCROW_ABI,
   OnChainIntentStatus,
   decodeIntentStatus,
@@ -60,6 +61,25 @@ export class DefiniteFailureError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = "DefiniteFailureError";
+  }
+}
+
+/**
+ * Thrown when the escrow already holds a lock for the intent that is owned by
+ * a different solver. This solver can never complete the fill, so the solver
+ * retires the intent rather than retrying it.
+ *
+ * Extends {@link DefiniteFailureError}: no lock of ours was created, so the
+ * inventory reservation is released immediately.
+ */
+export class LockOwnedByOtherError extends DefiniteFailureError {
+  /** The solver address that owns the existing lock. */
+  readonly owner: `0x${string}`;
+
+  constructor(intentHash: string, owner: `0x${string}`) {
+    super(`intent ${intentHash} already locked by another solver ${owner}`);
+    this.name = "LockOwnedByOtherError";
+    this.owner = owner;
   }
 }
 
@@ -282,9 +302,7 @@ export class Executor {
             solver: existing.solver,
           });
           await this.setStage(hash, "lost");
-          throw new DefiniteFailureError(
-            `intent ${hash} already locked by another solver ${existing.solver}`,
-          );
+          throw new LockOwnedByOtherError(hash, existing.solver);
         }
         if (existing.released || existing.refunded) {
           throw new DefiniteFailureError(
@@ -348,29 +366,25 @@ export class Executor {
    * lock exists (user is the zero address).
    */
   private async getLock(intentHash: Hex): Promise<EscrowLock | undefined> {
-    const publicClient = createPublicClient({
-      transport: http(this.evmRpcUrl),
-    });
-
-    const result = (await publicClient.readContract({
-      address: this.escrowAddress,
-      abi: ESCROW_ABI,
-      functionName: "locks",
-      args: [intentHash],
-    })) as
-      | readonly [`0x${string}`, `0x${string}`, boolean, boolean]
-      | {
-          user: `0x${string}`;
-          solver: `0x${string}`;
-          released: boolean;
-          refunded: boolean;
-        };
-
-    if (Array.isArray(result)) {
-      const [user, solver, released, refunded] = result;
-      return { user, solver, released, refunded };
-    }
-    return result;
+    // Delegate to the SDK's escrow client, which decodes the full 8-field
+    // `locks(bytes32)` getter. Hand-decoding it here previously read `asset`
+    // as `released`.
+    const escrow = new PerihelionEscrowClient(
+      createPublicClient({ transport: http(this.evmRpcUrl) }),
+      createWalletClient({
+        account: privateKeyToAccount(this.evmPrivateKey),
+        transport: http(this.evmRpcUrl),
+      }),
+      this.escrowAddress,
+    );
+    const lock = await escrow.getLock(intentHash);
+    if (!lock) return undefined;
+    return {
+      user: lock.user,
+      solver: lock.solver,
+      released: lock.released,
+      refunded: lock.refunded,
+    };
   }
 
   /** Wait for the configured number of source-chain confirmations. */
