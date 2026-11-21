@@ -39,9 +39,9 @@ versioned independently.
 
 ### Fixed
 
-- **mempool**: readiness tests now inspect the in-process lifecycle state instead
-  of fetching an unbound port, listener startup failures reject cleanly, and
-  metrics-token configuration no longer crashes the mempool test build (#1110).
+- **mempool**: reverse-proxy trust is now explicitly configurable by hop count
+  or IP/CIDR allowlist, keeping per-client rate limits accurate without
+  trusting spoofed forwarding headers by default (#1112).
 
 - **relayer**: `loadConfig` now rejects fractional or out-of-range endpoint ids
   (`PERIHELION_SOURCE_EID`, `PERIHELION_STELLAR_EID` must be integers in

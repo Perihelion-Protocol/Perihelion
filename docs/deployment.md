@@ -14,12 +14,12 @@ Soroban settlement contract, and the day-to-day admin procedures.
 
 ## 1. Trust model & roles
 
-| Role             | Held by                                  | Powers                                                                 |
-| ---------------- | ---------------------------------------- | --------------------------------------------------------------------- |
-| **owner** (EVM)  | `PerihelionTimelock` (M-of-N + delay)    | All config: `setPeer`, `setConfirmationGrace`, `setGuardian`, `setPaused` (unpause), two-step ownership |
-| **guardian** (EVM) | A hot key or small Safe                 | `pause()` only — instant emergency halt. Cannot unpause or reconfigure |
-| **admin** (Soroban) | A Stellar multisig account             | `set_endpoint`, `set_peer`, `set_admin`, `set_paused`                  |
-| **endpoint**     | LayerZero V2 endpoint                     | Sole caller of `lzReceive` / `lz_receive`                             |
+| Role                | Held by                               | Powers                                                                                                  |
+| ------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **owner** (EVM)     | `PerihelionTimelock` (M-of-N + delay) | All config: `setPeer`, `setConfirmationGrace`, `setGuardian`, `setPaused` (unpause), two-step ownership |
+| **guardian** (EVM)  | A hot key or small Safe               | `pause()` only — instant emergency halt. Cannot unpause or reconfigure                                  |
+| **admin** (Soroban) | A Stellar multisig account            | `set_endpoint`, `set_peer`, `set_admin`, `set_paused`                                                   |
+| **endpoint**        | LayerZero V2 endpoint                 | Sole caller of `lzReceive` / `lz_receive`                                                               |
 
 The asymmetry is deliberate: the **owner is slow** (timelocked, multi-party) so
 users get a public window before any config change takes effect, while the
@@ -60,12 +60,12 @@ Build and test first:
 >
 > **Compiler settings for explorer verification:**
 >
-> | Setting          | Value      |
-> | ---------------- | ---------- |
-> | Solidity version | `0.8.24`   |
-> | EVM version      | `cancun`   |
-> | Optimizer        | enabled    |
-> | Optimizer runs   | `200`      |
+> | Setting          | Value                                                                                                                                                                                                             |
+> | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | Solidity version | `0.8.24`                                                                                                                                                                                                          |
+> | EVM version      | `cancun`                                                                                                                                                                                                          |
+> | Optimizer        | enabled                                                                                                                                                                                                           |
+> | Optimizer runs   | `200`                                                                                                                                                                                                             |
 > | Metadata hash    | `none` (`bytecode_hash = "none"`, `cbor_metadata = false`) — metadata embeds the source path and compiler build, which breaks byte-for-byte comparison across machines; select "no metadata" on the explorer form |
 >
 > These are defined in [`contracts/evm/foundry.toml`](../contracts/evm/foundry.toml).
@@ -127,14 +127,14 @@ deployment, so it can accept locks as soon as ownership moves and no setting
 needs a separate governance cycle. Copy `contracts/evm/script/config/example.json`
 to `contracts/evm/script/config/<chain>.json` and fill in:
 
-| Key | Meaning |
-| --- | ------- |
-| `peer` | 32-byte address of the Soroban settlement contract (required; a zero peer is rejected) |
-| `guardian` | Emergency-pause key (required) |
-| `confirmationGrace` | Local-refund grace in seconds, within the contract's 30 min to 7 day bounds (required) |
-| `rollingWindowDuration` | Window length in seconds for per-asset rolling caps |
+| Key                                                           | Meaning                                                                                                           |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `peer`                                                        | 32-byte address of the Soroban settlement contract (required; a zero peer is rejected)                            |
+| `guardian`                                                    | Emergency-pause key (required)                                                                                    |
+| `confirmationGrace`                                           | Local-refund grace in seconds, within the contract's 30 min to 7 day bounds (required)                            |
+| `rollingWindowDuration`                                       | Window length in seconds for per-asset rolling caps                                                               |
 | `assets` / `assetMaxIntentAmounts` / `assetRollingWindowCaps` | Allowlisted tokens. Each asset needs a max lock amount. Amounts are JSON strings. Parallel arrays of equal length |
-| `owner` | The timelock. Nominated as pending owner, not yet owner |
+| `owner`                                                       | The timelock. Nominated as pending owner, not yet owner                                                           |
 
 The config must live under `contracts/evm/script/config/` or `test/fixtures/`,
 because Foundry only permits file reads there.
@@ -231,8 +231,8 @@ There is no automated sync between a deployment and the SDK. In the same PR:
 - Record the chain, address, and deployment commit in the table below.
 
 | Chain | Chain ID | Escrow address | Deployed |
-| ----- | -------- | --------------- | -------- |
-| —     | —        | —                | —        |
+| ----- | -------- | -------------- | -------- |
+| —     | —        | —              | —        |
 
 ---
 
@@ -293,6 +293,7 @@ operationally enforces those properties.
 ### Prerequisites
 
 Before running these checks:
+
 - The contracts are deployed to both chains.
 - Peers are wired and LayerZero DVNs are configured.
 - You have:
@@ -474,17 +475,17 @@ ESCROW=0x... SETTLEMENT=C... TIMELOCK=0x... GUARDIAN=0x... \
 
 If automated verification is not available, verify manually:
 
-| Item | Check | Command / Action |
-|------|-------|------------------|
-| **EVM Ownership** | `owner` is timelock, `pendingOwner` is 0x0 | `cast call $ESCROW owner() pendingOwner() --rpc-url $EVM_RPC` |
-| **Guardian Distinct** | `guardian` is set and differs from `owner` | `cast call $ESCROW guardian() --rpc-url $EVM_RPC` |
-| **Timelock Threshold** | Threshold is > 1 and > N/2 (true majority) | `cast call $TIMELOCK threshold() countOwners() --rpc-url $EVM_RPC` |
-| **Timelock Delay** | Delay >= 24h (48h recommended) | `cast call $TIMELOCK delay() --rpc-url $EVM_RPC` (result in seconds) |
-| **Peer Set (EVM)** | Stellar peer registered | `cast call $ESCROW stellarPeer() --rpc-url $EVM_RPC` (non-zero) |
-| **Peer Symmetry** | Soroban peer matches EVM peer | `stellar contract read --id $SETTLEMENT --key PEEREVM` |
-| **Escrow Not Paused** | `paused() == false` | `cast call $ESCROW paused() --rpc-url $EVM_RPC` |
-| **Grace Period** | Within bounds: 3h < grace < 7d | `cast call $ESCROW confirmationGrace() --rpc-url $EVM_RPC` |
-| **Bytecode** | On-chain bytecode matches built artifact | Compare on-chain code with `jq '.deployedBytecode.object' out/PerihelionEscrow.sol/PerihelionEscrow.json` |
+| Item                   | Check                                      | Command / Action                                                                                          |
+| ---------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| **EVM Ownership**      | `owner` is timelock, `pendingOwner` is 0x0 | `cast call $ESCROW owner() pendingOwner() --rpc-url $EVM_RPC`                                             |
+| **Guardian Distinct**  | `guardian` is set and differs from `owner` | `cast call $ESCROW guardian() --rpc-url $EVM_RPC`                                                         |
+| **Timelock Threshold** | Threshold is > 1 and > N/2 (true majority) | `cast call $TIMELOCK threshold() countOwners() --rpc-url $EVM_RPC`                                        |
+| **Timelock Delay**     | Delay >= 24h (48h recommended)             | `cast call $TIMELOCK delay() --rpc-url $EVM_RPC` (result in seconds)                                      |
+| **Peer Set (EVM)**     | Stellar peer registered                    | `cast call $ESCROW stellarPeer() --rpc-url $EVM_RPC` (non-zero)                                           |
+| **Peer Symmetry**      | Soroban peer matches EVM peer              | `stellar contract read --id $SETTLEMENT --key PEEREVM`                                                    |
+| **Escrow Not Paused**  | `paused() == false`                        | `cast call $ESCROW paused() --rpc-url $EVM_RPC`                                                           |
+| **Grace Period**       | Within bounds: 3h < grace < 7d             | `cast call $ESCROW confirmationGrace() --rpc-url $EVM_RPC`                                                |
+| **Bytecode**           | On-chain bytecode matches built artifact   | Compare on-chain code with `jq '.deployedBytecode.object' out/PerihelionEscrow.sol/PerihelionEscrow.json` |
 
 ### Pre-Announcement Gate
 
@@ -506,17 +507,17 @@ name per setting**, so a single shared `.env` configures all three services.
 The old, service-specific names are still accepted for one release and log a
 deprecation warning; use the unified name in new deployments.
 
-| Setting | Unified variable | Deprecated alias(es) | Required | Default |
-| ------- | ---------------- | -------------------- | -------- | ------- |
-| Soroban settlement contract id | `PERIHELION_SETTLEMENT_CONTRACT` | `PERIHELION_SETTLEMENT_CONTRACT_ID` (solver) | yes | — |
-| Stellar / Soroban RPC URL | `PERIHELION_STELLAR_RPC_URL` | `PERIHELION_SOROBAN_RPC_URL` (solver) | yes | — |
-| Source chain id | `PERIHELION_SOURCE_CHAIN_ID` | — | **yes (all services)** | none — must be set explicitly |
-| Metrics/health bind host | `PERIHELION_HEALTH_HOST` | `PERIHELION_METRICS_HOST` (solver), `PERIHELION_MEMPOOL_HOST` (mempool) | no | `127.0.0.1` |
-| Metrics/health bind port | `PERIHELION_HEALTH_PORT` | `PERIHELION_METRICS_PORT` (solver), `PERIHELION_MEMPOOL_PORT` (mempool) | no | service-specific (see below) |
-| Solver address | `PERIHELION_SOLVER_ADDRESS` | — | yes (solver) | — |
-| Solver private key | `PERIHELION_SOLVER_PRIVATE_KEY` | — | yes (solver) | — |
-| Relayer private key | `PERIHELION_RELAYER_PRIVATE_KEY` | — | yes (relayer) | — |
-| Mempool database URL | `PERIHELION_MEMPOOL_DATABASE_URL` | — | yes (mempool) | — |
+| Setting                        | Unified variable                  | Deprecated alias(es)                                                    | Required               | Default                       |
+| ------------------------------ | --------------------------------- | ----------------------------------------------------------------------- | ---------------------- | ----------------------------- |
+| Soroban settlement contract id | `PERIHELION_SETTLEMENT_CONTRACT`  | `PERIHELION_SETTLEMENT_CONTRACT_ID` (solver)                            | yes                    | —                             |
+| Stellar / Soroban RPC URL      | `PERIHELION_STELLAR_RPC_URL`      | `PERIHELION_SOROBAN_RPC_URL` (solver)                                   | yes                    | —                             |
+| Source chain id                | `PERIHELION_SOURCE_CHAIN_ID`      | —                                                                       | **yes (all services)** | none — must be set explicitly |
+| Metrics/health bind host       | `PERIHELION_HEALTH_HOST`          | `PERIHELION_METRICS_HOST` (solver), `PERIHELION_MEMPOOL_HOST` (mempool) | no                     | `127.0.0.1`                   |
+| Metrics/health bind port       | `PERIHELION_HEALTH_PORT`          | `PERIHELION_METRICS_PORT` (solver), `PERIHELION_MEMPOOL_PORT` (mempool) | no                     | service-specific (see below)  |
+| Solver address                 | `PERIHELION_SOLVER_ADDRESS`       | —                                                                       | yes (solver)           | —                             |
+| Solver private key             | `PERIHELION_SOLVER_PRIVATE_KEY`   | —                                                                       | yes (solver)           | —                             |
+| Relayer private key            | `PERIHELION_RELAYER_PRIVATE_KEY`  | —                                                                       | yes (relayer)          | —                             |
+| Mempool database URL           | `PERIHELION_MEMPOOL_DATABASE_URL` | —                                                                       | yes (mempool)          | —                             |
 
 Notes:
 
@@ -532,18 +533,24 @@ Notes:
 - `docker-compose.yml` sets each setting once under its unified name and shares
   it across the three services.
 
+When the mempool sits behind an ingress or load balancer, set
+`PERIHELION_MEMPOOL_TRUST_PROXY` to the trusted hop count (for example `1`) or
+an explicit comma-separated IPv4/CIDR allowlist. It is off by default, so
+untrusted clients cannot choose their rate-limit identity with
+`X-Forwarded-For`; never use the unrestricted Express `true` setting.
+
 ---
 
 ## 7. Recommended production parameters
 
-| Parameter             | Recommendation                                               |
-| --------------------- | ------------------------------------------------------------ |
-| Timelock owners       | ≥ 3 hardware-wallet keys held by distinct people             |
-| Timelock threshold    | A true majority (e.g. 2-of-3, 3-of-5)                        |
-| Timelock delay        | 24–48h in guarded beta; long enough for users to exit        |
+| Parameter             | Recommendation                                                                                                                                                                                                                |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Timelock owners       | ≥ 3 hardware-wallet keys held by distinct people                                                                                                                                                                              |
+| Timelock threshold    | A true majority (e.g. 2-of-3, 3-of-5)                                                                                                                                                                                         |
+| Timelock delay        | 24–48h in guarded beta; long enough for users to exit                                                                                                                                                                         |
 | Timelock grace period | Fixed on-chain at `GRACE_PERIOD` (14 days) after `readyAt`; a confirmed op not executed within that window expires and must be re-proposed — cancel stale ops explicitly rather than relying on expiry as the primary control |
-| Guardian              | A separate hot key (or 1-of-n Safe) for fast incident pause  |
-| `confirmationGrace`   | A few hours; must exceed worst-case LayerZero delivery time. Hard-capped at `MAX_CONFIRMATION_GRACE` (7 days) |
+| Guardian              | A separate hot key (or 1-of-n Safe) for fast incident pause                                                                                                                                                                   |
+| `confirmationGrace`   | A few hours; must exceed worst-case LayerZero delivery time. Hard-capped at `MAX_CONFIRMATION_GRACE` (7 days)                                                                                                                 |
 
 ---
 
@@ -593,12 +600,12 @@ address and whose calldata is the config call, then run the standard flow.
 
 ## 9. Incident response summary
 
-| Situation                          | First action                                  | Follow-up                                  |
-| ---------------------------------- | --------------------------------------------- | ------------------------------------------ |
-| Suspected exploit / bad messages   | Guardian `pause()` (EVM) + admin `set_paused` (Soroban) | Investigate; rotate peer/endpoint via timelock |
-| Compromised guardian key           | Timelock `setGuardian(new)`                   | Treat protocol as still safe (guardian can't move funds) |
-| Compromised single timelock owner  | Timelock `removeOwner` + `addOwner` (threshold protects you below M) | Audit all pending operations, `cancel` any unknown ones |
-| Stuck/expired intent               | Anyone calls `cancelExpired` / `cancel_expired_intent` after the window | None — permissionless                      |
+| Situation                         | First action                                                            | Follow-up                                                |
+| --------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------- |
+| Suspected exploit / bad messages  | Guardian `pause()` (EVM) + admin `set_paused` (Soroban)                 | Investigate; rotate peer/endpoint via timelock           |
+| Compromised guardian key          | Timelock `setGuardian(new)`                                             | Treat protocol as still safe (guardian can't move funds) |
+| Compromised single timelock owner | Timelock `removeOwner` + `addOwner` (threshold protects you below M)    | Audit all pending operations, `cancel` any unknown ones  |
+| Stuck/expired intent              | Anyone calls `cancelExpired` / `cancel_expired_intent` after the window | None — permissionless                                    |
 
 `PerihelionTimelock.cancel` is deliberately 1-of-N (any single owner, not a
 threshold) — see [the threat matrix](./TECHNICAL-ARCHITECTURE.md#61-detailed-mitigations-for-high-impact-attacks)

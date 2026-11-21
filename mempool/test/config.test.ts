@@ -101,3 +101,23 @@ test("loadConfig passes through a configured status token and host", () => {
   assert.equal(config.statusToken, "shhh");
   assert.equal(config.host, "0.0.0.0");
 });
+
+test("loadConfig parses trusted proxy hops and IPv4/CIDR lists (#1112)", () => {
+  assert.equal(loadConfig(baseEnv({ PERIHELION_MEMPOOL_TRUST_PROXY: "1" })).trustProxy, 1);
+  assert.deepEqual(
+    loadConfig({
+      ...baseEnv(),
+      PERIHELION_MEMPOOL_TRUST_PROXY: "loopback, 10.0.0.0/8, 192.0.2.10",
+    }).trustProxy,
+    ["loopback", "10.0.0.0/8", "192.0.2.10"],
+  );
+});
+
+test("loadConfig rejects unsafe or malformed trust-proxy values (#1112)", () => {
+  for (const value of ["true", "0", "10.0.0.0/99", "example.com"]) {
+    assert.throws(
+      () => loadConfig(baseEnv({ PERIHELION_MEMPOOL_TRUST_PROXY: value })),
+      /PERIHELION_MEMPOOL_TRUST_PROXY/,
+    );
+  }
+});

@@ -28,13 +28,17 @@ services:
       SOROBAN_RPC_HOST: "0.0.0.0"
       SOROBAN_RPC_PORT: "8000"
     ports:
-      - "8000:8000"    # Soroban RPC
-      - "8006:8006"    # Horizon HTTP
+      - "8000:8000" # Soroban RPC
+      - "8006:8006" # Horizon HTTP
     networks:
       - perihelion
     healthcheck:
       # The quickstart image has no Node.js; probe Soroban RPC's getHealth instead.
-      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}' http://localhost:8000/rpc | grep -q healthy"]
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf -X POST -H ''Content-Type: application/json'' -d ''{"jsonrpc":"2.0","id":1,"method":"getHealth"}'' http://localhost:8000/rpc | grep -q healthy',
+        ]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -63,6 +67,9 @@ services:
       # Required: the mempool binds every interface, so status updates must be
       # authenticated. The solver reads the same value (#966).
       PERIHELION_MEMPOOL_STATUS_TOKEN: ${PERIHELION_MEMPOOL_STATUS_TOKEN:?set PERIHELION_MEMPOOL_STATUS_TOKEN (shared with the solver)}
+      # Compose connects clients directly, so proxy trust remains off. Set a
+      # hop count or CIDR list only when an ingress is placed in front.
+      PERIHELION_MEMPOOL_TRUST_PROXY: ${PERIHELION_MEMPOOL_TRUST_PROXY:-}
     ports:
       - "3000:3000"
     networks:

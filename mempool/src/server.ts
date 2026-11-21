@@ -15,6 +15,7 @@ import type { Hex, SignedIntent, Address, VerifyIntentOptions } from "@perihelio
 import { IntentStore } from "./store.js";
 import { SlidingWindowRateLimitStore } from "./rate-limit.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
+import type { TrustProxy } from "./config.js";
 
 const SIGNATURE_RE = /^0x[0-9a-fA-F]+$/;
 
@@ -145,6 +146,8 @@ export interface MempoolServerOptions {
   writeRateLimit?: number;
   /** Per-IP request budget within the window for read routes (GET). Default 600. */
   readRateLimit?: number;
+  /** Trusted reverse-proxy hop count or IP/CIDR list. Defaults to off. */
+  trustProxy?: TrustProxy;
   /**
    * Optional viem `PublicClient` used to verify signatures from contract
    * wallets (ERC-1271). When omitted, contract-wallet intents are rejected
@@ -210,6 +213,9 @@ export class MempoolServer {
     this.rateLimitHits = new SlidingWindowRateLimitStore(this.rateLimitWindowMs);
     this.writeRateLimit = opts.writeRateLimit ?? DEFAULT_WRITE_RATE_LIMIT;
     this.readRateLimit = opts.readRateLimit ?? DEFAULT_READ_RATE_LIMIT;
+    if (opts.trustProxy !== undefined) {
+      this.app.set("trust proxy", opts.trustProxy);
+    }
     // Warn on the absence of a status token, not on the bind host: a loopback
     // bind behind a reverse proxy is still reachable by remote callers, and a
     // configured token is authentication whatever the host (#966).
