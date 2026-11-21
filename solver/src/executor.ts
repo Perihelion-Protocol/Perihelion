@@ -114,6 +114,17 @@ export interface ExecutorConfig {
    */
   readonly lzFeeBufferStroops?: bigint;
   /**
+   * Additional safety buffer as basis points of the quoted LayerZero fee for
+   * the FillConfirmed message (e.g. 500 = 5%). Applied on top of
+   * {@link lzFeeBufferStroops}. Defaults to 0.
+   */
+  readonly lzFeeBufferBps?: number;
+  /**
+   * How often to poll the settlement contract's `status` while waiting for
+   * registration, in ms. Defaults to {@link DEFAULT_REGISTRATION_POLL_INTERVAL_MS}.
+   */
+  readonly registrationPollIntervalMs?: number;
+  /**
    * Operator policy for the Soroban inclusion-fee bid on `fill_intent`: the
    * `getFeeStats` percentile to follow, the floor, and the hard cap.
    */
@@ -183,8 +194,8 @@ const SOROBAN_POLL_INTERVAL_MS = 2_000;
  */
 export const MIN_FILL_HEADROOM_SECS = 60;
 
-/** How often to poll the settlement contract's `status` view, in ms. */
-const REGISTRATION_POLL_INTERVAL_MS = 2_000;
+/** Default for how often to poll the settlement contract's `status` view, in ms. */
+export const DEFAULT_REGISTRATION_POLL_INTERVAL_MS = 2_000;
 
 /**
  * Execute a fill by orchestrating EVM lock and Soroban fill_intent.
@@ -202,6 +213,8 @@ export class Executor {
   private readonly sourceChainId: number;
   private readonly stellarNetwork: string;
   private readonly lzFeeBufferStroops: bigint;
+  private readonly lzFeeBufferBps: bigint;
+  private readonly registrationPollIntervalMs: number;
   private readonly inclusionFee: Required<InclusionFeePolicy>;
   private readonly sourceConfirmations: number;
   private readonly persistStage?: (intentHash: Hex, stage: FillStage) => void | Promise<void>;
@@ -225,6 +238,9 @@ export class Executor {
     // Validate the policy up front so a bad cap fails at startup, not mid-fill.
     this.inclusionFee = resolveInclusionFeePolicy(config.inclusionFee);
     this.lzFeeBufferStroops = config.lzFeeBufferStroops ?? 0n;
+    this.lzFeeBufferBps = BigInt(config.lzFeeBufferBps ?? 0);
+    this.registrationPollIntervalMs =
+      config.registrationPollIntervalMs ?? DEFAULT_REGISTRATION_POLL_INTERVAL_MS;
     this.sourceConfirmations = config.sourceConfirmations ?? 1;
     this.logger = logger;
   }
@@ -409,7 +425,7 @@ export class Executor {
           `intent ${hash} not registered before deadline headroom (status=${variant ?? "unknown"})`,
         );
       }
-      await sleep(REGISTRATION_POLL_INTERVAL_MS);
+      await sleep(this.registrationPollIntervalMs);
     }
   }
 
@@ -605,7 +621,8 @@ export class Executor {
     // Quote the LayerZero fee for the FillConfirmed message and add the
     // configured safety buffer.
     const quotedFee = await this.quoteFillConfirmedFee(intent.sourceChainId);
-    const lzFee = quotedFee + this.lzFeeBufferStroops;
+    const lzFee =
+      quotedFee + this.lzFeeBufferStroops + (quotedFee * this.lzFeeBufferBps) / 10_000n;
 
     const args = [
       solverStellar,
