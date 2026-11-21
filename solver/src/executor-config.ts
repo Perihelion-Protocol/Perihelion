@@ -3,6 +3,7 @@
 /** Load executor configuration from environment variables. */
 
 import type { ExecutorConfig } from "./executor.js";
+import { inclusionFeePolicyFromEnv, type InclusionFeePolicy } from "@perihelion/sdk";
 import { getAddress, isAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -33,9 +34,7 @@ function readWithLegacy(
         `${legacy} is deprecated and conflicts with ${primary}; remove ${legacy} and keep only ${primary}`,
       );
     } else if (legacyValue) {
-      console.warn(
-        `[config] ${legacy} is deprecated; use ${primary} instead`,
-      );
+      console.warn(`[config] ${legacy} is deprecated; use ${primary} instead`);
     }
     return primaryValue;
   }
@@ -68,9 +67,7 @@ export function hasExecutorConfig(env: NodeJS.ProcessEnv = process.env): boolean
  *
  * Throws a single consolidated error listing every missing/invalid variable.
  */
-export function loadExecutorConfig(
-  env: NodeJS.ProcessEnv = process.env,
-): ExecutorConfig {
+export function loadExecutorConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig {
   const errors: string[] = [];
 
   const evmRpcUrl = env.PERIHELION_EVM_RPC_URL ?? "";
@@ -156,15 +153,32 @@ export function loadExecutorConfig(
         errors.push(
           `PERIHELION_SOLVER_ADDRESS must be a 0x-prefixed 20-byte EVM address, got: "${configuredSolverAddress}"`,
         );
-      } else if (
-        getAddress(configuredSolverAddress) !== getAddress(derivedAddress)
-      ) {
+      } else if (getAddress(configuredSolverAddress) !== getAddress(derivedAddress)) {
         errors.push(
           `PERIHELION_SOLVER_ADDRESS (${getAddress(configuredSolverAddress)}) does not match the address derived from PERIHELION_EVM_PRIVATE_KEY (${getAddress(derivedAddress)})`,
         );
       }
     }
   }
+
+  const lzFeeBufferBps = parseNonNegativeInteger(
+    env.PERIHELION_LZ_FEE_BUFFER_BPS,
+    0,
+    "PERIHELION_LZ_FEE_BUFFER_BPS",
+    errors,
+  );
+  const registrationPollIntervalMs = parseNonNegativeInteger(
+    env.PERIHELION_REGISTRATION_POLL_INTERVAL_MS,
+    2_000,
+    "PERIHELION_REGISTRATION_POLL_INTERVAL_MS",
+    errors,
+  );
+  const minFillHeadroomSecs = parseNonNegativeInteger(
+    env.PERIHELION_MIN_FILL_HEADROOM_SECS,
+    60,
+    "PERIHELION_MIN_FILL_HEADROOM_SECS",
+    errors,
+  );
 
   if (errors.length > 0) {
     throw new Error(

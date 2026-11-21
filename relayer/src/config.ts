@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+import { noopLogger, type Logger } from "@perihelion/node-common";
 import { isValidEd25519SecretSeed } from "./strkey.js";
-
-/** Relayer runtime configuration, loaded from environment variables. */
 
 /** Relayer runtime configuration, loaded from environment variables. */
 export interface RelayerConfig {
@@ -46,6 +45,10 @@ export interface RelayerConfig {
   readonly checkpointFile: string;
   /** Path of the JSON file that persists dead-lettered messages. */
   readonly deadLetterFile: string;
+  /** Optional path of the JSON file that persists the return-leg relay cursor. */
+  readonly returnCheckpointFile?: string;
+  /** Optional path of the JSON file that persists return-leg dead-lettered messages. */
+  readonly returnDeadLetterFile?: string;
   /** TCP port of the health / readiness / metrics server. Defaults to 8080. */
   readonly healthPort: number;
   /** Interface the health server binds to. Defaults to 127.0.0.1. */
@@ -62,6 +65,8 @@ export interface RelayerConfig {
    * the settlement contract's configured `Endpoint`.  `"executor"` is reserved
    * for the production design, where the relayer is a permissionless executor
    * calling a real LayerZero endpoint/adapter and its key carries no authority.
+   * `"keeper"` runs the reference keeper for `cancelExpired`,
+   * `cancel_expired_intent`, and `dispatch_confirmation` (issue #1123).
    */
   readonly relayerMode: RelayerMode;
   /**
@@ -70,23 +75,115 @@ export interface RelayerConfig {
    * start in `"dev"` mode when {@link stellarNetwork} is Pubnet.
    */
   readonly allowEndpointImpersonation: boolean;
+  /**
+   * Optional 0x-prefixed 32-byte EVM private key used by keeper mode to submit
+   * `cancelExpired` transactions on the EVM escrow (`PERIHELION_EVM_PRIVATE_KEY`).
+   */
+  readonly evmPrivateKey?: string;
+  /**
+   * When true, the keeper scans and evaluates expired / undispatched intents
+   * without submitting state-mutating transactions (`PERIHELION_KEEPER_DRY_RUN`).
+   */
+  readonly keeperDryRun?: boolean;
+  /**
+   * When true (default), the keeper only executes Soroban actions whose reward
+   * covers LayerZero + inclusion fees + `keeperMinProfitStroops`
+   * (`PERIHELION_KEEPER_ENFORCE_PROFITABILITY`).
+   */
+  readonly keeperEnforceProfitability?: boolean;
+  /**
+   * Minimum net profit in stroops required for a Soroban keeper action when
+   * profitability enforcement is enabled (`PERIHELION_KEEPER_MIN_PROFIT_STROOPS`).
+   */
+  readonly keeperMinProfitStroops?: bigint;
+  /**
+   * Optional maximum EVM gas price (in wei) the keeper will pay for
+   * `cancelExpired` (`PERIHELION_KEEPER_MAX_GAS_PRICE_WEI`).
+   */
+  readonly keeperMaxGasPriceWei?: bigint;
+  /**
+   * Optional maximum total EVM native gas cost (`gas * gasPrice` in wei) per
+   * `cancelExpired` call (`PERIHELION_KEEPER_MAX_EVM_CANCEL_COST_WEI`).
+   */
+  readonly keeperMaxEvmCancelCostWei?: bigint;
+  /**
+   * Optional safety buffer (in stroops) added to quoted LayerZero fees for
+   * Soroban keeper calls (`PERIHELION_KEEPER_LZ_FEE_BUFFER_STROOPS`).
+   */
+  readonly keeperLzFeeBufferStroops?: bigint;
 }
 
 /** Supported relayer operating modes. */
-export type RelayerMode = "dev" | "executor";
+export type RelayerMode = "dev" | "executor" | "keeper";
 
 /** Stellar Pubnet network passphrase. */
 export const PUBNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
 
+/** Maximum uint32 LayerZero endpoint ID. */
+const MAX_ENDPOINT_ID = 0xffffffff;
+
 /** Accepted truthy values for boolean environment flags. */
 const TRUTHY_RE = /^(1|true|yes|on)$/i;
+/** Accepted falsy values for boolean environment flags. */
+const FALSY_RE = /^(0|false|no|off)$/i;
 
 /** 0x-prefixed 20-byte EVM address. */
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+/** 0x-prefixed 32-byte EVM private key. */
+const EVM_PRIVATE_KEY_RE = /^0x[0-9a-fA-F]{64}$/;
 /** Soroban contract IDs start with 'C' and are 56 base-32 characters. */
 const SOROBAN_CONTRACT_RE = /^C[A-Z2-7]{55}$/;
 /** Stellar secret key starts with 'S' and is 56 base-32 characters. */
 const STELLAR_SECRET_RE = /^S[A-Z2-7]{55}$/;
+/** Strict base-10 integer string. */
+const STRICT_INTEGER_RE = /^-?\d+$/;
+
+function parseIntegerInRange(raw: string, min: number, max: number): number | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed || !STRICT_INTEGER_RE.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function readIntegerEnv(
+  errors: string[],
+  name: string,
+  raw: string | undefined,
+  defaultValue: number,
+  min: number,
+  max: number,
+): number {
+  if (raw === undefined || raw.trim() === "") return defaultValue;
+  const parsed = parseIntegerInRange(raw, min, max);
+  if (parsed === undefined) {
+    errors.push(`${name} must be an integer between ${min} and ${max}, got: "${raw}"`);
+    return defaultValue;
+  }
+  return parsed;
+}
+
+function readBigIntEnv(
+  errors: string[],
+  name: string,
+  raw: string | undefined,
+  allowNegative = false,
+): bigint | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const trimmed = raw.trim();
+  if (!STRICT_INTEGER_RE.test(trimmed)) {
+    errors.push(`${name} must be an integer, got: "${raw}"`);
+    return undefined;
+  }
+  const value = BigInt(trimmed);
+  if (!allowNegative && value < 0n) {
+    errors.push(`${name} must be a non-negative integer, got: "${raw}"`);
+    return undefined;
+  }
+  return value;
+}
 
 /**
  * Validate a URL string and return the URL object.
@@ -288,13 +385,60 @@ export function loadConfig(
   // --- Relayer mode (defaults to the development-only stand-in) ---
   const rawRelayerMode = (env.PERIHELION_RELAYER_MODE ?? "dev").trim().toLowerCase();
   let relayerMode: RelayerMode = "dev";
-  if (rawRelayerMode === "dev" || rawRelayerMode === "executor") {
+  if (rawRelayerMode === "dev" || rawRelayerMode === "executor" || rawRelayerMode === "keeper") {
     relayerMode = rawRelayerMode;
   } else {
     errors.push(
-      `PERIHELION_RELAYER_MODE must be "dev" or "executor", got: "${env.PERIHELION_RELAYER_MODE}"`,
+      `PERIHELION_RELAYER_MODE must be "dev", "executor", or "keeper", got: "${env.PERIHELION_RELAYER_MODE}"`,
     );
   }
+
+  // --- Optional keeper configuration ---
+  let evmPrivateKey: string | undefined;
+  if (env.PERIHELION_EVM_PRIVATE_KEY && env.PERIHELION_EVM_PRIVATE_KEY.trim() !== "") {
+    const trimmedKey = env.PERIHELION_EVM_PRIVATE_KEY.trim();
+    if (!EVM_PRIVATE_KEY_RE.test(trimmedKey)) {
+      errors.push(
+        "PERIHELION_EVM_PRIVATE_KEY must be a 0x-prefixed 32-byte hex private key",
+      );
+    } else {
+      evmPrivateKey = trimmedKey;
+    }
+  }
+
+  const keeperDryRun = TRUTHY_RE.test((env.PERIHELION_KEEPER_DRY_RUN ?? "").trim());
+  const rawEnforceProfit = (env.PERIHELION_KEEPER_ENFORCE_PROFITABILITY ?? "").trim();
+  const keeperEnforceProfitability = rawEnforceProfit ? !FALSY_RE.test(rawEnforceProfit) : true;
+
+  const keeperMinProfitStroops =
+    readBigIntEnv(
+      errors,
+      "PERIHELION_KEEPER_MIN_PROFIT_STROOPS",
+      env.PERIHELION_KEEPER_MIN_PROFIT_STROOPS,
+      true,
+    ) ?? 0n;
+
+  const keeperMaxGasPriceWei = readBigIntEnv(
+    errors,
+    "PERIHELION_KEEPER_MAX_GAS_PRICE_WEI",
+    env.PERIHELION_KEEPER_MAX_GAS_PRICE_WEI,
+    false,
+  );
+
+  const keeperMaxEvmCancelCostWei = readBigIntEnv(
+    errors,
+    "PERIHELION_KEEPER_MAX_EVM_CANCEL_COST_WEI",
+    env.PERIHELION_KEEPER_MAX_EVM_CANCEL_COST_WEI,
+    false,
+  );
+
+  const keeperLzFeeBufferStroops =
+    readBigIntEnv(
+      errors,
+      "PERIHELION_KEEPER_LZ_FEE_BUFFER_STROOPS",
+      env.PERIHELION_KEEPER_LZ_FEE_BUFFER_STROOPS,
+      false,
+    ) ?? 0n;
 
   // --- Explicit override for endpoint impersonation on a public network ---
   const allowEndpointImpersonation = TRUTHY_RE.test(
@@ -349,5 +493,12 @@ export function loadConfig(
     maxLagBlocks,
     relayerMode,
     allowEndpointImpersonation,
+    ...(evmPrivateKey !== undefined ? { evmPrivateKey } : {}),
+    keeperDryRun,
+    keeperEnforceProfitability,
+    keeperMinProfitStroops,
+    ...(keeperMaxGasPriceWei !== undefined ? { keeperMaxGasPriceWei } : {}),
+    ...(keeperMaxEvmCancelCostWei !== undefined ? { keeperMaxEvmCancelCostWei } : {}),
+    keeperLzFeeBufferStroops,
   };
 }

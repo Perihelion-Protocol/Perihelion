@@ -169,3 +169,68 @@ test("loadConfig rejects a signer secret with a bad checksum", () => {
   const tampered = secret.slice(0, -1) + (last === "A" ? "B" : "A");
   assert.match(errorFor({ ...validConfigEnv(), SIGNER_SECRET: tampered }), /SIGNER_SECRET/);
 });
+
+// --- Keeper mode and PERIHELION_KEEPER_* settings (#1123) --------------------
+
+test("loadConfig accepts PERIHELION_RELAYER_MODE=keeper (including on Pubnet without impersonation override)", () => {
+  const config = loadConfig({
+    ...validConfigEnv(),
+    STELLAR_NETWORK: "Public Global Stellar Network ; September 2015",
+    PERIHELION_RELAYER_MODE: "keeper",
+  });
+  assert.equal(config.relayerMode, "keeper");
+  assert.equal(config.keeperDryRun, false);
+  assert.equal(config.keeperEnforceProfitability, true);
+  assert.equal(config.keeperMinProfitStroops, 0n);
+  assert.equal(config.keeperLzFeeBufferStroops, 0n);
+  assert.equal(config.evmPrivateKey, undefined);
+  assert.equal(config.keeperMaxGasPriceWei, undefined);
+  assert.equal(config.keeperMaxEvmCancelCostWei, undefined);
+});
+
+test("loadConfig parses all PERIHELION_KEEPER_* and PERIHELION_EVM_PRIVATE_KEY environment variables", () => {
+  const evmKey = "0x" + "ab".repeat(32);
+  const config = loadConfig({
+    ...validConfigEnv(),
+    PERIHELION_RELAYER_MODE: "keeper",
+    PERIHELION_EVM_PRIVATE_KEY: evmKey,
+    PERIHELION_KEEPER_DRY_RUN: "true",
+    PERIHELION_KEEPER_ENFORCE_PROFITABILITY: "false",
+    PERIHELION_KEEPER_MIN_PROFIT_STROOPS: "25000",
+    PERIHELION_KEEPER_MAX_GAS_PRICE_WEI: "20000000000",
+    PERIHELION_KEEPER_MAX_EVM_CANCEL_COST_WEI: "2000000000000000",
+    PERIHELION_KEEPER_LZ_FEE_BUFFER_STROOPS: "5000",
+  });
+
+  assert.equal(config.relayerMode, "keeper");
+  assert.equal(config.evmPrivateKey, evmKey);
+  assert.equal(config.keeperDryRun, true);
+  assert.equal(config.keeperEnforceProfitability, false);
+  assert.equal(config.keeperMinProfitStroops, 25_000n);
+  assert.equal(config.keeperMaxGasPriceWei, 20_000_000_000n);
+  assert.equal(config.keeperMaxEvmCancelCostWei, 2_000_000_000_000_000n);
+  assert.equal(config.keeperLzFeeBufferStroops, 5_000n);
+});
+
+test("loadConfig rejects malformed PERIHELION_RELAYER_MODE and PERIHELION_KEEPER_* variables", () => {
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_RELAYER_MODE: "unknown" }),
+    /PERIHELION_RELAYER_MODE/,
+  );
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_EVM_PRIVATE_KEY: "0x1234" }),
+    /PERIHELION_EVM_PRIVATE_KEY/,
+  );
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_KEEPER_MAX_GAS_PRICE_WEI: "-1" }),
+    /PERIHELION_KEEPER_MAX_GAS_PRICE_WEI/,
+  );
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_KEEPER_MAX_EVM_CANCEL_COST_WEI: "abc" }),
+    /PERIHELION_KEEPER_MAX_EVM_CANCEL_COST_WEI/,
+  );
+  assert.match(
+    errorFor({ ...validConfigEnv(), PERIHELION_KEEPER_LZ_FEE_BUFFER_STROOPS: "-5" }),
+    /PERIHELION_KEEPER_LZ_FEE_BUFFER_STROOPS/,
+  );
+});

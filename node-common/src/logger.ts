@@ -8,7 +8,7 @@ export interface Logger {
 
 export const noopLogger: Logger = { info() {}, warn() {}, error() {} };
 
-export type Component = "relayer" | "solver";
+export type Component = "relayer" | "solver" | "keeper";
 
 export interface LoggerOptions {
   stdout?: { write(s: string): void };

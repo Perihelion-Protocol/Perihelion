@@ -18,13 +18,26 @@
  */
 
 import { zeroAddress } from "viem";
-import type {
-  PublicClient,
-  WalletClient,
-  Address,
-} from "viem";
+import type { PublicClient, WalletClient, Address } from "viem";
 import type { Intent, Hex } from "./types.js";
 import { ESCROW_ABI } from "./escrow-abi.js";
+import { evaluateEvmCancelCostGuard } from "./keeper.js";
+
+const LOCKED_EVENT_ABI = {
+  type: "event",
+  name: "Locked",
+  inputs: [
+    { name: "intentHash", type: "bytes32", indexed: true },
+    { name: "solver", type: "address", indexed: true },
+    { name: "user", type: "address", indexed: true },
+    { name: "asset", type: "address", indexed: false },
+    { name: "amount", type: "uint256", indexed: false },
+    { name: "destination", type: "string", indexed: false },
+    { name: "destAsset", type: "string", indexed: false },
+    { name: "minDestAmount", type: "uint128", indexed: false },
+    { name: "deadline", type: "uint64", indexed: false },
+  ],
+} as const;
 
 /**
  * Lock record returned by {@link PerihelionEscrowClient.getLock}. Mirrors
@@ -67,6 +80,48 @@ export interface RefundStatus {
   blockTimestamp: bigint;
 }
 
+/** An expired, unfinalized lock discovered by {@link PerihelionEscrowClient.findExpiredLocks}. */
+export interface ExpiredLock {
+  readonly intentHash: Hex;
+  readonly lock: Lock;
+  readonly refundableAt: bigint;
+  readonly lockedAtBlock: bigint;
+  readonly lockedTxHash?: Hex;
+  readonly evaluatedAtBlock: bigint;
+  readonly evaluatedAtTimestamp: bigint;
+}
+
+/** Options for {@link PerihelionEscrowClient.findExpiredLocks}. */
+export interface FindExpiredLocksOptions {
+  /** Starting block number (inclusive). Defaults to 0n. */
+  readonly fromBlock?: bigint;
+  /** Ending block number (inclusive). Defaults to the latest block. */
+  readonly toBlock?: bigint;
+  /** Optional filter by user address (indexed topic on Locked). */
+  readonly user?: Address;
+  /** Optional filter by solver address (indexed topic on Locked). */
+  readonly solver?: Address;
+  /** Maximum block span per eth_getLogs request. Defaults to 2000. */
+  readonly maxBlockRange?: number;
+}
+
+/** Options for {@link PerihelionEscrowClient.cancelExpiredLocks}. */
+export interface CancelExpiredLocksOptions extends FindExpiredLocksOptions {
+  /** When true, finds and evaluates expired locks without sending transactions. */
+  readonly dryRun?: boolean;
+  /** Optional maximum gas price (in wei) the caller is willing to pay. */
+  readonly maxGasPriceWei?: bigint;
+  /** Optional maximum total native gas cost (gas * gasPrice in wei) per cancel call. */
+  readonly maxCancelCostWei?: bigint;
+}
+
+/** Result of {@link PerihelionEscrowClient.cancelExpiredLocks}. */
+export interface CancelExpiredLocksResult {
+  readonly found: ExpiredLock[];
+  readonly cancelled: Array<{ intentHash: Hex; txHash: Hex; gasCostWei?: bigint }>;
+  readonly skipped: Array<{ intentHash: Hex; reason: string }>;
+}
+
 /**
  * Client for interacting with the PerihelionEscrow contract.
  *
@@ -93,8 +148,8 @@ export class PerihelionEscrowClient {
       payer ??
       this.walletClient.account?.address ??
       (intent.preferredSolver !== "0x0000000000000000000000000000000000000000"
-        ? (intent.preferredSolver)
-        : (intent.user));
+        ? intent.preferredSolver
+        : intent.user);
 
     const fee = await this.publicClient.readContract({
       address: this.escrowAddress,
@@ -102,7 +157,7 @@ export class PerihelionEscrowClient {
       functionName: "quoteFee",
       args: [this._intentToContract(intent), solverAddress],
     });
-    return fee as bigint;
+    return fee;
   }
 
   /**
@@ -121,11 +176,7 @@ export class PerihelionEscrowClient {
    *   over the actual LayerZero cost is refunded by the endpoint to the caller.
    * @returns The transaction hash.
    */
-  async lock(
-    intent: Intent,
-    signature: Hex,
-    value: bigint,
-  ): Promise<Hex> {
+  async lock(intent: Intent, signature: Hex, value: bigint): Promise<Hex> {
     const account = this.walletClient.account;
     if (!account) throw new Error("wallet client has no account");
 
@@ -287,27 +338,218 @@ export class PerihelionEscrowClient {
       abi: ESCROW_ABI,
       functionName: "confirmationGrace",
     });
-    return grace as bigint;
+    return grace;
+  }
+
+  /**
+   * Scan on-chain `Locked` events and return all locks that are currently
+   * unfinalized and past `deadline + confirmationGrace` at the evaluated block.
+   *
+   * Every contract read (`confirmationGrace()` and `locks(intentHash)`) is
+   * pinned to the same block whose timestamp is evaluated, matching
+   * {@link refundStatus}.
+   */
+  async findExpiredLocks(opts: FindExpiredLocksOptions = {}): Promise<ExpiredLock[]> {
+    const block =
+      opts.toBlock !== undefined
+        ? await this.publicClient.getBlock({ blockNumber: opts.toBlock })
+        : await this.publicClient.getBlock({ blockTag: "latest" });
+    const evaluatedAtBlock = block.number;
+    const evaluatedAtTimestamp = block.timestamp;
+
+    const fromBlock = opts.fromBlock ?? 0n;
+    const toBlock = opts.toBlock ?? evaluatedAtBlock;
+    if (fromBlock > toBlock) return [];
+
+    const grace = await this.publicClient.readContract({
+      address: this.escrowAddress,
+      abi: ESCROW_ABI,
+      functionName: "confirmationGrace",
+      blockNumber: evaluatedAtBlock,
+    });
+
+    let maxRange = BigInt(Math.max(1, opts.maxBlockRange ?? 2000));
+    const candidates = new Map<
+      Hex,
+      { lockedAtBlock: bigint; lockedTxHash?: Hex; eventDeadline?: bigint }
+    >();
+
+    let cursor = fromBlock;
+    while (cursor <= toBlock) {
+      const chunkEnd = cursor + maxRange - 1n < toBlock ? cursor + maxRange - 1n : toBlock;
+      let logs;
+      try {
+        const filterArgs: { user?: Address; solver?: Address } = {};
+        if (opts.user) filterArgs.user = opts.user;
+        if (opts.solver) filterArgs.solver = opts.solver;
+
+        logs = await this.publicClient.getLogs({
+          address: this.escrowAddress,
+          event: LOCKED_EVENT_ABI,
+          ...(Object.keys(filterArgs).length > 0 ? { args: filterArgs } : {}),
+          fromBlock: cursor,
+          toBlock: chunkEnd,
+        });
+      } catch (err) {
+        if (this._isProviderRangeError(err) && maxRange > 1n) {
+          maxRange = maxRange / 2n;
+          if (maxRange < 1n) maxRange = 1n;
+          continue;
+        }
+        throw err;
+      }
+
+      for (const log of logs) {
+        const rawHash =
+          (log as { args?: { intentHash?: Hex } }).args?.intentHash ?? log.topics?.[1];
+        if (!rawHash || !/^0x[0-9a-fA-F]{64}$/.test(rawHash)) continue;
+        const intentHash = rawHash.toLowerCase() as Hex;
+
+        const rawDeadline = (log as { args?: { deadline?: bigint | number } }).args?.deadline;
+        const eventDeadline = rawDeadline !== undefined ? BigInt(rawDeadline) : undefined;
+
+        // Pre-filter by event deadline when available to avoid redundant eth_call reads.
+        if (eventDeadline !== undefined && eventDeadline + grace > evaluatedAtTimestamp) {
+          continue;
+        }
+
+        if (!candidates.has(intentHash)) {
+          candidates.set(intentHash, {
+            lockedAtBlock: log.blockNumber ?? 0n,
+            ...(log.transactionHash ? { lockedTxHash: log.transactionHash } : {}),
+            ...(eventDeadline !== undefined ? { eventDeadline } : {}),
+          });
+        }
+      }
+
+      cursor = chunkEnd + 1n;
+    }
+
+    const expired: ExpiredLock[] = [];
+    for (const [intentHash, meta] of candidates) {
+      const lock = await this._readLock(intentHash, evaluatedAtBlock);
+      if (!lock) continue;
+      if (lock.released || lock.refunded) continue;
+      if (opts.user && lock.user.toLowerCase() !== opts.user.toLowerCase()) continue;
+      if (opts.solver && lock.solver.toLowerCase() !== opts.solver.toLowerCase()) continue;
+
+      const refundableAt = lock.deadline + grace;
+      if (evaluatedAtTimestamp < refundableAt) continue;
+
+      expired.push({
+        intentHash,
+        lock,
+        refundableAt,
+        lockedAtBlock: meta.lockedAtBlock,
+        ...(meta.lockedTxHash ? { lockedTxHash: meta.lockedTxHash } : {}),
+        evaluatedAtBlock,
+        evaluatedAtTimestamp,
+      });
+    }
+
+    return expired;
+  }
+
+  /**
+   * Discover expired locks via {@link findExpiredLocks} and invoke
+   * {@link cancelExpired} for each one that passes optional dry-run and
+   * gas-price / gas-cost guards.
+   */
+  async cancelExpiredLocks(
+    opts: CancelExpiredLocksOptions = {},
+  ): Promise<CancelExpiredLocksResult> {
+    const found = await this.findExpiredLocks(opts);
+    const cancelled: Array<{ intentHash: Hex; txHash: Hex; gasCostWei?: bigint }> = [];
+    const skipped: Array<{ intentHash: Hex; reason: string }> = [];
+
+    if (found.length === 0) {
+      return { found, cancelled, skipped };
+    }
+
+    if (opts.dryRun) {
+      for (const item of found) {
+        skipped.push({ intentHash: item.intentHash, reason: "dry_run" });
+      }
+      return { found, cancelled, skipped };
+    }
+
+    const account = this.walletClient.account;
+    if (!account) throw new Error("wallet client has no account");
+
+    const hasGasGuards = opts.maxGasPriceWei !== undefined || opts.maxCancelCostWei !== undefined;
+    let gasPriceWei: bigint | undefined;
+    if (hasGasGuards) {
+      gasPriceWei = await this.publicClient.getGasPrice();
+    }
+
+    for (const item of found) {
+      let estimatedCostWei: bigint | undefined;
+      if (hasGasGuards && gasPriceWei !== undefined) {
+        if (opts.maxGasPriceWei !== undefined && gasPriceWei > opts.maxGasPriceWei) {
+          skipped.push({
+            intentHash: item.intentHash,
+            reason: "gas_price_exceeds_cap",
+          });
+          continue;
+        }
+        const estimatedGas = await this._estimateCancelGas(item.intentHash);
+        const decision = evaluateEvmCancelCostGuard({
+          gasPriceWei,
+          estimatedGas,
+          maxGasPriceWei: opts.maxGasPriceWei,
+          maxCancelCostWei: opts.maxCancelCostWei,
+        });
+        if (!decision.allowed) {
+          skipped.push({
+            intentHash: item.intentHash,
+            reason: decision.reason ?? "cancel_cost_exceeds_cap",
+          });
+          continue;
+        }
+        estimatedCostWei = decision.totalCostWei;
+      }
+
+      const txHash = await this.cancelExpired(item.intentHash);
+      cancelled.push({
+        intentHash: item.intentHash,
+        txHash,
+        ...(estimatedCostWei !== undefined ? { gasCostWei: estimatedCostWei } : {}),
+      });
+    }
+
+    return { found, cancelled, skipped };
+  }
+
+  private async _estimateCancelGas(intentHash: Hex): Promise<bigint> {
+    try {
+      return await this.publicClient.estimateContractGas({
+        address: this.escrowAddress,
+        abi: ESCROW_ABI,
+        functionName: "cancelExpired",
+        args: [intentHash],
+        account: this.walletClient.account,
+      });
+    } catch {
+      return 100_000n;
+    }
+  }
+
+  private _isProviderRangeError(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    const msg = err.message.toLowerCase();
+    return msg.includes("range") || msg.includes("too large") || msg.includes("limit");
   }
 
   // Read locks(intentHash), optionally at a pinned block; undefined if no lock exists.
   private async _readLock(intentHash: Hex, blockNumber?: bigint): Promise<Lock | undefined> {
-    const [
-      solver,
-      user,
-      asset,
-      amount,
-      minDestAmount,
-      deadline,
-      released,
-      refunded,
-    ] = await this.publicClient.readContract({
-      address: this.escrowAddress,
-      abi: ESCROW_ABI,
-      functionName: "locks",
-      args: [intentHash],
-      blockNumber,
-    });
+    const [solver, user, asset, amount, minDestAmount, deadline, released, refunded] =
+      await this.publicClient.readContract({
+        address: this.escrowAddress,
+        abi: ESCROW_ABI,
+        functionName: "locks",
+        args: [intentHash],
+        blockNumber,
+      });
     if (user === zeroAddress) return undefined;
     return {
       solver,

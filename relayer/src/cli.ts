@@ -14,6 +14,7 @@
 import { inclusionFeePolicyFromEnv } from "@perihelion/sdk";
 import { loadConfig } from "./config.js";
 import { Relayer } from "./relayer.js";
+import { Keeper } from "./keeper.js";
 import { EVMSourceWatcher } from "./evm-watcher.js";
 import { SorobanDestinationDelivery } from "./soroban-delivery.js";
 import { SorobanSourceWatcher } from "./soroban-watcher.js";
@@ -54,6 +55,51 @@ async function main(): Promise<void> {
   // Structured JSON logger — replaces console for production-grade output.
   const log = createLogger({ component: "relayer" });
   const config = loadConfig(process.env, log);
+
+  if (config.relayerMode === "keeper") {
+    const keeperLog = createLogger({ component: "keeper" });
+    keeperLog.info("keeper starting", {
+      escrowAddress: config.escrowAddress,
+      settlementContractId: config.settlementContractId,
+      sourceEid: config.sourceEid,
+      stellarEid: config.stellarEid,
+      confirmations: config.confirmations,
+      pollIntervalMs: config.pollIntervalMs,
+      dryRun: Boolean(config.keeperDryRun),
+      enforceProfitability: config.keeperEnforceProfitability ?? true,
+      evmPrivateKeyConfigured: Boolean(config.evmPrivateKey),
+    });
+
+    const evmCheckpoint = new FileCheckpointStore(config.checkpointFile);
+    const sorobanCheckpoint = new FileCheckpointStore(
+      config.returnCheckpointFile ?? `${config.checkpointFile}.soroban`,
+    );
+
+    const keeper = new Keeper({
+      config,
+      evmCheckpoint,
+      sorobanCheckpoint,
+      inclusionFee: inclusionFeePolicyFromEnv(process.env),
+      logger: keeperLog,
+    });
+
+    let shuttingDownKeeper = false;
+    const shutdownKeeper = (signal: string) => {
+      if (shuttingDownKeeper) return;
+      shuttingDownKeeper = true;
+      keeperLog.info("shutting down keeper", { signal });
+      keeper.stop();
+    };
+    process.on("SIGINT", () => shutdownKeeper("SIGINT"));
+    process.on("SIGTERM", () => shutdownKeeper("SIGTERM"));
+
+    try {
+      await keeper.start();
+    } finally {
+      keeperLog.info("keeper stopped cleanly");
+    }
+    return;
+  }
 
   assertSafeRelayerMode(config);
   if ((process.env.PERIHELION_RELAYER_MODE ?? "").toLowerCase() === "dev") {

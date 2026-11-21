@@ -17,10 +17,20 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildIntent, hashIntent, perihelionDomain } from "@perihelion/sdk";
+import { buildIntent, hashIntent, perihelionDomain, MAX_LIST_BATCH } from "@perihelion/sdk";
 import type { Hex, SignedIntent } from "@perihelion/sdk";
-import { nativeToScVal, scvU32, scvVoid } from "@stellar/stellar-sdk";
-import { Executor, type ExecutorConfig, type Logger } from "../src/executor.js";
+import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import type { Logger } from "@perihelion/node-common";
+import {
+  DefiniteFailureError,
+  Executor,
+  type ExecutorConfig,
+  type FillFees,
+} from "../src/executor.js";
+import { InFlightTracker } from "../src/inventory.js";
+
+const scvU32 = (v: number) => xdr.ScVal.scvU32(v);
+const scvVoid = () => xdr.ScVal.scvVoid();
 
 // ─── Wire vector (#946) ───────────────────────────────────────────────────────
 //
@@ -29,15 +39,12 @@ import { Executor, type ExecutorConfig, type Logger } from "../src/executor.js";
 // `bytes32(uint256(uint160(addr)))`. The escrow's `_decodeFillConfirmed`
 // rejects any other layout with `MalformedPayload`.
 const SOLVER_EVM_ADDRESS = "0x00000000000000000000000000000000000000ff" as const;
-const SOLVER_EVM_WIRE_VECTOR =
-  "0x00000000000000000000000000000000000000000000000000000000000000ff";
+const SOLVER_EVM_WIRE_VECTOR = "0x00000000000000000000000000000000000000000000000000000000000000ff";
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 
-const EVM_PRIVATE_KEY =
-  ("0x" + "1".repeat(64)) as Hex; // deterministic: same address every run
-const SOROBAN_SECRET =
-  "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+const EVM_PRIVATE_KEY = ("0x" + "1".repeat(64)) as Hex; // deterministic: same address every run
+const SOROBAN_SECRET = "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 const ESCROW_ADDRESS = "0x2222222222222222222222222222222222222222" as const;
 const SETTLEMENT_ID = "C" + "A".repeat(55);
 const STELLAR_NETWORK = "Test SDF Network ; September 2015";
@@ -123,18 +130,16 @@ test("fill: returns early if intent is already settled", async () => {
     protected override async waitForRegistration(_: SignedIntent): Promise<void> {
       throw new Error("waitForRegistration must not be called when already settled");
     }
-    protected override async fillOnSoroban(
-      _: SignedIntent,
-      __: Hex,
-    ): Promise<Hex> {
+    protected override async fillOnSoroban(_: SignedIntent, __: Hex): Promise<Hex> {
       throw new Error("fillOnSoroban must not be called when already settled");
     }
   }
 
-  const executor = new IdempotentExecutor(
-    BASE_CONFIG,
-    { info: (msg) => logs.push(msg), warn: () => {}, error: () => {} },
-  );
+  const executor = new IdempotentExecutor(BASE_CONFIG, {
+    info: (msg) => logs.push(msg),
+    warn: () => {},
+    error: () => {},
+  });
 
   const result = await executor.fill(signed);
   assert.equal(result.settlementTx, "0xexisting");
@@ -159,10 +164,7 @@ test("fill: calls lockOnEvm, waits for registration, then fillOnSoroban in order
     protected override async waitForRegistration(_: SignedIntent): Promise<void> {
       callOrder.push("wait");
     }
-    protected override async fillOnSoroban(
-      _: SignedIntent,
-      lockTx: Hex,
-    ): Promise<Hex> {
+    protected override async fillOnSoroban(_: SignedIntent, lockTx: Hex): Promise<Hex> {
       assert.equal(lockTx, "0xlockTx", "fillOnSoroban receives the lockTx");
       callOrder.push("fill");
       return "0xstellarTx" as Hex;
@@ -195,10 +197,7 @@ test("fill: propagates lockOnEvm errors to the caller", async () => {
   }
 
   const executor = new FailingLockExecutor(BASE_CONFIG, SILENT_LOGGER);
-  await assert.rejects(
-    () => executor.fill(signed),
-    /EVM RPC unavailable/,
-  );
+  await assert.rejects(() => executor.fill(signed), /EVM RPC unavailable/);
 });
 
 test("fill: propagates fillOnSoroban errors to the caller", async () => {
@@ -218,10 +217,7 @@ test("fill: propagates fillOnSoroban errors to the caller", async () => {
   }
 
   const executor = new FailingSorobanExecutor(BASE_CONFIG, SILENT_LOGGER);
-  await assert.rejects(
-    () => executor.fill(signed),
-    /Soroban simulation failed/,
-  );
+  await assert.rejects(() => executor.fill(signed), /Soroban simulation failed/);
 });
 
 // ─── checkFillStatus ──────────────────────────────────────────────────────────
@@ -312,15 +308,9 @@ test("isSettled: None (scvVoid()) decodes as not registered", () => {
 test("isSettled: native u32 values are classified correctly", () => {
   const decoder = statusDecoder();
   assert.equal(decoder.decodeStatus(nativeToScVal(1, { type: "u32" })), "Filled");
-  assert.equal(
-    decoder.decodeStatus(nativeToScVal(2, { type: "u32" })),
-    "ConfirmationSent",
-  );
+  assert.equal(decoder.decodeStatus(nativeToScVal(2, { type: "u32" })), "ConfirmationSent");
   assert.equal(decoder.decodeStatus(nativeToScVal(0, { type: "u32" })), "Locked");
-  assert.equal(
-    decoder.decodeStatus(nativeToScVal(3, { type: "u32" })),
-    "Cancelled",
-  );
+  assert.equal(decoder.decodeStatus(nativeToScVal(3, { type: "u32" })), "Cancelled");
   assert.equal(decoder.decodeStatus(nativeToScVal(null)), undefined);
 });
 
@@ -476,7 +466,7 @@ test("lockOnEvm: unknown error remains a plain Error (indefinite)", async () => 
 test("fill: simulation failure releases the InFlightTracker reservation in the same tick", async () => {
   const signed = makeSignedIntent();
   const tracker = new InFlightTracker();
-  tracker.reserve(signed.hash);
+  tracker.reserve(signed.hash, 1_000_000n);
 
   class SimFailingExecutor extends Executor {
     protected override async checkFillStatus() {
@@ -499,7 +489,7 @@ test("fill: simulation failure releases the InFlightTracker reservation in the s
       } catch (err) {
         if (err instanceof DefiniteFailureError) {
           // Definite failure: release immediately, no need to wait for refresh.
-          tracker.release(signed.hash);
+          tracker.release(signed.hash, 1_000_000n);
         }
         throw err;
       }
@@ -508,7 +498,7 @@ test("fill: simulation failure releases the InFlightTracker reservation in the s
   );
 
   assert.equal(
-    tracker.has(signed.hash),
+    tracker.activeReservedFor(signed.hash) > 0n,
     false,
     "reservation must be released in the same tick after a definite failure",
   );
@@ -541,8 +531,7 @@ test("loadExecutorConfig: returns valid config when all vars are present", async
     PERIHELION_EVM_RPC_URL: "http://localhost:8545",
     PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
     PERIHELION_EVM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
-    PERIHELION_SOROBAN_SECRET_KEY:
-      "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
     PERIHELION_ESCROW_ADDRESS: ESCROW_ADDRESS,
     PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
     PERIHELION_SOURCE_CHAIN_ID: "8453",
@@ -550,10 +539,7 @@ test("loadExecutorConfig: returns valid config when all vars are present", async
   });
   assert.equal(config.sourceChainId, 8453);
   assert.equal(config.stellarNetwork, STELLAR_NETWORK);
-  assert.equal(
-    config.escrowAddress.toLowerCase(),
-    ESCROW_ADDRESS.toLowerCase(),
-  );
+  assert.equal(config.escrowAddress.toLowerCase(), ESCROW_ADDRESS.toLowerCase());
 });
 
 test("loadExecutorConfig: rejects malformed EVM escrow address", async () => {
@@ -564,8 +550,7 @@ test("loadExecutorConfig: rejects malformed EVM escrow address", async () => {
         PERIHELION_EVM_RPC_URL: "http://localhost:8545",
         PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
         PERIHELION_EVM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
-        PERIHELION_SOROBAN_SECRET_KEY:
-          "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
         PERIHELION_ESCROW_ADDRESS: "not-an-address",
         PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
         STELLAR_NETWORK: STELLAR_NETWORK,
@@ -582,8 +567,7 @@ test("loadExecutorConfig: rejects EVM private key without 0x prefix", async () =
         PERIHELION_EVM_RPC_URL: "http://localhost:8545",
         PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
         PERIHELION_EVM_PRIVATE_KEY: "1".repeat(64), // missing 0x
-        PERIHELION_SOROBAN_SECRET_KEY:
-          "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
         PERIHELION_ESCROW_ADDRESS: ESCROW_ADDRESS,
         PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
         STELLAR_NETWORK: STELLAR_NETWORK,
@@ -600,8 +584,7 @@ test("loadExecutorConfig: rejects non-positive source chain id", async () => {
         PERIHELION_EVM_RPC_URL: "http://localhost:8545",
         PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
         PERIHELION_EVM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
-        PERIHELION_SOROBAN_SECRET_KEY:
-          "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
         PERIHELION_ESCROW_ADDRESS: ESCROW_ADDRESS,
         PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
         STELLAR_NETWORK: STELLAR_NETWORK,
@@ -715,7 +698,8 @@ test("fillOnSoroban: solver_evm decodes on EVM to the solver address", async () 
   assert.ok(solverEvm);
   const bytes = scValToBytes(solverEvm.value);
   // EVM `_decodeFillConfirmed` reads the low 20 bytes as the address.
-  const decoded = "0x" + bytesToHex(bytes.slice(12));
+  const sliceHex = bytesToHex(bytes.slice(12));
+  const decoded = sliceHex.startsWith("0x") ? sliceHex : `0x${sliceHex}`;
   assert.equal(decoded.toLowerCase(), SOLVER_EVM_ADDRESS.toLowerCase());
 });
 
@@ -850,12 +834,11 @@ async function captureFillIntentArgs(
   lockTx: Hex,
   opts: { quote?: bigint; charged?: bigint } = {},
 ): Promise<CapturedArg[]> {
-  const capture = (ex as unknown as {
-    __captureFillIntentArgs?: (o: {
-      quote?: bigint;
-      charged?: bigint;
-    }) => Promise<CapturedArg[]>;
-  }).__captureFillIntentArgs;
+  const capture = (
+    ex as unknown as {
+      __captureFillIntentArgs?: (o: { quote?: bigint; charged?: bigint }) => Promise<CapturedArg[]>;
+    }
+  ).__captureFillIntentArgs;
   assert.ok(capture, "executor must expose __captureFillIntentArgs test seam");
   return capture.call(ex, opts);
 }
@@ -878,3 +861,330 @@ function bytesToHex(bytes: Uint8Array): string {
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
 }
+
+// ─── #1123: Split-path delivery & undispatched confirmation recovery ─────────
+
+test("listUndispatchedIntents: returns empty array without querying when input is empty", async () => {
+  let batchCalls = 0;
+  class BatchTrackingExecutor extends Executor {
+    protected override async queryUndispatchedBatch(chunk: readonly Hex[]): Promise<Hex[]> {
+      batchCalls += 1;
+      return [...chunk];
+    }
+  }
+  const ex = new BatchTrackingExecutor(BASE_CONFIG, SILENT_LOGGER);
+  const result = await ex.listUndispatchedIntents([]);
+  assert.deepEqual(result, []);
+  assert.equal(batchCalls, 0);
+});
+
+test("listUndispatchedIntents: splits >100 candidate hashes into chunks of MAX_LIST_BATCH (100)", async () => {
+  const chunks: number[] = [];
+  const totalHashes = 245;
+  const allHashes: Hex[] = Array.from(
+    { length: totalHashes },
+    (_, i) => `0x${(i + 1).toString(16).padStart(64, "0")}` as Hex,
+  );
+  const undispatchedSet = new Set<Hex>([allHashes[0]!, allHashes[100]!, allHashes[244]!]);
+
+  class BatchTrackingExecutor extends Executor {
+    protected override async queryUndispatchedBatch(chunk: readonly Hex[]): Promise<Hex[]> {
+      assert.ok(
+        chunk.length <= MAX_LIST_BATCH,
+        `chunk length ${chunk.length} exceeds MAX_LIST_BATCH (${MAX_LIST_BATCH})`,
+      );
+      chunks.push(chunk.length);
+      return chunk.filter((h) => undispatchedSet.has(h));
+    }
+  }
+
+  const ex = new BatchTrackingExecutor(BASE_CONFIG, SILENT_LOGGER);
+  const result = await ex.listUndispatchedIntents(allHashes);
+
+  assert.deepEqual(chunks, [100, 100, 45]);
+  assert.deepEqual(result, [allHashes[0], allHashes[100], allHashes[244]]);
+});
+
+test("recoverUndispatchedConfirmations: filters candidates via listUndispatchedIntents and dispatches each stalled intent", async () => {
+  const h1 = ("0x" + "11".repeat(32)) as Hex;
+  const h2 = ("0x" + "22".repeat(32)) as Hex;
+  const h3 = ("0x" + "33".repeat(32)) as Hex;
+  const dispatched: Array<{ hash: Hex; srcEid: number }> = [];
+
+  class RecoveryExecutor extends Executor {
+    protected override async queryUndispatchedBatch(chunk: readonly Hex[]): Promise<Hex[]> {
+      // Only h1 and h3 are still undispatched (h2 already sent ConfirmationSent).
+      return chunk.filter((h) => h === h1 || h === h3);
+    }
+
+    override async dispatchConfirmation(
+      intentHash: Hex,
+      srcEid: number = BASE_CONFIG.sourceChainId,
+    ): Promise<{ txHash: Hex; feeStroops: bigint }> {
+      dispatched.push({ hash: intentHash, srcEid });
+      return {
+        txHash: `0xtx_${intentHash.slice(2, 10)}` as Hex,
+        feeStroops: 1500n,
+      };
+    }
+  }
+
+  const ex = new RecoveryExecutor(BASE_CONFIG, SILENT_LOGGER);
+  const recovered = await ex.recoverUndispatchedConfirmations([
+    { hash: h1, srcEid: 30101 },
+    { hash: h2, srcEid: 30101 },
+    { hash: h3 }, // uses default sourceChainId (8453)
+  ]);
+
+  assert.equal(recovered.length, 2);
+  assert.deepEqual(dispatched, [
+    { hash: h1, srcEid: 30101 },
+    { hash: h3, srcEid: 8453 },
+  ]);
+  assert.equal(recovered[0]?.hash, h1);
+  assert.equal(recovered[0]?.feeStroops, 1500n);
+  assert.equal(recovered[1]?.hash, h3);
+});
+
+test("recoverUndispatchedConfirmations: returns empty array when no candidates are provided", async () => {
+  const ex = new Executor(BASE_CONFIG, SILENT_LOGGER);
+  const recovered = await ex.recoverUndispatchedConfirmations([]);
+  assert.deepEqual(recovered, []);
+});
+
+test("deliverIntent & dispatchConfirmation: invoke Soroban RPC with expected contract methods and fees", async () => {
+  const http = await import("node:http");
+  const {
+    Keypair,
+    SorobanDataBuilder,
+    StrKey,
+    xdr: stellarXdr,
+  } = await import("@stellar/stellar-sdk");
+
+  const validKeypair = Keypair.random();
+  const validContractId = StrKey.encodeContract(Buffer.alloc(32, 1));
+  const invokedMethods: Array<{ method: string; argsCount: number }> = [];
+  let seq = 100n;
+  let lastSentEnvelopeXdr = "";
+
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const payload = JSON.parse(body) as {
+        id: number;
+        method: string;
+        params?: Record<string, unknown>;
+      };
+      res.setHeader("Content-Type", "application/json");
+
+      if (payload.method === "getLedgerEntries") {
+        const ledgerKey = stellarXdr.LedgerKey.account(
+          new stellarXdr.LedgerKeyAccount({
+            accountId: validKeypair.xdrPublicKey(),
+          }),
+        );
+        const accountEntry = new stellarXdr.AccountEntry({
+          accountId: validKeypair.xdrPublicKey(),
+          balance: stellarXdr.Int64.fromString("1000000000"),
+          seqNum: stellarXdr.Int64.fromString(String(seq)),
+          numSubEntries: 0,
+          inflationDest: null,
+          flags: 0,
+          homeDomain: Buffer.alloc(0),
+          thresholds: Buffer.from([1, 0, 0, 0]),
+          signers: [],
+          ext: new (
+            stellarXdr.AccountEntryExt as unknown as new (
+              v: number,
+            ) => typeof stellarXdr.AccountEntryExt.prototype
+          )(0),
+        });
+        const entryData = stellarXdr.LedgerEntryData.account(accountEntry);
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: payload.id,
+            result: {
+              latestLedger: 10,
+              entries: [
+                {
+                  lastModifiedLedgerSeq: 10,
+                  key: ledgerKey.toXDR("base64"),
+                  xdr: entryData.toXDR("base64"),
+                },
+              ],
+            },
+          }),
+        );
+        return;
+      }
+
+      if (payload.method === "getFeeStats") {
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: payload.id,
+            result: {
+              sorobanInclusionFee: { p50: "100", p90: "250", max: "500" },
+              inclusionFee: { p50: "100", p90: "250", max: "500" },
+              latestLedger: 10,
+            },
+          }),
+        );
+        return;
+      }
+
+      if (payload.method === "simulateTransaction") {
+        const txXdr = (payload.params?.transaction as string) ?? "";
+        const env = stellarXdr.TransactionEnvelope.fromXDR(txXdr, "base64");
+        const op = env.v1().tx().operations()[0]!;
+        const hostFn = op.body().invokeHostFunctionOp().hostFunction();
+        const invokeArgs = hostFn.invokeContract();
+        const fnName = invokeArgs.functionName().toString();
+        const fnArgs = invokeArgs.args();
+        invokedMethods.push({ method: fnName, argsCount: fnArgs.length });
+
+        const retval =
+          fnName === "quote_fill_confirmed_fee"
+            ? nativeToScVal(5000n, { type: "i128" })
+            : stellarXdr.ScVal.scvVoid();
+        const txData = new SorobanDataBuilder().setResourceFee(100).build().toXDR("base64");
+
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: payload.id,
+            result: {
+              minResourceFee: "100",
+              transactionData: txData,
+              results: [
+                {
+                  xdr: retval.toXDR("base64"),
+                  auth: [],
+                },
+              ],
+              latestLedger: 10,
+            },
+          }),
+        );
+        return;
+      }
+
+      if (payload.method === "sendTransaction") {
+        lastSentEnvelopeXdr = (payload.params?.transaction as string) ?? "";
+        seq += 1n;
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: payload.id,
+            result: {
+              status: "PENDING",
+              hash: "0x" + "aa".repeat(32),
+              latestLedger: 10,
+              latestLedgerCloseTime: "1700000000",
+            },
+          }),
+        );
+        return;
+      }
+
+      if (payload.method === "getTransaction") {
+        const feeCharged = 350;
+        const txResult = new stellarXdr.TransactionResult({
+          feeCharged: stellarXdr.Int64.fromString(String(feeCharged)),
+          result: stellarXdr.TransactionResultResult.txSuccess([]),
+          ext: new (
+            stellarXdr.TransactionResultExt as unknown as new (
+              v: number,
+            ) => typeof stellarXdr.TransactionResultExt.prototype
+          )(0),
+        });
+        const resultMeta = new (
+          stellarXdr.TransactionMeta as unknown as new (
+            v: number,
+            val: unknown,
+          ) => typeof stellarXdr.TransactionMeta.prototype
+        )(
+          3,
+          new stellarXdr.TransactionMetaV3({
+            ext: new (
+              stellarXdr.ExtensionPoint as unknown as new (
+                v: number,
+              ) => typeof stellarXdr.ExtensionPoint.prototype
+            )(0),
+            txChangesBefore: [],
+            operations: [],
+            txChangesAfter: [],
+            sorobanMeta: new stellarXdr.SorobanTransactionMeta({
+              ext: new (
+                stellarXdr.SorobanTransactionMetaExt as unknown as new (
+                  v: number,
+                ) => typeof stellarXdr.SorobanTransactionMetaExt.prototype
+              )(0),
+              events: [],
+              returnValue: stellarXdr.ScVal.scvVoid(),
+              diagnosticEvents: [],
+            }),
+          }),
+        );
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: payload.id,
+            result: {
+              status: "SUCCESS",
+              latestLedger: 11,
+              latestLedgerCloseTime: 1700000005,
+              ledger: 11,
+              createdAt: 1700000005,
+              applicationOrder: 1,
+              feeBump: false,
+              envelopeXdr: lastSentEnvelopeXdr,
+              resultXdr: txResult.toXDR("base64"),
+              resultMetaXdr: resultMeta.toXDR("base64"),
+            },
+          }),
+        );
+        return;
+      }
+
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "unsupported method" }));
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address() as { port: number };
+  const rpcUrl = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    const ex = new Executor(
+      {
+        ...BASE_CONFIG,
+        sorobanRpcUrl: rpcUrl,
+        sorobanSecretKey: validKeypair.secret(),
+        settlementContractId: validContractId,
+        lzFeeBufferStroops: 250n,
+      },
+      SILENT_LOGGER,
+    );
+
+    const signed = makeSignedIntent();
+    const delivered = await ex.deliverIntent(signed);
+    assert.equal(delivered.feeStroops, 350n);
+
+    const dispatched = await ex.dispatchConfirmation(signed.hash, 30101);
+    assert.equal(dispatched.feeStroops, 350n);
+
+    assert.deepEqual(invokedMethods, [
+      { method: "deliver_intent", argsCount: 4 },
+      { method: "quote_fill_confirmed_fee", argsCount: 1 },
+      { method: "dispatch_confirmation", argsCount: 3 },
+    ]);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

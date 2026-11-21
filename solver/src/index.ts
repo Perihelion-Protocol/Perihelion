@@ -8,7 +8,12 @@
  */
 
 export { Solver, FatalError } from "./solver.js";
-export { Executor, DefiniteFailureError } from "./executor.js";
+export {
+  Executor,
+  DefiniteFailureError,
+  LockOwnedByOtherError,
+  MIN_FILL_HEADROOM_SECS,
+} from "./executor.js";
 export { SolverMetrics } from "./metrics.js";
 export { createLogger } from "@perihelion/node-common";
 export { loadConfig } from "./config.js";
@@ -27,7 +32,7 @@ export {
   isSolverEligible,
 } from "./quote.js";
 export type { SolverConfig } from "./config.js";
-export type { ExecutorConfig } from "./executor.js";
+export type { ExecutorConfig, FillFees, FillStage } from "./executor.js";
 export type { Metrics, MetricsSnapshot, CorridorStats } from "./metrics.js";
 export type { Logger, LoggerOptions } from "@perihelion/node-common";
 export type { InventoryProvider } from "./inventory.js";

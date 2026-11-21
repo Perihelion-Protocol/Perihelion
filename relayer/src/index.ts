@@ -36,5 +36,23 @@ export type {
   MessageKey,
 } from "./types.js";
 export { messageKeyString } from "./types.js";
-export type { RelayerConfig } from "./config.js";
+export { loadConfig } from "./config.js";
+export type { RelayerConfig, RelayerMode } from "./config.js";
+export {
+  Keeper,
+  ViemEvmKeeperAdapter,
+  StellarSorobanKeeperAdapter,
+  renderKeeperPrometheusMetrics,
+} from "./keeper.js";
+export type {
+  EvmKeeperAdapter,
+  EvmKeeperScanResult,
+  SorobanKeeperAdapter,
+  KeeperMetrics,
+  KeeperReadinessState,
+  KeeperActionRecord,
+  KeeperTickResult,
+  KeeperOptions,
+  ViemEvmKeeperAdapterConfig,
+} from "./keeper.js";
 export type { LoggerOptions } from "@perihelion/node-common";
