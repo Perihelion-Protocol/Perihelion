@@ -72,7 +72,8 @@ function makeIntent() {
     sourceAmount: "1000000",
     destAsset: "native",
     minDestAmount: "990000",
-    deadline: Math.floor(Date.now() / 1000) + 600,
+    // Must exceed the executor's fill headroom (1920 s, the contract's dispatch window).
+    deadline: Math.floor(Date.now() / 1000) + 3600,
     nonce: "42",
   });
 }
