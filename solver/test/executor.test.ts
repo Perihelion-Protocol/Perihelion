@@ -947,3 +947,18 @@ test("loadExecutorConfig: rejects headroom below the contract dispatch window", 
     /PERIHELION_MIN_FILL_HEADROOM_SECS must be at least 1920/,
   );
 });
+
+// ─── fill headroom single source of truth ────────────────────────────────────
+
+test("Executor: rejects a fill headroom below the SDK / contract dispatch window", async () => {
+  const { Executor } = await import("../src/executor.js");
+  const { MIN_FILL_HEADROOM_SECS } = await import("@perihelion/sdk");
+  assert.throws(
+    () => new Executor({ ...BASE_CONFIG, minFillHeadroomSecs: MIN_FILL_HEADROOM_SECS - 1 }),
+    /must be at least 1920/,
+  );
+  // The SDK value itself is accepted.
+  assert.doesNotThrow(
+    () => new Executor({ ...BASE_CONFIG, minFillHeadroomSecs: MIN_FILL_HEADROOM_SECS }),
+  );
+});
