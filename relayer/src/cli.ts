@@ -82,7 +82,7 @@ async function main(): Promise<void> {
   // ---------------------------------------------------------------------------
   // EVM -> Stellar leg (Locked -> lz_receive on settlement)
   // ---------------------------------------------------------------------------
-  const evmToStellarCheckpoint = new FileCheckpointStore(config.checkpointFile);
+  const evmToStellarCheckpoint = new FileCheckpointStore(config.checkpointFile, log);
 
   const evmWatcher = new EVMSourceWatcher({
     rpcUrl: config.evmRpcUrl,
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     logger: log,
   });
 
-  const evmToStellarDeadLetter = new HybridDeadLetterStore(config.deadLetterFile);
+  const evmToStellarDeadLetter = new HybridDeadLetterStore(config.deadLetterFile, { logger: log });
   await evmToStellarDeadLetter.load();
 
   const evmToStellarRelayer = new Relayer(
@@ -138,9 +138,9 @@ async function main(): Promise<void> {
     timeoutSeconds: config.txTimeoutSeconds,
   });
 
-  const stellarToEvmCheckpoint = new FileCheckpointStore(config.returnCheckpointFile);
+  const stellarToEvmCheckpoint = new FileCheckpointStore(config.returnCheckpointFile, log);
 
-  const stellarToEvmDeadLetter = new HybridDeadLetterStore(config.returnDeadLetterFile);
+  const stellarToEvmDeadLetter = new HybridDeadLetterStore(config.returnDeadLetterFile, { logger: log });
   await stellarToEvmDeadLetter.load();
 
   const stellarToEvmRelayer = new Relayer(
