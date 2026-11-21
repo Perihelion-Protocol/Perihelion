@@ -36,6 +36,7 @@ import {
   type InclusionFeePolicy,
 } from "@perihelion/sdk";
 import type { SignedIntent } from "@perihelion/sdk";
+import type { Logger } from "@perihelion/node-common";
 
 /**
  * Thrown (or re-thrown) by an executor when a fill has *definitively* failed —
@@ -88,11 +89,6 @@ function isContractFunctionRevertedError(err: unknown): boolean {
 }
 
 /** Logger interface for structured logging. */
-export interface Logger {
-  info(msg: string, meta?: Record<string, unknown>): void;
-  warn(msg: string, meta?: Record<string, unknown>): void;
-  error(msg: string, meta?: Record<string, unknown>): void;
-}
 
 /** Configuration for executor (keys and RPC endpoints). */
 export interface ExecutorConfig {
@@ -209,7 +205,9 @@ export class Executor {
   private readonly inclusionFee: Required<InclusionFeePolicy>;
   private readonly sourceConfirmations: number;
   private readonly persistStage?: (intentHash: Hex, stage: FillStage) => void | Promise<void>;
-  private readonly loadStage?: (intentHash: Hex) => FillStage | undefined | Promise<FillStage | undefined>;
+  private readonly loadStage?: (
+    intentHash: Hex,
+  ) => FillStage | undefined | Promise<FillStage | undefined>;
   private readonly logger: Logger;
 
   constructor(config: ExecutorConfig, logger: Logger = console) {
@@ -354,17 +352,19 @@ export class Executor {
       transport: http(this.evmRpcUrl),
     });
 
-    const result = await publicClient.readContract({
+    const result = (await publicClient.readContract({
       address: this.escrowAddress,
       abi: ESCROW_ABI,
       functionName: "locks",
       args: [intentHash],
-    }) as readonly [`0x${string}`, `0x${string}`, boolean, boolean] | {
-      user: `0x${string}`;
-      solver: `0x${string}`;
-      released: boolean;
-      refunded: boolean;
-    };
+    })) as
+      | readonly [`0x${string}`, `0x${string}`, boolean, boolean]
+      | {
+          user: `0x${string}`;
+          solver: `0x${string}`;
+          released: boolean;
+          refunded: boolean;
+        };
 
     if (Array.isArray(result)) {
       const [user, solver, released, refunded] = result;
@@ -466,9 +466,7 @@ export class Executor {
       fee: "100",
       networkPassphrase: this.stellarNetwork,
     })
-      .addOperation(
-        contract.call("status", xdr.ScVal.scvBytes(Buffer.from(hashBytes))),
-      )
+      .addOperation(contract.call("status", xdr.ScVal.scvBytes(Buffer.from(hashBytes))))
       .setTimeout(30)
       .build();
 
@@ -478,9 +476,7 @@ export class Executor {
     }
 
     const status = decodeIntentStatus(simulated.result.retval);
-    return (
-      status === OnChainIntentStatus.Filled || status === OnChainIntentStatus.ConfirmationSent
-    );
+    return status === OnChainIntentStatus.Filled || status === OnChainIntentStatus.ConfirmationSent;
   }
 
   /**
@@ -491,7 +487,9 @@ export class Executor {
    * 3. Calls `escrow.lock(intent, signature, value)`.
    * 4. Waits for the receipt and returns the tx hash.
    */
-  private async lockOnEvm(signed: SignedIntent): Promise<Hex | { txHash: Hex; gasWei: bigint; lzFeeWei: bigint }> {
+  private async lockOnEvm(
+    signed: SignedIntent,
+  ): Promise<Hex | { txHash: Hex; gasWei: bigint; lzFeeWei: bigint }> {
     const { intent, signature } = signed;
 
     const account = privateKeyToAccount(this.evmPrivateKey);
@@ -521,12 +519,12 @@ export class Executor {
 
     // Quote the LayerZero fee. The contract returns the native token amount
     // that must accompany the lock() call as msg.value.
-    const nativeFee = await publicClient.readContract({
+    const nativeFee = (await publicClient.readContract({
       address: this.escrowAddress,
       abi: ESCROW_ABI,
       functionName: "quoteFee",
       args: [contractIntent, account.address],
-    }) as bigint;
+    })) as bigint;
 
     let txHash: Hex;
     try {
@@ -611,10 +609,10 @@ export class Executor {
 
     const args = [
       solverStellar,
-      xdr.ScVal.scvBytes(Buffer.from(solverEvmBytes)),  // solver_evm: BytesN<32>
-      xdr.ScVal.scvBytes(Buffer.from(hashBytes)),        // intent_hash: BytesN<32>
-      nativeToScVal(fillAmount, { type: "i128" }),  // fill_amount: i128
-      nativeToScVal(lzFee, { type: "i128" }),       // lz_fee: i128 (quoted)
+      xdr.ScVal.scvBytes(Buffer.from(solverEvmBytes)), // solver_evm: BytesN<32>
+      xdr.ScVal.scvBytes(Buffer.from(hashBytes)), // intent_hash: BytesN<32>
+      nativeToScVal(fillAmount, { type: "i128" }), // fill_amount: i128
+      nativeToScVal(lzFee, { type: "i128" }), // lz_fee: i128 (quoted)
     ];
 
     // Each attempt is built and simulated at its own inclusion-fee bid. A
@@ -672,10 +670,7 @@ export class Executor {
       networkPassphrase: this.stellarNetwork,
     })
       .addOperation(
-        contract.call(
-          "quote_fill_confirmed_fee",
-          nativeToScVal(BigInt(srcEid), { type: "u32" }),
-        ),
+        contract.call("quote_fill_confirmed_fee", nativeToScVal(BigInt(srcEid), { type: "u32" })),
       )
       .setTimeout(30)
       .build();

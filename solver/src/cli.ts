@@ -16,7 +16,7 @@ import { hasExecutorConfig, loadExecutorConfig } from "./executor-config.js";
 import { Solver } from "./solver.js";
 import { Executor } from "./executor.js";
 import { SolverMetrics } from "./metrics.js";
-import { createLogger } from "./logger.js";
+import { createLogger } from "@perihelion/node-common";
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { privateKeyToAccount } from "viem/accounts";
@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   const metrics = new SolverMetrics();
 
   // Structured JSON logger — replaces console for production-grade output.
-  const log = createLogger();
+  const log = createLogger({ component: "solver" });
 
   const mode = (process.env.PERIHELION_SOLVER_MODE ?? "").trim().toLowerCase();
   const watchOnly = mode === "watch";
@@ -54,9 +54,7 @@ async function main(): Promise<void> {
 
     // The escrow enforces preferredSolver == msg.sender, so the address used
     // for eligibility decisions must be the one derived from the signing key.
-    const derivedAddress = privateKeyToAccount(
-      executorConfig.evmPrivateKey,
-    ).address;
+    const derivedAddress = privateKeyToAccount(executorConfig.evmPrivateKey).address;
     if (
       config.solverAddress &&
       config.solverAddress.toLowerCase() !== derivedAddress.toLowerCase()
@@ -101,9 +99,7 @@ async function main(): Promise<void> {
   const stalenessThresholdMs = Number(
     process.env.PERIHELION_READINESS_STALE_MS ?? config.pollIntervalMs * 3,
   );
-  const maxConsecutiveFailures = Number(
-    process.env.PERIHELION_MAX_CONSECUTIVE_FAILURES ?? 5,
-  );
+  const maxConsecutiveFailures = Number(process.env.PERIHELION_MAX_CONSECUTIVE_FAILURES ?? 5);
 
   const server = createServer((req, res) => {
     if (req.url === "/healthz") {
@@ -119,9 +115,7 @@ async function main(): Promise<void> {
       } else {
         const age = now - r.lastTickAt;
         if (age > stalenessThresholdMs) {
-          reasons.push(
-            `last tick was ${age}ms ago (threshold: ${stalenessThresholdMs}ms)`,
-          );
+          reasons.push(`last tick was ${age}ms ago (threshold: ${stalenessThresholdMs}ms)`);
         }
       }
 
@@ -175,9 +169,12 @@ async function main(): Promise<void> {
       paths: ["/healthz", "/readyz", "/metrics"],
     });
     if (metricsHost !== "127.0.0.1" && metricsHost !== "localhost") {
-      log.warn("metrics endpoint bound to a non-loopback address; solver margin data is reachable from the network", {
-        host: metricsHost,
-      });
+      log.warn(
+        "metrics endpoint bound to a non-loopback address; solver margin data is reachable from the network",
+        {
+          host: metricsHost,
+        },
+      );
     }
   });
 
@@ -202,7 +199,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  const log = createLogger();
+  const log = createLogger({ component: "solver" });
   log.error("fatal startup error", { err: String(err) });
   process.exit(1);
 });

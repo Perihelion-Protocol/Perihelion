@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createLogger } from "../src/logger.js";
+import { createLogger } from "@perihelion/node-common";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,7 +26,11 @@ function sink(): { lines: string[]; stream: { write(s: string): void } } {
   const lines: string[] = [];
   return {
     lines,
-    stream: { write(s: string) { lines.push(s); } },
+    stream: {
+      write(s: string) {
+        lines.push(s);
+      },
+    },
   };
 }
 
@@ -129,7 +133,12 @@ test("logger: output is valid single-line JSON (no embedded newlines)", () => {
 
 test("logger: level filter suppresses lines below min level", () => {
   const out = sink();
-  const log = createLogger({ stdout: out.stream, stderr: out.stream, component: "relayer", level: "error" });
+  const log = createLogger({
+    stdout: out.stream,
+    stderr: out.stream,
+    component: "relayer",
+    level: "error",
+  });
 
   log.info("suppressed");
   log.warn("also suppressed");

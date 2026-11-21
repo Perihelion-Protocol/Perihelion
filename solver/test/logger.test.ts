@@ -6,11 +6,22 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createLogger } from "../src/logger.js";
+import { createLogger as createSharedLogger } from "@perihelion/node-common";
+
+const createLogger = (
+  options: Omit<Parameters<typeof createSharedLogger>[0], "component"> = {},
+) => createSharedLogger({ ...options, component: "solver" });
 
 function sink(): { lines: string[]; stream: { write(s: string): void } } {
   const lines: string[] = [];
-  return { lines, stream: { write(s) { lines.push(s); } } };
+  return {
+    lines,
+    stream: {
+      write(s) {
+        lines.push(s);
+      },
+    },
+  };
 }
 
 function parse(s: string): Record<string, unknown> {

@@ -20,7 +20,7 @@ import { SorobanSourceWatcher } from "./soroban-watcher.js";
 import { EvmDestinationDelivery } from "./evm-delivery.js";
 import { FileCheckpointStore } from "./file-checkpoint-store.js";
 import { HybridDeadLetterStore } from "./file-dead-letter-store.js";
-import { createLogger } from "./logger.js";
+import { createLogger } from "@perihelion/node-common";
 import { HealthServer } from "./health-server.js";
 
 /**
@@ -172,10 +172,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
   try {
-    await Promise.all([
-      evmToStellarRelayer.start(),
-      stellarToEvmRelayer.start(),
-    ]);
+    await Promise.all([evmToStellarRelayer.start(), stellarToEvmRelayer.start()]);
   } finally {
     log.info("relayer stopped cleanly");
   }
