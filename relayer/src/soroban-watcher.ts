@@ -146,14 +146,17 @@ export class SorobanSourceWatcher implements SourceWatcher {
       },
     ];
 
+    // @stellar/stellar-sdk 12 has no `endLedger` request field, so the window
+    // is bounded client-side: RPC returns events from `startLedger` onward and
+    // anything above `endLedger` is dropped here, before the caller advances
+    // its cursor to `endLedger + 1`.
     const response = await this.server.getEvents({
       startLedger,
-      endLedger,
       filters,
       limit: 200,
     });
 
-    return response.events ?? [];
+    return (response.events ?? []).filter((event) => event.ledger <= endLedger);
   }
 
   /**
