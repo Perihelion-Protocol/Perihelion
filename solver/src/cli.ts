@@ -15,6 +15,7 @@ import { loadConfig } from "./config.js";
 import { hasExecutorConfig, loadExecutorConfig } from "./executor-config.js";
 import { Solver } from "./solver.js";
 import { Executor } from "./executor.js";
+import { PRICE_RATES_ENV, priceOracleFromEnv } from "./pricing.js";
 import { SolverMetrics } from "./metrics.js";
 import { createLogger } from "@perihelion/node-common";
 import { createServer } from "node:http";
@@ -36,6 +37,11 @@ async function main(): Promise<void> {
     );
   }
 
+  // Pricing comes from an explicit operator rate table. Executor mode refuses
+  // to start without one: the built-in 1:1 oracle would quote every corridor
+  // at par and fill intents at a loss.
+  const priceOracle = priceOracleFromEnv();
+
   let executor: Executor | undefined;
   if (watchOnly) {
     // Watch-only mode: evaluate and log decisions, never invoke the executor.
@@ -48,6 +54,11 @@ async function main(): Promise<void> {
     if (!hasExecutorConfig()) {
       throw new Error(
         "missing executor configuration: set PERIHELION_EVM_RPC_URL, PERIHELION_EVM_PRIVATE_KEY and PERIHELION_STELLAR_SECRET (or run with PERIHELION_SOLVER_MODE=watch for a dry run)",
+      );
+    }
+    if (!priceOracle) {
+      throw new Error(
+        `missing pricing configuration: set ${PRICE_RATES_ENV} to the SOURCE>DEST=RATE corridors this solver fills (the built-in 1:1 price oracle is not used by the CLI)`,
       );
     }
     const executorConfig = loadExecutorConfig();
@@ -68,7 +79,14 @@ async function main(): Promise<void> {
     executor = new Executor(executorConfig, log);
   }
 
-  const solver = new Solver(config, executor, log, metrics);
+  if (!priceOracle) {
+    log.warn(`${PRICE_RATES_ENV} is not set; watch-mode decisions will use the built-in 1:1 price oracle`);
+  }
+  // Undefined arguments fall back to the Solver defaults (no inventory provider,
+  // default verifier).
+  const solver = new Solver(config, executor, log, metrics, undefined, undefined, {
+    ...(priceOracle ? { priceOracle } : {}),
+  });
 
   // Minimal HTTP server for Prometheus scraping.
   //
