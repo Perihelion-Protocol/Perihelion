@@ -145,11 +145,11 @@ mod events {
 // | `keeper_reward_skipped`        | ("keeper_reward_skipped", intent_hash) | (caller: Address, reward: i128)
 // | `dispatch_keeper_reward_set`   | ("dispatch_keeper_reward_set",)        | (reward: i128)
 // | `dest_token_allowed_set`       | ("dest_token_allowed_set",)            | (token: Address, allowed: bool)
-// | `max_intent_amount_set`        | ("max_intent_amount_set",)             | (max_amount: i128)
+// | `max_intent_amount_set`        | ("max_intent_amount_set",)             | (token: Address, max_amount: i128)
 // | `max_ttl_set`                  | ("max_ttl_set",)                       | (old: u32, new: u32)
-// | `rolling_window_cap_set`       | ("rolling_window_cap_set",)            | (duration: u64, cap: i128)
+// | `rolling_window_cap_set`       | ("rolling_window_cap_set",)            | (token: Address, duration: u64, cap: i128)
 // | `rolling_window_cap_triggered` | ("rolling_window_cap_triggered",)      | (window_start: u64, accumulated: i128)
-// | `rolling_window_cap_reset`     | ("rolling_window_cap_reset",)          | ()
+// | `rolling_window_cap_reset`     | ("rolling_window_cap_reset",)          | (token: Address)
 // | `registered`                   | ("registered", intent_hash)            | (src_eid: u32, deadline: u64)
 // | `filled`                       | ("filled", intent_hash)                | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32)
 // | `confirmation_sent`            | ("confirmation_sent", intent_hash)     | (solver: Address)
@@ -1097,7 +1097,16 @@ impl Perihelion {
     /// (denominated in 7 decimals for Stellar assets).
     ///
     /// Emits `max_intent_amount_set(max_amount)` event.
-    pub fn set_max_intent_amount(env: Env, max_amount: i128) -> Result<(), PerihelionError> {
+    /// Set the per-asset maximum for a single intent. Admin-only.
+    /// If max_amount is 0, intents for this asset have no per-intent cap (unlimited).
+    /// Issue #145: Per-asset caps ensure high-value assets don't constrain low-value ones.
+    ///
+    /// # Parameters
+    /// - `token`: the destination asset address to configure
+    /// - `max_amount`: maximum amount a single intent can register (0 = unlimited)
+    ///
+    /// Emits `max_intent_amount_set(token, max_amount)` event.
+    pub fn set_max_intent_amount(env: Env, token: Address, max_amount: i128) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         if max_amount < 0 {
@@ -1105,24 +1114,27 @@ impl Perihelion {
         }
         env.storage()
             .instance()
-            .set(&DataKey::MaxIntentAmount, &max_amount);
+            .set(&DataKey::MaxIntentAmount(token.clone()), &max_amount);
         env.events()
-            .publish((events::max_intent_amount_set(&env),), (max_amount,));
+            .publish((events::max_intent_amount_set(&env),), (token, max_amount));
         Ok(())
     }
 
-    /// Set the rolling-window value cap. Admin-only.
-    /// Aggregates min_dest_amount across all intents registered within each duration window.
-    /// If the cumulative amount exceeds cap, the rolling-window breach is triggered.
-    /// Issue #286: This cap is applied to the destination asset amount on Stellar.
+    /// Set the rolling-window value cap per asset. Admin-only.
+    /// Aggregates min_dest_amount across all intents for a specific asset
+    /// registered within each duration window. If the cumulative amount exceeds cap,
+    /// the rolling-window breach is triggered for that asset.
+    /// Issue #286/#929: This cap is applied per-asset on the destination chain.
     ///
     /// # Parameters
+    /// - `token`: the destination asset address to configure
     /// - `duration`: rolling window size in seconds (0 to disable)
     /// - `cap`: maximum aggregate amount per window (0 to disable)
     ///
-    /// Emits `rolling_window_cap_set(duration, cap)` event.
+    /// Emits `rolling_window_cap_set(token, duration, cap)` event.
     pub fn set_rolling_window_cap(
         env: Env,
+        token: Address,
         duration: u64,
         cap: i128,
     ) -> Result<(), PerihelionError> {
@@ -1133,21 +1145,24 @@ impl Perihelion {
         }
         env.storage()
             .instance()
-            .set(&DataKey::RollingWindowDuration, &duration);
+            .set(&DataKey::RollingWindowDuration(token.clone()), &duration);
         env.storage()
             .instance()
-            .set(&DataKey::RollingWindowCap, &cap);
+            .set(&DataKey::RollingWindowCap(token.clone()), &cap);
         env.events()
-            .publish((events::rolling_window_cap_set(&env),), (duration, cap));
+            .publish((events::rolling_window_cap_set(&env),), (token, duration, cap));
         Ok(())
     }
 
-    /// Reset the triggered rolling-window cap to allow new intents. Admin-only.
-    /// Must be called at or after RollingWindowResetEarliestAt to unblock registration.
-    /// Issue #286/#711: Clears the breached window's bucket and re-anchors the window start.
+    /// Reset the triggered rolling-window cap for a specific asset to allow new intents. Admin-only.
+    /// Must be called at or after RollingWindowResetEarliestAt for the asset to unblock registration.
+    /// Issue #286/#711/#929: Clears the breached window's bucket and re-anchors the window start per asset.
     ///
-    /// Emits `rolling_window_cap_reset()` event.
-    pub fn reset_rolling_window_cap(env: Env) -> Result<(), PerihelionError> {
+    /// # Parameters
+    /// - `token`: the destination asset address whose cap should be reset
+    ///
+    /// Emits `rolling_window_cap_reset(token)` event.
+    pub fn reset_rolling_window_cap(env: Env, token: Address) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
 
@@ -1155,7 +1170,7 @@ impl Perihelion {
         if let Some(reset_at) = env
             .storage()
             .instance()
-            .get::<DataKey, u64>(&DataKey::RollingWindowResetEarliestAt)
+            .get::<DataKey, u64>(&DataKey::RollingWindowResetEarliestAt(token.clone()))
         {
             if now < reset_at {
                 return Err(PerihelionError::DeadlineNotPassed);
@@ -1165,23 +1180,23 @@ impl Perihelion {
         let storage = env.storage().instance();
 
         // Clear the breached window's bucket (issue #711).
-        if let Some(window_start) = storage.get::<DataKey, u64>(&DataKey::LatestWindowStart) {
-            storage.remove(&DataKey::RollingWindowBucket(window_start));
+        if let Some(window_start) = storage.get::<DataKey, u64>(&DataKey::LatestWindowStart(token.clone())) {
+            storage.remove(&DataKey::RollingWindowBucket(token.clone(), window_start));
         }
 
         // Re-anchor the window start to the current reset time so a fresh window begins.
         let duration = storage
-            .get::<DataKey, u64>(&DataKey::RollingWindowDuration)
+            .get::<DataKey, u64>(&DataKey::RollingWindowDuration(token.clone()))
             .unwrap_or(0);
         if duration > 0 {
             let new_window_start = (now / duration) * duration;
-            storage.set(&DataKey::LatestWindowStart, &new_window_start);
+            storage.set(&DataKey::LatestWindowStart(token.clone()), &new_window_start);
         }
 
-        storage.set(&DataKey::RollingWindowTriggered, &false);
-        storage.remove(&DataKey::RollingWindowResetEarliestAt);
+        storage.set(&DataKey::RollingWindowTriggered(token.clone()), &false);
+        storage.remove(&DataKey::RollingWindowResetEarliestAt(token.clone()));
         env.events()
-            .publish((events::rolling_window_cap_reset(&env),), ());
+            .publish((events::rolling_window_cap_reset(&env),), (token,));
         Ok(())
     }
 
@@ -2177,44 +2192,45 @@ impl Perihelion {
     }
 
     /// Get the per-intent maximum amount cap. Returns 0 if unlimited (issue #286).
-    pub fn get_max_intent_amount(env: Env) -> i128 {
+    /// Get the per-asset maximum for a single intent. Returns 0 if unlimited (issue #145).
+    pub fn get_max_intent_amount(env: Env, token: Address) -> i128 {
         env.storage()
             .instance()
-            .get(&DataKey::MaxIntentAmount)
+            .get(&DataKey::MaxIntentAmount(token))
             .unwrap_or(0)
     }
 
-    /// Get the rolling-window duration in seconds. Returns 0 if disabled (issue #286).
-    pub fn get_rolling_window_duration(env: Env) -> u64 {
+    /// Get the rolling-window duration in seconds per asset. Returns 0 if disabled (issue #286).
+    pub fn get_rolling_window_duration(env: Env, token: Address) -> u64 {
         env.storage()
             .instance()
-            .get(&DataKey::RollingWindowDuration)
+            .get(&DataKey::RollingWindowDuration(token))
             .unwrap_or(0)
     }
 
-    /// Get the rolling-window cap. Returns 0 if unlimited (issue #286).
-    pub fn get_rolling_window_cap(env: Env) -> i128 {
+    /// Get the rolling-window cap per asset. Returns 0 if unlimited (issue #286).
+    pub fn get_rolling_window_cap(env: Env, token: Address) -> i128 {
         env.storage()
             .instance()
-            .get(&DataKey::RollingWindowCap)
+            .get(&DataKey::RollingWindowCap(token))
             .unwrap_or(0)
     }
 
     /// Check if the rolling-window cap has been triggered. Returns true if breached (issue #286).
-    pub fn is_rolling_window_cap_triggered(env: Env) -> bool {
+    pub fn is_rolling_window_cap_triggered(env: Env, token: Address) -> bool {
         env.storage()
             .instance()
-            .get(&DataKey::RollingWindowTriggered)
+            .get(&DataKey::RollingWindowTriggered(token))
             .unwrap_or(false)
     }
 
-    /// Get the earliest timestamp at which the rolling-window cap can be reset.
+    /// Get the earliest timestamp at which the rolling-window cap can be reset for an asset.
     /// Returns None if not triggered (issue #286). Named `get_rolling_window_reset_at`
     /// because Soroban caps contract function names at 32 characters.
-    pub fn get_rolling_window_reset_at(env: Env) -> Option<u64> {
+    pub fn get_rolling_window_reset_at(env: Env, token: Address) -> Option<u64> {
         env.storage()
             .instance()
-            .get(&DataKey::RollingWindowResetEarliestAt)
+            .get(&DataKey::RollingWindowResetEarliestAt(token))
     }
 
     /// PROPOSED Phase 3: Fetch aggregate reputation metrics for a solver.
@@ -2488,7 +2504,7 @@ impl Perihelion {
         Ok(())
     }
 
-    /// Check per-intent and rolling-window value caps.
+    /// Check per-intent and rolling-window value caps for a specific asset.
     ///
     /// Returns `Ok(true)` when the intent is within both caps and may be
     /// registered. A rolling-window breach latches the breaker and returns
@@ -2500,24 +2516,28 @@ impl Perihelion {
     ///
     /// The breaching amount is compared against the cap **before** the bucket is
     /// mutated, so a rejected intent never counts towards the window (#1062).
-    fn enforce_value_caps(env: &Env, amount: i128) -> Result<bool, PerihelionError> {
+    ///
+    /// # Parameters
+    /// - `asset`: the destination asset address to check caps for (issue #929)
+    /// - `amount`: the intent amount to validate
+    fn enforce_value_caps(env: &Env, asset: &Address, amount: i128) -> Result<bool, PerihelionError> {
         let storage = env.storage().instance();
 
-        // Check 1: Per-intent maximum
-        if let Some(max_amount) = storage.get::<DataKey, i128>(&DataKey::MaxIntentAmount) {
+        // Check 1: Per-intent maximum per asset
+        if let Some(max_amount) = storage.get::<DataKey, i128>(&DataKey::MaxIntentAmount(asset.clone())) {
             if max_amount > 0 && amount > max_amount {
                 return Err(PerihelionError::ExceedsMaxIntentAmount);
             }
         }
 
         // Check 2: Rolling-window cap (disabled if duration is zero)
-        if let Some(duration) = storage.get::<DataKey, u64>(&DataKey::RollingWindowDuration) {
+        if let Some(duration) = storage.get::<DataKey, u64>(&DataKey::RollingWindowDuration(asset.clone())) {
             if duration > 0 {
-                if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap) {
+                if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap(asset.clone())) {
                     if cap > 0 {
                         // A tripped breaker stays tripped until an admin resets it.
                         if storage
-                            .get::<DataKey, bool>(&DataKey::RollingWindowTriggered)
+                            .get::<DataKey, bool>(&DataKey::RollingWindowTriggered(asset.clone()))
                             .unwrap_or(false)
                         {
                             return Err(PerihelionError::RollingWindowCapTriggered);
@@ -2529,20 +2549,20 @@ impl Perihelion {
 
                         // Advance memoized window if time has moved to a new bucket.
                         let latest_window_start = storage
-                            .get::<DataKey, u64>(&DataKey::LatestWindowStart)
+                            .get::<DataKey, u64>(&DataKey::LatestWindowStart(asset.clone()))
                             .unwrap_or(0);
                         if window_start > latest_window_start {
-                            storage.set(&DataKey::LatestWindowStart, &window_start);
+                            storage.set(&DataKey::LatestWindowStart(asset.clone()), &window_start);
                             // Leaving the memoized window: drop its bucket so that at most
                             // one bucket exists, however many quiet windows pass (#905).
-                            storage.remove(&DataKey::RollingWindowBucket(latest_window_start));
+                            storage.remove(&DataKey::RollingWindowBucket(asset.clone(), latest_window_start));
                         }
 
                         // Compare this intent's amount against the cap BEFORE
                         // mutating the bucket, so a rejected amount is never
                         // recorded (#1062). The bucket holds accepted amounts only.
                         let current_accumulated = storage
-                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
+                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(asset.clone(), window_start))
                             .unwrap_or(0);
                         let accumulated = current_accumulated
                             .checked_add(amount)
@@ -2553,9 +2573,9 @@ impl Perihelion {
                             // is acknowledged with `Ok(false)` so these writes persist.
                             // The bucket is left untouched: `accumulated` is only the
                             // hypothetical total including the rejected amount.
-                            storage.set(&DataKey::RollingWindowTriggered, &true);
+                            storage.set(&DataKey::RollingWindowTriggered(asset.clone()), &true);
                             storage.set(
-                                &DataKey::RollingWindowResetEarliestAt,
+                                &DataKey::RollingWindowResetEarliestAt(asset.clone()),
                                 &now.checked_add(duration)
                                     .ok_or(PerihelionError::ArithmeticError)?,
                             );
@@ -2567,7 +2587,7 @@ impl Perihelion {
                         }
 
                         // Accepted: record the amount in the window bucket.
-                        storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
+                        storage.set(&DataKey::RollingWindowBucket(asset.clone(), window_start), &accumulated);
                     }
                 }
             }
@@ -2645,7 +2665,7 @@ impl Perihelion {
 
         // Check value caps before registering the intent. A breach latches the
         // breaker and acknowledges the message without registering it (#904).
-        match Self::enforce_value_caps(env, fi.min_dest_amount) {
+        match Self::enforce_value_caps(env, &fi.dest_asset, fi.min_dest_amount) {
             Ok(true) => {}
             Ok(false) => {
                 // #1062: a rejected intent must not be silently dropped. Write a

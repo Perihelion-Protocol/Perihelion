@@ -2842,23 +2842,23 @@ fn try_deliver_fill_bytes(
 fn get_rolling_window_reset_at_reports_latched_reset_time() {
     let s = setup();
     // One-hour window with a 1_000 cap.
-    s.client.set_rolling_window_cap(&3_600, &1_000);
+    s.client.set_rolling_window_cap(&s.asset, &3_600, &1_000);
     let recipient = Address::generate(&s.env);
 
     // Nothing latched while the window is under the cap.
-    assert_eq!(s.client.get_rolling_window_reset_at(), None);
+    assert_eq!(s.client.get_rolling_window_reset_at(&s.asset), None);
     try_deliver_fill_bytes(&s, &hash(&s.env, 1), &recipient, 600, 1)
         .expect("600 is within the 1_000 cap");
-    assert_eq!(s.client.get_rolling_window_reset_at(), None);
+    assert_eq!(s.client.get_rolling_window_reset_at(&s.asset), None);
 
     // The breaching message is acknowledged (Ok) but registers no intent,
     // and the latch and its reset time persist (#904).
     try_deliver_fill_bytes(&s, &hash(&s.env, 2), &recipient, 600, 2)
         .expect("a breach must be acknowledged, not rolled back");
-    assert!(s.client.is_rolling_window_cap_triggered());
+    assert!(s.client.is_rolling_window_cap_triggered(&s.asset));
     assert!(s.client.get_intent(&hash(&s.env, 2)).is_none());
     assert_eq!(
-        s.client.get_rolling_window_reset_at(),
+        s.client.get_rolling_window_reset_at(&s.asset),
         Some(s.env.ledger().timestamp() + 3_600)
     );
 }
@@ -2866,7 +2866,7 @@ fn get_rolling_window_reset_at_reports_latched_reset_time() {
 #[test]
 fn rolling_window_keeps_one_bucket_across_quiet_windows() {
     let s = setup();
-    s.client.set_rolling_window_cap(&3_600, &1_000_000);
+    s.client.set_rolling_window_cap(&s.asset, &3_600, &1_000_000);
     let recipient = Address::generate(&s.env);
 
     // Traffic in window 0, then in window 2 after a quiet window 1, then in
@@ -2884,7 +2884,7 @@ fn rolling_window_keeps_one_bucket_across_quiet_windows() {
             s.env
                 .storage()
                 .instance()
-                .has(&DataKey::RollingWindowBucket(w))
+                .has(&DataKey::RollingWindowBucket(s.asset.clone(), w))
         });
         assert_eq!(present, w == 18_000, "bucket for window {w}");
     }
@@ -2976,7 +2976,7 @@ fn cancel_before_registration_tombstone_uses_configured_max_ttl() {
 #[test]
 fn value_cap_breach_records_terminal_marker_and_emits_hash() {
     let s = setup();
-    s.client.set_rolling_window_cap(&3_600, &1_000);
+    s.client.set_rolling_window_cap(&s.asset, &3_600, &1_000);
     let recipient = Address::generate(&s.env);
     let h = hash(&s.env, 0x71);
 
@@ -3021,7 +3021,7 @@ fn value_cap_breach_records_terminal_marker_and_emits_hash() {
     );
 
     // The bucket holds only accepted amounts: a 1_000 amount still fits.
-    s.client.reset_rolling_window_cap();
+    s.client.reset_rolling_window_cap(&s.asset);
     try_deliver_fill_bytes(&s, &hash(&s.env, 0x72), &recipient, 1_000, 2)
         .expect("the rejected amount must not have consumed the window");
 }
@@ -3031,7 +3031,7 @@ fn value_cap_breach_records_terminal_marker_and_emits_hash() {
 #[test]
 fn rejected_intent_reaches_cross_chain_refund() {
     let s = setup();
-    s.client.set_rolling_window_cap(&3_600, &1_000);
+    s.client.set_rolling_window_cap(&s.asset, &3_600, &1_000);
     let recipient = Address::generate(&s.env);
     let h = hash(&s.env, 0x73);
 
@@ -3059,13 +3059,13 @@ fn rejected_intent_reaches_cross_chain_refund() {
 #[test]
 fn rolling_window_latch_rejects_until_admin_reset() {
     let s = setup();
-    s.client.set_rolling_window_cap(&3_600, &1_000);
+    s.client.set_rolling_window_cap(&s.asset, &3_600, &1_000);
     let recipient = Address::generate(&s.env);
     let reset_at = s.env.ledger().timestamp() + 3_600;
 
     try_deliver_fill_bytes(&s, &hash(&s.env, 1), &recipient, 1_200, 1)
         .expect("breach is acknowledged");
-    assert!(s.client.is_rolling_window_cap_triggered());
+    assert!(s.client.is_rolling_window_cap_triggered(&s.asset));
 
     // A below-cap message is still rejected while latched: the breaker holds
     // even though this amount would fit in a fresh window.
@@ -3076,8 +3076,8 @@ fn rolling_window_latch_rejects_until_admin_reset() {
 
     // Once the reset time passes and the admin resets, the same message registers.
     s.env.ledger().with_mut(|li| li.timestamp = reset_at);
-    s.client.reset_rolling_window_cap();
-    assert!(!s.client.is_rolling_window_cap_triggered());
+    s.client.reset_rolling_window_cap(&s.asset);
+    assert!(!s.client.is_rolling_window_cap_triggered(&s.asset));
     try_deliver_fill_bytes(&s, &hash(&s.env, 3), &recipient, 1, 3)
         .expect("after reset a below-cap message registers");
     assert!(s.client.get_intent(&hash(&s.env, 3)).is_some());
@@ -3581,7 +3581,7 @@ fn rolling_window_cap_does_not_sum_across_destination_assets() {
     // One window cap of 1_000 units, shared by every intent that reaches
     // `enforce_value_caps`. Each asset should get its own budget, so 800 of
     // asset A and 800 of asset B must both be accepted in the same window.
-    s.client.set_rolling_window_cap(&3_600u64, &1_000i128);
+    s.client.set_rolling_window_cap(&s.asset, &3_600u64, &1_000i128);
 
     register_intent(
         &s,
@@ -3620,7 +3620,7 @@ fn rolling_window_cap_does_not_sum_across_destination_assets() {
             .is_ok(),
         "a breach-free amount on a second asset must not be rejected by the first asset's window"
     );
-    assert!(!s.client.is_rolling_window_cap_triggered());
+    assert!(!s.client.is_rolling_window_cap_triggered(&s.asset));
 }
 
 // --- Issue #907: expired peer proposals must be cleared, not rolled back ---
@@ -4556,7 +4556,7 @@ fn policy_rejection_deadline_too_far_is_terminal() {
 #[test]
 fn policy_rejection_exceeds_max_intent_amount_is_terminal() {
     let s = setup();
-    s.client.set_max_intent_amount(&1_000i128);
+    s.client.set_max_intent_amount(&s.asset, &1_000i128);
     let recipient = Address::generate(&s.env);
     let h = hash(&s.env, 0xA3);
     let fi = fill_instruction(&s, &h, &recipient, 5_000, 5_000);
