@@ -12,6 +12,10 @@ versioned independently.
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound and periodically prune mempool per-client rate-limit buckets so one-shot source addresses cannot grow process memory indefinitely (#1111).
+
 ### Added
 
 - **sdk**: `PerihelionEscrowClient.isRefundable(intentHash)` and

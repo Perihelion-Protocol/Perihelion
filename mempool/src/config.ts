@@ -139,6 +139,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   // authenticated by default. A token-less server only starts when the operator
   // explicitly opts into insecure local development (#966).
   const statusToken = env.PERIHELION_MEMPOOL_STATUS_TOKEN || undefined;
+  const metricsToken = env.PERIHELION_METRICS_TOKEN || undefined;
   if (!statusToken && env.PERIHELION_MEMPOOL_INSECURE_DEV !== "1") {
     errors.push(
       "PERIHELION_MEMPOOL_STATUS_TOKEN is required: PATCH /intents/:hash/status must be authenticated. For local development only, set PERIHELION_MEMPOOL_INSECURE_DEV=1 to run without it",

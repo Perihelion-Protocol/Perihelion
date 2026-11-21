@@ -13,6 +13,7 @@ import {
 } from "@perihelion/sdk";
 import type { Hex, SignedIntent, Address, VerifyIntentOptions } from "@perihelion/sdk";
 import { IntentStore } from "./store.js";
+import { SlidingWindowRateLimitStore } from "./rate-limit.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
 import type { TrustProxy } from "./config.js";
 
@@ -170,7 +171,7 @@ export class MempoolServer {
   private verifyingContract: Address;
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
-  private rateLimitHits = new Map<string, number[]>();
+  private readonly rateLimitHits: SlidingWindowRateLimitStore;
   /** Timestamps of failed status-token attempts per client IP (#965). */
   private authFailureHits = new Map<string, number[]>();
   private rateLimitWindowMs: number;
@@ -209,6 +210,7 @@ export class MempoolServer {
       expiryGraceMs: opts.expiryGraceMs,
     });
     this.rateLimitWindowMs = opts.rateLimitWindowMs ?? DEFAULT_RATE_LIMIT_WINDOW_MS;
+    this.rateLimitHits = new SlidingWindowRateLimitStore(this.rateLimitWindowMs);
     this.writeRateLimit = opts.writeRateLimit ?? DEFAULT_WRITE_RATE_LIMIT;
     this.readRateLimit = opts.readRateLimit ?? DEFAULT_READ_RATE_LIMIT;
     if (opts.trustProxy !== undefined) {
@@ -225,6 +227,19 @@ export class MempoolServer {
     this.setupRoutes();
   }
 
+  /** Return readiness without requiring an HTTP listener. */
+  getReadiness():
+    | { statusCode: 200; body: { status: "ready" } }
+    | { statusCode: 503; body: { status: "not ready"; reason: string } } {
+    if (!this.isReady) {
+      return {
+        statusCode: 503,
+        body: { status: "not ready", reason: "server is not listening" },
+      };
+    }
+    return { statusCode: 200, body: { status: "ready" } };
+  }
+
   private setupRoutes(): void {
     this.app.use(express.json({ limit: MAX_BODY_LABEL }));
 
@@ -238,11 +253,8 @@ export class MempoolServer {
       res.status(200).json({ status: "ok" });
     });
     this.app.get("/readyz", (req: Request, res: Response) => {
-      if (!this.isReady) {
-        res.status(503).json({ status: "not ready", reason: "sweep timer not started" });
-        return;
-      }
-      res.status(200).json({ status: "ready" });
+      const readiness = this.getReadiness();
+      res.status(readiness.statusCode).json(readiness.body);
     });
     this.app.get("/metrics", read, (req: Request, res: Response) => {
       if (this.metricsToken && !this.isMetricsAuthorized(req)) {
@@ -322,18 +334,12 @@ export class MempoolServer {
 
   private rateLimit(kind: "read" | "write", limit: number) {
     return (req: Request, res: Response, next: NextFunction): void => {
-      const now = Date.now();
       const key = `${kind}:${req.ip ?? "unknown"}`;
-      const hits = (this.rateLimitHits.get(key) ?? []).filter(
-        (t) => now - t < this.rateLimitWindowMs,
-      );
-      if (hits.length >= limit) {
+      if (!this.rateLimitHits.allow(key, limit)) {
         this.rateLimitRejections++;
         res.status(429).json({ error: "Too many requests" });
         return;
       }
-      hits.push(now);
-      this.rateLimitHits.set(key, hits);
       next();
     };
   }
@@ -605,6 +611,9 @@ export class MempoolServer {
       "# HELP mempool_rate_limit_rejections_total Total number of rate-limit rejections",
       "# TYPE mempool_rate_limit_rejections_total counter",
       `mempool_rate_limit_rejections_total ${this.rateLimitRejections}`,
+      "# HELP mempool_rate_limit_entries Current number of tracked client rate-limit buckets",
+      "# TYPE mempool_rate_limit_entries gauge",
+      `mempool_rate_limit_entries ${this.rateLimitHits.size}`,
     ];
 
     return lines.join("\n") + "\n";
@@ -612,14 +621,26 @@ export class MempoolServer {
 
   async start(): Promise<void> {
     if (this.server) return;
+    await new Promise<void>((resolve, reject) => {
+      const server = this.app.listen(this.port, this.host);
+      const onError = (error: Error) => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        this.server = server;
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+    });
     this.sweepTimer = setInterval(() => {
       this.store.evictExpired();
+      this.rateLimitHits.prune();
     }, SWEEP_INTERVAL_MS);
     if (typeof this.sweepTimer.unref === "function") this.sweepTimer.unref();
     this.isReady = true;
-    await new Promise<void>((resolve) => {
-      this.server = this.app.listen(this.port, this.host, () => resolve());
-    });
   }
 
   async stop(): Promise<void> {
