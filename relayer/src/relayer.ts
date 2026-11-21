@@ -516,11 +516,8 @@ export class Relayer {
       this.metrics.delivered += 1;
       // A delivered CancelIntent only marks the Stellar record cancelled; the
       // refund itself happens on EVM and is reported later by the return-leg
-      // watcher via onRefundObserved(). Report the non-terminal "cancelling"
-      // status here rather than "refunded".
-      if (messageType === "CancelIntent") {
-        await this.reportCancelling(intentHash);
-      }
+      // watcher via onRefundObserved(). No status is reported here: the mempool
+      // has no "cancelling" status.
       return { intentHash, key, delivered: true, resolved: true, dstTxHash };
     } catch (err) {
       if (err instanceof FatalError) throw err;
@@ -573,40 +570,6 @@ export class Relayer {
   // ---------------------------------------------------------------------------
   // Mempool status reporting
   // ---------------------------------------------------------------------------
-
-  /**
-   * Best-effort: report a non-terminal `"cancelling"` status to the mempool
-   * after a `CancelIntent` has been delivered to the Stellar settlement
-   * contract.  Delivering a cancel to Stellar only marks the Stellar record
-   * cancelled — it does not move any funds.  The user's refund happens on EVM
-   * (via `cancelExpired` or a CancelIntent travelling Stellar → EVM), so
-   * `"refunded"` must not be reported here; it is reported only once the
-   * return-leg watcher observes a `Refunded` / `RefundedLocalTimeout` event
-   * for the intent hash (see {@link reportRefunded}).
-   *
-   * Errors are logged and swallowed — a failed status report must never
-   * affect the already-successful on-chain delivery or retry logic.
-   *
-   * Only called when both {@link RelayerConfig.mempoolUrl} and
-   * {@link RelayerConfig.mempoolStatusToken} are configured.
-   */
-  private async reportCancelling(intentHash: string): Promise<void> {
-    const { mempoolUrl, mempoolStatusToken } = this.config;
-    if (!this.mempoolClient || !mempoolStatusToken || !mempoolUrl) return;
-    try {
-      await this.mempoolClient.reportStatus(
-        intentHash as import("@perihelion/sdk").Hex,
-        "cancelling" satisfies MempoolIntentStatus,
-        mempoolStatusToken,
-      );
-      this.log.info("reported cancelling to mempool", { intentHash });
-    } catch (err) {
-      this.log.warn("failed to report cancelling to mempool (non-fatal)", {
-        intentHash,
-        err: String(err),
-      });
-    }
-  }
 
   /**
    * Best-effort: report the terminal `"refunded"` status to the mempool.
