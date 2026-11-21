@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { nativeToScVal, scValToNative, scvU32, scvVoid } from "@stellar/stellar-sdk";
 import { FatalError } from "../src/relayer.js";
-import { SorobanDestinationDelivery } from "../src/soroban-delivery.js";
+import { SorobanDestinationDelivery, deliveryGuid } from "../src/soroban-delivery.js";
 import type { BridgeMessage } from "../src/types.js";
 
 const SIGNER_SECRET = "SATIFRDTRKIU6OIU3FURVUO2NIVO5KVH6GQIAGBFPMV4UE4WOXYK5PBW";
@@ -162,4 +162,32 @@ test("Soroban delivery encodes EVM addresses left-padded in Origin.sender", () =
   const expected = Buffer.alloc(32);
   expected[31] = 0x01;
   assert.deepEqual(encoded, expected);
+});
+
+const RAW_PAYLOAD = `0x${"07".repeat(90)}` as const;
+
+test("deliveryGuid is a non-zero 32-byte value derived per message", () => {
+  const guid = deliveryGuid({ srcEid: 40_000, nonce: 7, rawPayload: RAW_PAYLOAD });
+  assert.equal(guid.length, 32);
+  assert.ok(guid.some((byte) => byte !== 0), "GUID must not be all zeros");
+});
+
+test("deliveryGuid differs across nonces and payloads", () => {
+  const base = deliveryGuid({ srcEid: 40_000, nonce: 7, rawPayload: RAW_PAYLOAD });
+  const nextNonce = deliveryGuid({ srcEid: 40_000, nonce: 8, rawPayload: RAW_PAYLOAD });
+  const otherPayload = deliveryGuid({ srcEid: 40_000, nonce: 7, rawPayload: `0x${"08".repeat(90)}` });
+  assert.notDeepEqual(base, nextNonce);
+  assert.notDeepEqual(base, otherPayload);
+});
+
+test("deliveryGuid uses the message's own GUID when one is recorded", () => {
+  const own = `0x${"ab".repeat(32)}` as const;
+  const guid = deliveryGuid({ srcEid: 1, nonce: 1, rawPayload: RAW_PAYLOAD, guid: own });
+  assert.deepEqual(guid, Buffer.from("ab".repeat(32), "hex"));
+});
+
+test("deliveryGuid ignores an all-zero recorded GUID", () => {
+  const zero = `0x${"00".repeat(32)}` as const;
+  const guid = deliveryGuid({ srcEid: 1, nonce: 1, rawPayload: RAW_PAYLOAD, guid: zero });
+  assert.ok(guid.some((byte) => byte !== 0));
 });
