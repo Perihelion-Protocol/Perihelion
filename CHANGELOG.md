@@ -35,6 +35,10 @@ versioned independently.
 
 ### Fixed
 
+- **mempool**: readiness tests now inspect the in-process lifecycle state instead
+  of fetching an unbound port, listener startup failures reject cleanly, and
+  metrics-token configuration no longer crashes the mempool test build (#1110).
+
 - **relayer**: `loadConfig` now rejects fractional or out-of-range endpoint ids
   (`PERIHELION_SOURCE_EID`, `PERIHELION_STELLAR_EID` must be integers in
   1..4294967295), fractional `PERIHELION_START_BLOCK` and
