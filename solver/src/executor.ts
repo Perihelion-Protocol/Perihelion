@@ -27,6 +27,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import {
+  PerihelionEscrowClient,
   ESCROW_ABI,
   OnChainIntentStatus,
   decodeIntentStatus,
@@ -348,29 +349,25 @@ export class Executor {
    * lock exists (user is the zero address).
    */
   private async getLock(intentHash: Hex): Promise<EscrowLock | undefined> {
-    const publicClient = createPublicClient({
-      transport: http(this.evmRpcUrl),
-    });
-
-    const result = (await publicClient.readContract({
-      address: this.escrowAddress,
-      abi: ESCROW_ABI,
-      functionName: "locks",
-      args: [intentHash],
-    })) as
-      | readonly [`0x${string}`, `0x${string}`, boolean, boolean]
-      | {
-          user: `0x${string}`;
-          solver: `0x${string}`;
-          released: boolean;
-          refunded: boolean;
-        };
-
-    if (Array.isArray(result)) {
-      const [user, solver, released, refunded] = result;
-      return { user, solver, released, refunded };
-    }
-    return result;
+    // Delegate to the SDK's escrow client, which decodes the full 8-field
+    // `locks(bytes32)` getter. Hand-decoding it here previously read `asset`
+    // as `released`.
+    const escrow = new PerihelionEscrowClient(
+      createPublicClient({ transport: http(this.evmRpcUrl) }),
+      createWalletClient({
+        account: privateKeyToAccount(this.evmPrivateKey),
+        transport: http(this.evmRpcUrl),
+      }),
+      this.escrowAddress,
+    );
+    const lock = await escrow.getLock(intentHash);
+    if (!lock) return undefined;
+    return {
+      user: lock.user,
+      solver: lock.solver,
+      released: lock.released,
+      refunded: lock.refunded,
+    };
   }
 
   /** Wait for the configured number of source-chain confirmations. */
