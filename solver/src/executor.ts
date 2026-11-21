@@ -313,9 +313,9 @@ export class Executor {
         await this.setStage(hash, stage);
       } else {
         const lockResult = await this.lockOnEvm(signed);
-        lockTx = typeof lockResult === "string" ? lockResult : lockResult.txHash;
-        sourceGasWei = typeof lockResult === "object" ? lockResult.gasWei : 0n;
-        lzFeeWei = typeof lockResult === "object" ? lockResult.lzFeeWei : 0n;
+        lockTx = lockResult.txHash;
+        sourceGasWei = lockResult.gasWei;
+        lzFeeWei = lockResult.lzFeeWei;
         this.logger.info("locked on EVM", { hash, lockTx });
         stage = "wait";
         await this.setStage(hash, stage);
@@ -335,8 +335,8 @@ export class Executor {
     // ── Stage 3: fill ──────────────────────────────────────────────────────
     if (stage === "fill") {
       const fillResult = await this.fillOnSoroban(signed, lockTx ?? "0x");
-      const settlementTx = typeof fillResult === "string" ? fillResult : fillResult.txHash;
-      const stellarFeeStroops = typeof fillResult === "object" ? fillResult.feeStroops : 0n;
+      const settlementTx = fillResult.txHash;
+      const stellarFeeStroops = fillResult.feeStroops;
       this.logger.info("filled on Soroban", { hash, settlementTx, stellarFeeStroops });
       await this.setStage(hash, "done");
 
@@ -505,7 +505,7 @@ export class Executor {
    */
   private async lockOnEvm(
     signed: SignedIntent,
-  ): Promise<Hex | { txHash: Hex; gasWei: bigint; lzFeeWei: bigint }> {
+  ): Promise<{ txHash: Hex; gasWei: bigint; lzFeeWei: bigint }> {
     const { intent, signature } = signed;
 
     const account = privateKeyToAccount(this.evmPrivateKey);
