@@ -11,6 +11,8 @@
  * fsync'd file or a transactional DB write — since the value is the sole
  * record of relay progress.
  */
+import type { NonceCounter } from "./evm-watcher.js";
+
 export interface CheckpointStore {
   /** Load the last persisted cursor, or `undefined` if none exists yet. */
   load(): Promise<number | undefined>;
@@ -34,6 +36,32 @@ export interface CheckpointStore {
    * a restart would be rejected as a replay by the settlement contract.
    */
   saveNonce(srcEid: number, dstEid: number, nonce: number): Promise<void>;
+}
+
+/** Stable string key identifying a LayerZero path (source eid : destination eid). */
+export function nonceKey(srcEid: number, dstEid: number): string {
+  return `${srcEid}:${dstEid}`;
+}
+
+/**
+ * Build a persisted {@link NonceCounter} backed by a {@link CheckpointStore}.
+ *
+ * Each call reads the last persisted nonce, persists the next one *before*
+ * returning it, and so never hands out a nonce that a restart could repeat.
+ */
+export function checkpointNonceCounter(
+  store: CheckpointStore,
+  srcEid: number,
+  dstEid: number,
+): NonceCounter {
+  return {
+    async next(): Promise<bigint> {
+      const last = (await store.loadNonce(srcEid, dstEid)) ?? 0;
+      const next = last + 1;
+      await store.saveNonce(srcEid, dstEid, next);
+      return BigInt(next);
+    },
+  };
 }
 
 /** A checkpoint store that never persists; cursor resets to the start block on restart. */

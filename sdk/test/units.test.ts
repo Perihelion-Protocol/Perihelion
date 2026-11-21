@@ -4,8 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { toSmallestUnits, fromSmallestUnits } from "../src/units.js";
-import { evmAddressToBytes32 } from "../src/evmAddress.js";
+import { toSmallestUnits, fromSmallestUnits, evmAddressToBytes32 } from "../src/units.js";
 
 // ---------------------------------------------------------------------------
 // Issue #533 — fromSmallestUnits mishandles negative input and lacks string
