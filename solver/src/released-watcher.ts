@@ -12,7 +12,7 @@
 
 import { createHash } from "node:crypto";
 
-import type { PerihelionClient } from "./perihelion-client.js";
+import type { Hex, MempoolIntentStatus, PerihelionClient } from "@perihelion/sdk";
 
 /**
  * Minimal logger interface. Compatible with the solver's existing logger.
@@ -29,7 +29,7 @@ export interface ReleasedWatcherLogger {
  */
 export interface ReleasedEvent {
   /** The intent hash (bytes32, hex-encoded with 0x prefix). */
-  intentHash: string;
+  intentHash: Hex;
   /** The block number in which the event was emitted. */
   blockNumber: number;
   /** The transaction hash that emitted the event. */
@@ -63,6 +63,8 @@ export interface ReleasedWatcherOptions {
   source: EscrowReleasedSource;
   /** The mempool client used to report status transitions. */
   client: PerihelionClient;
+  /** The mempool's shared status token, required to call `reportStatus`. */
+  statusToken: string;
   /** Optional logger. */
   logger?: ReleasedWatcherLogger;
   /**
@@ -107,6 +109,7 @@ export interface ReleasedWatcherOptions {
 export class ReleasedWatcher {
   private readonly source: EscrowReleasedSource;
   private readonly client: PerihelionClient;
+  private readonly statusToken: string;
   private readonly logger: ReleasedWatcherLogger;
   private readonly maxBlockRange: number;
   private readonly pollIntervalMs: number;
@@ -130,6 +133,7 @@ export class ReleasedWatcher {
   constructor(options: ReleasedWatcherOptions) {
     this.source = options.source;
     this.client = options.client;
+    this.statusToken = options.statusToken;
     this.logger = options.logger ?? {};
     this.maxBlockRange = options.maxBlockRange ?? 2_000;
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -227,7 +231,11 @@ export class ReleasedWatcher {
     }
 
     try {
-      await this.client.reportStatus(event.intentHash, "settled");
+      await this.client.reportStatus(
+        event.intentHash,
+        "settled" satisfies MempoolIntentStatus,
+        this.statusToken,
+      );
       this.reported.add(key);
       this.logger.info?.("released-watcher: reported settled", {
         intentHash: event.intentHash,
