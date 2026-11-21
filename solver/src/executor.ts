@@ -154,6 +154,17 @@ interface FillStatus {
  */
 export type FillStage = "lock" | "wait" | "fill" | "done" | "lost";
 
+/** Names of the settlement contract's `IntentStatus` variants, as returned by {@link Executor.readStatus}. */
+export type IntentStatusName = "Locked" | "Filled" | "ConfirmationSent" | "Cancelled";
+
+/** Maps each decoded on-chain status to its variant name. */
+const INTENT_STATUS_NAMES: Record<OnChainIntentStatus, IntentStatusName> = {
+  [OnChainIntentStatus.Locked]: "Locked",
+  [OnChainIntentStatus.Filled]: "Filled",
+  [OnChainIntentStatus.ConfirmationSent]: "ConfirmationSent",
+  [OnChainIntentStatus.Cancelled]: "Cancelled",
+};
+
 /** Result of reading `locks(intentHash)` from the EVM escrow. */
 interface EscrowLock {
   user: `0x${string}`;
@@ -397,9 +408,9 @@ export class Executor {
 
     for (;;) {
       const variant = await this.readStatus(hash);
-      if (variant === "Locked") return;
-      if (variant === "Settled") return;
-      if (variant === "Cancelled" || variant === "Refunded") {
+      // Registered (Locked), or already past registration (Filled/ConfirmationSent).
+      if (variant === "Locked" || variant === "Filled" || variant === "ConfirmationSent") return;
+      if (variant === "Cancelled") {
         throw new DefiniteFailureError(`intent ${hash} is ${variant} before fill`);
       }
 
@@ -444,14 +455,16 @@ export class Executor {
    * `undefined` means the intent is not registered at all.
    */
   private async isSettled(intentHash: Hex): Promise<boolean> {
-    return (await this.readStatus(intentHash)) === "Settled";
+    const status = await this.readStatus(intentHash);
+    return status === "Filled" || status === "ConfirmationSent";
   }
 
   /**
    * Simulate `status(intent_hash)` on the settlement contract and decode the
-   * returned enum variant (e.g. "Locked", "Settled").
+   * returned enum variant, or `null` when the intent is not registered or the
+   * simulation fails.
    */
-  private async readStatus(intentHash: Hex): Promise<string | null> {
+  private async readStatus(intentHash: Hex): Promise<IntentStatusName | null> {
     const rpc = new SorobanRpc.Server(this.sorobanRpcUrl);
     const keypair = Keypair.fromSecret(this.sorobanSecretKey);
     const account = await rpc.getAccount(keypair.publicKey());
@@ -476,7 +489,7 @@ export class Executor {
     }
 
     const status = decodeIntentStatus(simulated.result.retval);
-    return status === OnChainIntentStatus.Filled || status === OnChainIntentStatus.ConfirmationSent;
+    return status === undefined ? null : INTENT_STATUS_NAMES[status];
   }
 
   /**
