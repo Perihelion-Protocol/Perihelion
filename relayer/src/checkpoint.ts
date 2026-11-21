@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+import type { NonceCounter } from "./evm-watcher.js";
+
 /**
  * Persists the relayer's cursor across restarts.
  *
@@ -34,6 +36,32 @@ export interface CheckpointStore {
    * a restart would be rejected as a replay by the settlement contract.
    */
   saveNonce(srcEid: number, dstEid: number, nonce: number): Promise<void>;
+}
+
+/**
+ * Builds a {@link NonceCounter} for one path (srcEid → dstEid) on top of a
+ * store's persisted nonces. Each `next()` reads, increments and saves the value,
+ * so the sequence keeps increasing across restarts. Calls are serialised so
+ * concurrent `Locked` events cannot read the same value.
+ */
+export function checkpointNonceCounter(
+  store: CheckpointStore,
+  srcEid: number,
+  dstEid: number,
+): NonceCounter {
+  let queue: Promise<unknown> = Promise.resolve();
+  return {
+    next(): Promise<bigint> {
+      const run = queue.then(async () => {
+        const current = (await store.loadNonce(srcEid, dstEid)) ?? 0;
+        const next = current + 1;
+        await store.saveNonce(srcEid, dstEid, next);
+        return BigInt(next);
+      });
+      queue = run.catch(() => undefined);
+      return run;
+    },
+  };
 }
 
 /** A checkpoint store that never persists; cursor resets to the start block on restart. */
