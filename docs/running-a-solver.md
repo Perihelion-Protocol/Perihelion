@@ -191,7 +191,6 @@ terminal policy rejection, not a transient error. Before accepting a classic
 asset in `PERIHELION_SUPPORTED_ASSETS`, confirm its SAC is deployed on the
 target network (e.g. `stellar contract id asset --asset CODE:ISSUER` and check
 the instance exists), and keep an allowlist of classic assets you have verified.
-=======
 
 ### Customization Points
 
