@@ -76,7 +76,7 @@ import {
   type Hex,
 } from "viem";
 import type { SourceWatcher } from "./relayer.js";
-import { noopLogger, type Logger } from "./logger.js";
+import { noopLogger, type Logger } from "@perihelion/node-common";
 import {
   FILL_INSTRUCTION_LENGTH,
   type BridgeMessage,
@@ -100,11 +100,13 @@ function canonicalFillInstruction(
   if (minDestAmount < 0n || minDestAmount > 0xffffffffffffffffffffffffffffffffn) {
     throw new Error("min destination amount does not fit uint128");
   }
-  if (deadline < 0n || deadline > 0xffffffffffffffffn) throw new Error("deadline does not fit uint64");
+  if (deadline < 0n || deadline > 0xffffffffffffffffn)
+    throw new Error("deadline does not fit uint64");
 
   const recipient = Buffer.from(destination, "utf8");
   const asset = Buffer.from(destAsset, "utf8");
-  if (recipient.length > 56 || asset.length > 69) throw new Error("canonical field exceeds wire width");
+  if (recipient.length > 56 || asset.length > 69)
+    throw new Error("canonical field exceeds wire width");
 
   const out = Buffer.alloc(FILL_INSTRUCTION_LENGTH);
   out[0] = 0x01;
@@ -146,15 +148,15 @@ const LOCKED_EVENT_ABI = [
     type: "event",
     name: "Locked",
     inputs: [
-      { name: "intentHash",    type: "bytes32", indexed: true },
-      { name: "solver",        type: "address", indexed: true },
-      { name: "user",          type: "address", indexed: true },
-      { name: "asset",         type: "address", indexed: false },
-      { name: "amount",        type: "uint256", indexed: false },
-      { name: "destination",   type: "string",  indexed: false },
-      { name: "destAsset",     type: "string",  indexed: false },
+      { name: "intentHash", type: "bytes32", indexed: true },
+      { name: "solver", type: "address", indexed: true },
+      { name: "user", type: "address", indexed: true },
+      { name: "asset", type: "address", indexed: false },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "destination", type: "string", indexed: false },
+      { name: "destAsset", type: "string", indexed: false },
       { name: "minDestAmount", type: "uint128", indexed: false },
-      { name: "deadline",      type: "uint64",  indexed: false },
+      { name: "deadline", type: "uint64", indexed: false },
     ],
   },
 ] as const;
@@ -181,9 +183,9 @@ const PACKET_SENT_EVENT_ABI = [
     type: "event",
     name: "PacketSent",
     inputs: [
-      { name: "encodedPayload", type: "bytes",   indexed: false },
-      { name: "options",        type: "bytes",   indexed: false },
-      { name: "sendLibrary",    type: "address", indexed: false },
+      { name: "encodedPayload", type: "bytes", indexed: false },
+      { name: "options", type: "bytes", indexed: false },
+      { name: "sendLibrary", type: "address", indexed: false },
     ],
   },
 ] as const;
@@ -274,7 +276,13 @@ export class EVMSourceWatcher implements SourceWatcher {
 
   async poll(
     fromBlock: number,
-  ): Promise<{ messages: PendingMessage[]; head: number; headHash?: string; parentHash?: string; blockHeaders?: Array<{ number: number; hash: string; parentHash: string }> }> {
+  ): Promise<{
+    messages: PendingMessage[];
+    head: number;
+    headHash?: string;
+    parentHash?: string;
+    blockHeaders?: Array<{ number: number; hash: string; parentHash: string }>;
+  }> {
     const currentBlock = await this.client.getBlockNumber();
     const head = Number(currentBlock);
 
@@ -322,7 +330,9 @@ export class EVMSourceWatcher implements SourceWatcher {
         }
         const pending = await this.decodeLockedLogWithNonce(log);
         if (pending === null) {
-          throw new Error(`Failed to decode Locked event in transaction ${log.transactionHash ?? "unknown"}`);
+          throw new Error(
+            `Failed to decode Locked event in transaction ${log.transactionHash ?? "unknown"}`,
+          );
         }
         messages.push(pending);
       }
@@ -347,14 +357,22 @@ export class EVMSourceWatcher implements SourceWatcher {
         };
       });
       const headers = await this._batchConcurrent(headerTasks, this.transactionFetchConcurrency);
-      blockHeaders.push(...headers.filter((header): header is NonNullable<typeof header> => header !== null));
+      blockHeaders.push(
+        ...headers.filter((header): header is NonNullable<typeof header> => header !== null),
+      );
     }
 
     // Observe refund events on the source chain so the relayer can report
     // `refunded` to the mempool only when a real refund exists.
     await this.scanRefunds(fromBlock, head);
 
-    return { messages, head, headHash, parentHash, blockHeaders: blockHeaders.length > 0 ? blockHeaders : undefined };
+    return {
+      messages,
+      head,
+      headHash,
+      parentHash,
+      blockHeaders: blockHeaders.length > 0 ? blockHeaders : undefined,
+    };
   }
 
   /**
@@ -369,9 +387,10 @@ export class EVMSourceWatcher implements SourceWatcher {
     const onRefund = this.config.onRefund;
     if (!onRefund) return;
 
-    const start = this.lastRefundScanBlock === null
-      ? fromBlock
-      : Math.max(fromBlock, this.lastRefundScanBlock + 1);
+    const start =
+      this.lastRefundScanBlock === null
+        ? fromBlock
+        : Math.max(fromBlock, this.lastRefundScanBlock + 1);
     if (start > head) return;
 
     let scanHead = start;
@@ -390,10 +409,13 @@ export class EVMSourceWatcher implements SourceWatcher {
         if (this._isProviderRangeError(err)) {
           if (this.maxBlockRange <= 1) throw err;
           this.maxBlockRange = Math.max(1, Math.floor(this.maxBlockRange / 2));
-          this.logger.warn("EVMSourceWatcher: provider range error during refund scan, halving max block range", {
-            newMaxBlockRange: this.maxBlockRange,
-            err: String(err),
-          });
+          this.logger.warn(
+            "EVMSourceWatcher: provider range error during refund scan, halving max block range",
+            {
+              newMaxBlockRange: this.maxBlockRange,
+              err: String(err),
+            },
+          );
           continue;
         }
         throw err;
@@ -463,9 +485,7 @@ export class EVMSourceWatcher implements SourceWatcher {
       }
     };
 
-    await Promise.all(
-      Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()),
-    );
+    await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
     return results;
   }
 
@@ -475,7 +495,10 @@ export class EVMSourceWatcher implements SourceWatcher {
       return await Promise.race([
         promise,
         new Promise<T>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`RPC request timed out after ${timeoutMs}ms`)), timeoutMs);
+          timer = setTimeout(
+            () => reject(new Error(`RPC request timed out after ${timeoutMs}ms`)),
+            timeoutMs,
+          );
         }),
       ]);
     } finally {
@@ -554,10 +577,7 @@ export class EVMSourceWatcher implements SourceWatcher {
       // topics[0] is the PacketSent event signature; all fields are non-indexed.
       if (!receiptLog.topics || receiptLog.topics.length < 1) continue;
       try {
-        const [encodedPayload] = decodeAbiParameters(
-          PACKET_SENT_DATA_PARAMS,
-          receiptLog.data,
-        );
+        const [encodedPayload] = decodeAbiParameters(PACKET_SENT_DATA_PARAMS, receiptLog.data);
         const nonce = decodePacketNonce(encodedPayload);
         if (nonce !== null) return nonce;
       } catch {
@@ -589,7 +609,7 @@ export class EVMSourceWatcher implements SourceWatcher {
     if (!topics || topics.length < 4) return null;
 
     const intentHash = topics[1] as Hex; // bytes32
-    const solver     = ("0x" + topics[2]?.slice(26)) as Hex; // address from 32-byte word
+    const solver = ("0x" + topics[2]?.slice(26)) as Hex; // address from 32-byte word
     // user topic available for future use
 
     // --- Non-indexed data ---
@@ -625,8 +645,13 @@ export class EVMSourceWatcher implements SourceWatcher {
       deadline: deadline.toString(),
       nonce: 0,
       rawPayload: canonicalFillInstruction(
-        intentHash, solver, this.config.stellarEid,
-        destination, destAsset, minDestAmount, deadline,
+        intentHash,
+        solver,
+        this.config.stellarEid,
+        destination,
+        destAsset,
+        minDestAmount,
+        deadline,
       ),
     };
 
@@ -652,7 +677,7 @@ export class EVMSourceWatcher implements SourceWatcher {
     if (!topics || topics.length < 4) return null;
 
     const intentHash = topics[1] as Hex; // bytes32
-    const solver     = ("0x" + topics[2]?.slice(26)) as Hex; // address from 32-byte word
+    const solver = ("0x" + topics[2]?.slice(26)) as Hex; // address from 32-byte word
 
     let reason: number;
     try {

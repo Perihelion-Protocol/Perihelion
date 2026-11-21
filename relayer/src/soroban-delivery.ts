@@ -27,7 +27,7 @@ import {
   type InclusionFeePolicy,
 } from "@perihelion/sdk";
 import { FatalError, type DestinationDelivery } from "./relayer.js";
-import { noopLogger, type Logger } from "./logger.js";
+import { noopLogger, type Logger } from "@perihelion/node-common";
 import {
   CANCEL_INTENT_LENGTH,
   FILL_INSTRUCTION_LENGTH,
@@ -333,9 +333,8 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
       throw new FatalError("Missing canonical LayerZero message payload");
     }
     const payloadLength = (rawPayload.length - 2) / 2;
-    const expectedLength = message.messageType === "FillInstruction"
-      ? FILL_INSTRUCTION_LENGTH
-      : CANCEL_INTENT_LENGTH;
+    const expectedLength =
+      message.messageType === "FillInstruction" ? FILL_INSTRUCTION_LENGTH : CANCEL_INTENT_LENGTH;
     if (payloadLength !== expectedLength) {
       throw new FatalError(`Invalid canonical payload length: ${payloadLength}`);
     }
@@ -356,17 +355,28 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     }
     const reason = message.reason ?? 0;
     const originScVal = xdr.ScVal.scvMap([
-      new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("nonce"), val: nativeToScVal(BigInt(nonce), { type: "u64" }) }),
-      new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("sender"), val: xdr.ScVal.scvBytes(senderBytes) }),
-      new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("src_eid"), val: nativeToScVal(srcEid, { type: "u32" }) }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("nonce"),
+        val: nativeToScVal(BigInt(nonce), { type: "u64" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("sender"),
+        val: xdr.ScVal.scvBytes(senderBytes),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("src_eid"),
+        val: nativeToScVal(srcEid, { type: "u32" }),
+      }),
     ]);
     const guidScVal = xdr.ScVal.scvBytes(Buffer.alloc(32));
-    builder.addOperation(contract.call(
-      "lz_receive_bytes",
-      originScVal,
-      guidScVal,
-      nativeToScVal(Buffer.from(rawPayload.slice(2), "hex"), { type: "bytes" }),
-    ));
+    builder.addOperation(
+      contract.call(
+        "lz_receive_bytes",
+        originScVal,
+        guidScVal,
+        nativeToScVal(Buffer.from(rawPayload.slice(2), "hex"), { type: "bytes" }),
+      ),
+    );
     return builder;
   }
 
@@ -393,4 +403,3 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     return nativeToScVal(bytes, { type: "bytes" });
   }
 }
-

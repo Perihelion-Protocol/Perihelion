@@ -18,7 +18,10 @@ import {
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
 import { evaluate, type PricingDeps, type NativeCostDeps } from "./quote.js";
-import { BackoffState } from "./backoff.js";
+import { BackoffState, FatalError, type Logger } from "@perihelion/node-common";
+
+export { FatalError };
+export type { Logger };
 import type { Metrics, FillFees } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
 import { InFlightTracker } from "./inventory.js";
@@ -44,11 +47,6 @@ export interface Executor {
 }
 
 /** Minimal logger interface so callers can inject structured logging. */
-export interface Logger {
-  info(msg: string, meta?: Record<string, unknown>): void;
-  warn(msg: string, meta?: Record<string, unknown>): void;
-  error(msg: string, meta?: Record<string, unknown>): void;
-}
 
 /**
  * Readiness snapshot for the solver health/readiness server.
@@ -84,12 +82,6 @@ export type IntentVerifier = typeof verifyIntent;
  * and continuing, so the process can exit non-zero and be restarted by its
  * orchestrator.
  */
-export class FatalError extends Error {
-  constructor(message: string, override readonly cause?: unknown) {
-    super(message);
-    this.name = "FatalError";
-  }
-}
 
 /**
  * How long a *negative* verification result stays cached. Kept short (relative
@@ -427,10 +419,7 @@ export class Solver {
               err: String(err),
               consecutiveUnrecoverableFailures: this.consecutiveUnrecoverableFailures,
             });
-            throw new FatalError(
-              `Repeated unrecoverable error in poll loop: ${String(err)}`,
-              err,
-            );
+            throw new FatalError(`Repeated unrecoverable error in poll loop: ${String(err)}`, err);
           }
         } else {
           this.consecutiveUnrecoverableFailures = 0;
@@ -623,10 +612,13 @@ export class Solver {
       } else if (decision.nativeShortfall) {
         // Operator-actionable and affects every intent, not just this one —
         // log at error level so it pages rather than scrolling past as info.
-        this.log.error("skipping intent: native balance shortfall — solver cannot fund a fill leg", {
-          hash,
-          reason: decision.reason,
-        });
+        this.log.error(
+          "skipping intent: native balance shortfall — solver cannot fund a fill leg",
+          {
+            hash,
+            reason: decision.reason,
+          },
+        );
       } else {
         this.log.info("skipping intent", { hash, reason: decision.reason });
       }

@@ -10,11 +10,11 @@
 export { Solver, FatalError } from "./solver.js";
 export { Executor, DefiniteFailureError } from "./executor.js";
 export { SolverMetrics } from "./metrics.js";
-export { createLogger } from "./logger.js";
+export { createLogger } from "@perihelion/node-common";
 export { loadConfig } from "./config.js";
 export { hasExecutorConfig, loadExecutorConfig } from "./executor-config.js";
 export { InFlightTracker, UnlimitedInventoryProvider } from "./inventory.js";
-export { BackoffState } from "./backoff.js";
+export { BackoffState } from "@perihelion/node-common";
 export { SeenLRU } from "./seen-lru.js";
 export {
   RATE_SCALE,
@@ -29,9 +29,9 @@ export {
 export type { SolverConfig } from "./config.js";
 export type { ExecutorConfig } from "./executor.js";
 export type { Metrics, MetricsSnapshot, CorridorStats } from "./metrics.js";
-export type { Logger, LoggerOptions } from "./logger.js";
+export type { Logger, LoggerOptions } from "@perihelion/node-common";
 export type { InventoryProvider } from "./inventory.js";
-export type { BackoffConfig, Rng } from "./backoff.js";
+export type { BackoffConfig, Rng } from "@perihelion/node-common";
 export type { IntentVerifier } from "./solver.js";
 export type {
   DecimalsLookup,

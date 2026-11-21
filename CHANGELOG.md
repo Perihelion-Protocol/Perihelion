@@ -14,6 +14,9 @@ versioned independently.
 
 ### Added
 
+- **node-common**: shared backoff, structured logging, logger types, and fatal
+  error primitives now have one implementation used by both the relayer and
+  solver, eliminating service drift (#1113).
 - **sdk**: `PerihelionEscrowClient.isRefundable(intentHash)` and
   `refundStatus(intentHash)` decide refundability from chain state. They read
   `locks`, `confirmationGrace` and the timestamp from the latest block, apply

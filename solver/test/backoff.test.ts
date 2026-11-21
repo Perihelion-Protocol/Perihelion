@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BackoffState } from "../src/backoff.js";
+import { BackoffState } from "@perihelion/node-common";
 
 const BASE = 1_000; // 1 s base interval for easy arithmetic
 

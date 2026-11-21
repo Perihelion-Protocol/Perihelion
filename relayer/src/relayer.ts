@@ -43,7 +43,10 @@ import type { CheckpointStore } from "./checkpoint.js";
 import { NoopCheckpointStore } from "./checkpoint.js";
 import type { PendingMessage, RelayResult, MessageKey } from "./types.js";
 import { messageKeyString } from "./types.js";
-import { BackoffState } from "./backoff.js";
+import { BackoffState, FatalError, type Logger } from "@perihelion/node-common";
+
+export { FatalError };
+export type { Logger };
 import type { DeadLetterStore } from "./dead-letter.js";
 import { InMemoryDeadLetterStore } from "./dead-letter.js";
 import { PerihelionClient, type MempoolIntentStatus } from "@perihelion/sdk";
@@ -93,12 +96,6 @@ export interface DestinationDelivery {
    * Keyed on the composite `(srcEid, dstEid, intentHash, messageType, nonce)`.
    */
   isDelivered(key: MessageKey): Promise<boolean>;
-}
-
-export interface Logger {
-  info(msg: string, meta?: Record<string, unknown>): void;
-  warn(msg: string, meta?: Record<string, unknown>): void;
-  error(msg: string, meta?: Record<string, unknown>): void;
 }
 
 /**
@@ -156,12 +153,6 @@ interface BlockRecord {
  * continuing, so the process can exit non-zero and be restarted by its
  * orchestrator.
  */
-export class FatalError extends Error {
-  constructor(message: string, override readonly cause?: unknown) {
-    super(message);
-    this.name = "FatalError";
-  }
-}
 
 /**
  * Readiness snapshot exposed by the health server.
@@ -374,7 +365,9 @@ export class Relayer {
 
   /** One watch-confirm-deliver cycle. Exposed for testing. */
   async tick(): Promise<RelayResult[]> {
-    const { messages, head, headHash, parentHash, blockHeaders } = await this.watcher.poll(this.cursor);
+    const { messages, head, headHash, parentHash, blockHeaders } = await this.watcher.poll(
+      this.cursor,
+    );
 
     // Reorg detection — only when the watcher provides block hashes.
     if (headHash !== undefined && parentHash !== undefined) {
@@ -386,7 +379,8 @@ export class Relayer {
             head,
             reorgDepth,
             confirmations: this.config.confirmations,
-            action: "Manual inspection required — blocks delivered during orphaned chain may need remediation",
+            action:
+              "Manual inspection required — blocks delivered during orphaned chain may need remediation",
           });
         } else {
           this.log.warn("reorg detected, rolling back cursor", {
@@ -552,8 +546,7 @@ export class Relayer {
           nonce,
           attempts: attempt,
           lastError: String(err),
-          action:
-            "Operator intervention required — see dead-letter runbook in dead-letter.ts",
+          action: "Operator intervention required — see dead-letter runbook in dead-letter.ts",
         });
         return {
           intentHash,
@@ -669,11 +662,7 @@ export class Relayer {
    * A reorg is detected when `parentHash` does not match the hash we recorded
    * for `head - 1`.
    */
-  private detectReorg(
-    head: number,
-    _headHash: string,
-    parentHash: string,
-  ): number {
+  private detectReorg(head: number, _headHash: string, parentHash: string): number {
     // Find the record for head-1 in our window.
     const prev = this.blockWindow.find((b) => b.number === head - 1);
     if (prev === undefined) return 0; // no prior record — cannot detect
@@ -773,9 +762,7 @@ export class RelayerGroup {
       }),
     );
     const settled = await Promise.allSettled(loops);
-    const rejected = settled.find(
-      (s): s is PromiseRejectedResult => s.status === "rejected",
-    );
+    const rejected = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
     if (rejected) throw rejected.reason;
   }
 

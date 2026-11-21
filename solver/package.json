@@ -37,6 +37,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@perihelion/node-common": "*",
     "@perihelion/sdk": "*",
     "@stellar/stellar-sdk": "^12.3.0",
     "viem": "^2.55.8"
