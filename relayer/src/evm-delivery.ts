@@ -3,6 +3,7 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  keccak256,
   type Abi,
   type Address,
   type Hash,
@@ -56,27 +57,11 @@ const MOCK_ENDPOINT_ABI = [
 ] as const satisfies Abi;
 
 /**
- * ABI fragment for the escrow's inbound entrypoint. Used when the mock
- * endpoint is not configured and we call the escrow directly.
+ * ABI fragment for the escrow's delivery marker. Read as a fallback by
+ * `isDelivered`. The escrow's `lzReceive` is intentionally not included: only
+ * the endpoint may call it.
  */
 const ESCROW_ABI = [
-  {
-    type: "function",
-    name: "lzReceive",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "origin", type: "tuple", components: [
-        { name: "srcEid", type: "uint32" },
-        { name: "sender", type: "bytes32" },
-        { name: "nonce", type: "uint64" },
-      ] },
-      { name: "guid", type: "bytes32" },
-      { name: "message", type: "bytes" },
-      { name: "executor", type: "address" },
-      { name: "extraData", type: "bytes" },
-    ],
-    outputs: [],
-  },
   {
     type: "function",
     name: "isDelivered",
@@ -94,24 +79,41 @@ export interface EvmDestinationDeliveryConfig {
   /** Address of the PerihelionEscrow contract. */
   escrowAddress: Address;
   /**
-   * Address of the mock LayerZero endpoint. When set, deliveries are routed
-   * through the mock endpoint's `deliver` function. When unset, the relayer
-   * calls `lzReceive` on the escrow directly (production-style, where a real
-   * LayerZero executor would normally do this).
+   * Address of the LayerZero endpoint that delivers messages to the escrow.
+   * Deliveries are routed through its `deliver` function. The relayer never
+   * calls `lzReceive` on the escrow directly: the escrow only accepts calls
+   * from the endpoint, so an EOA call would always revert.
    */
-  mockEndpointAddress?: Address;
-  /** Destination endpoint id used by the mock endpoint. Defaults to 0. */
+  mockEndpointAddress: Address;
+  /** Destination endpoint id used by the endpoint. Defaults to 0. */
   dstEid?: number;
-  /** Source endpoint id recorded in the origin tuple. Defaults to 0. */
-  srcEid?: number;
-  /** Source sender recorded in the origin tuple. Defaults to zero bytes32. */
-  srcSender?: Hex;
+  /** Source endpoint id of the origin tuple. Required; no default. */
+  srcEid: number;
+  /**
+   * Source sender (`stellarPeer`) recorded in the origin tuple. Required
+   * 32-byte hex; the escrow rejects the zero sender.
+   */
+  srcSender: Hex;
   /** Optional confirmation count for receipts. Defaults to 1. */
   confirmations?: number;
 }
 
-const ZERO_BYTES32: Hex =
-  "0x0000000000000000000000000000000000000000000000000000000000000000";
+/**
+ * Rejects configs that lack the origin fields the escrow checks on inbound
+ * messages (`srcEid`, `srcSender`). There are no zero defaults: a zero
+ * sender or eid can never match the escrow's configured peer.
+ */
+function validateOriginConfig(config: EvmDestinationDeliveryConfig): void {
+  if (!config.mockEndpointAddress) {
+    throw new Error("EvmDestinationDelivery: mockEndpointAddress is required");
+  }
+  if (!Number.isInteger(config.srcEid) || config.srcEid <= 0) {
+    throw new Error(`EvmDestinationDelivery: srcEid must be a positive integer, got ${String(config.srcEid)}`);
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(config.srcSender ?? "")) {
+    throw new Error("EvmDestinationDelivery: srcSender must be a 32-byte hex value");
+  }
+}
 
 /**
  * Delivers settlement messages originating on Soroban to the EVM escrow.
@@ -129,6 +131,7 @@ export class EvmDestinationDelivery implements DestinationDelivery {
   private readonly confirmations: number;
 
   constructor(config: EvmDestinationDeliveryConfig) {
+    validateOriginConfig(config);
     this.config = config;
     this.confirmations = config.confirmations ?? 1;
     this.account = privateKeyToAccount(config.privateKey);
@@ -190,52 +193,20 @@ export class EvmDestinationDelivery implements DestinationDelivery {
     }
 
     const payload = this.encodePayload(message);
-
-    if (this.config.mockEndpointAddress) {
-      return this.deliverViaMockEndpoint(payload);
-    }
-
-    return this.deliverDirectly(message, payload);
+    return this.deliverViaEndpoint(payload);
   }
 
   private isOutboundType(type: MessageType): boolean {
     return type === "FillConfirmed" || type === "CancelIntent";
   }
 
-  private async deliverViaMockEndpoint(payload: Hex): Promise<Hash> {
+  private async deliverViaEndpoint(payload: Hex): Promise<Hash> {
     const { request } = await this.publicClient.simulateContract({
       account: this.account,
-      address: this.config.mockEndpointAddress!,
+      address: this.config.mockEndpointAddress,
       abi: MOCK_ENDPOINT_ABI,
       functionName: "deliver",
       args: [this.config.dstEid ?? 0, this.config.escrowAddress, payload],
-    });
-
-    const hash = await this.walletClient.writeContract(request);
-    await this.publicClient.waitForTransactionReceipt({
-      hash,
-      confirmations: this.confirmations,
-    });
-    return hash;
-  }
-
-  private async deliverDirectly(message: Message, payload: Hex): Promise<Hash> {
-    const { request } = await this.publicClient.simulateContract({
-      account: this.account,
-      address: this.config.escrowAddress,
-      abi: ESCROW_ABI,
-      functionName: "lzReceive",
-      args: [
-        {
-          srcEid: this.config.srcEid ?? 0,
-          sender: this.config.srcSender ?? ZERO_BYTES32,
-          nonce: message.nonce ?? 0n,
-        },
-        this.guidFor(message),
-        payload,
-        this.account.address,
-        "0x",
-      ],
     });
 
     const hash = await this.walletClient.writeContract(request);
@@ -274,8 +245,8 @@ export class EvmDestinationDelivery implements DestinationDelivery {
   }
 
   /**
-   * Derives the LayerZero-style GUID for a message. The relayer uses the
-   * message id when present; otherwise it hashes the encoded payload.
+   * Returns the GUID for a message: the message's own 32-byte guid when
+   * present, otherwise the keccak256 of its payload (see {@link payloadHash}).
    */
   private guidFor(message: Message): Hex {
     if (message.guid && message.guid.startsWith("0x") && message.guid.length === 66) {
@@ -284,14 +255,11 @@ export class EvmDestinationDelivery implements DestinationDelivery {
     return this.payloadHash(message);
   }
 
+  /** keccak256 over the raw payload bytes, as a 32-byte hex value. */
   private payloadHash(message: Message): Hex {
-    // keccak256 over the raw payload bytes. viem's `keccak256` is not imported
-    // here to keep the dependency surface small; the relayer's message id is
-    // already a 32-byte hex string in practice, so we normalise it.
     const raw = message.payload.startsWith("0x")
-      ? message.payload.slice(2)
-      : message.payload;
-    const padded = raw.padEnd(64, "0").slice(0, 64);
-    return `0x${padded}` as Hex;
+      ? message.payload
+      : `0x${message.payload}`;
+    return keccak256(raw as Hex);
   }
 }

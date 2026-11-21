@@ -51,6 +51,16 @@ console.log(result.status); // "settled"
 | `PerihelionClient` | `signIntent`, `submitIntent`, `getIntent`, `waitForSettlement` |
 | `INTENT_TYPES` / `PERIHELION_DOMAIN` | EIP-712 type + domain for custom signers |
 
+### Checking refundability
+
+Use `PerihelionEscrowClient.refundStatus(intentHash)` to decide whether to call
+`cancelExpired`. It reads the lock, `confirmationGrace()` and `block.timestamp`
+at one block and returns `{ refundable, reason }`. `isRefundable(intentHash)` is
+the boolean form of the same check. Units are seconds throughout.
+
+`PerihelionClient.isRefundable(record, graceSeconds)` is deprecated. It reads only
+the mempool record and the local clock, so use it at most as a UI pre-filter.
+
 See [`../docs/intent-spec.md`](../docs/intent-spec.md) for the full intent
 specification, and the
 [Intent Lifecycle State Diagram](../docs/TECHNICAL-ARCHITECTURE.md#intent-lifecycle-state-diagram)
