@@ -72,9 +72,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   const portRaw = env.PORT ?? "3000";
   const port = Number(portRaw);
   if (!Number.isInteger(port) || port < 1 || port > MAX_PORT) {
-    errors.push(
-      `PORT must be an integer between 1 and ${MAX_PORT}, got: "${portRaw}"`,
-    );
+    errors.push(`PORT must be an integer between 1 and ${MAX_PORT}, got: "${portRaw}"`);
   }
 
   // --- Bind host: mempool-specific name wins, then the shared names ---
@@ -90,9 +88,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   if (!chainIdRaw) {
     errors.push("PERIHELION_SOURCE_CHAIN_ID is required");
   } else if (!Number.isInteger(chainId) || chainId <= 0) {
-    errors.push(
-      `PERIHELION_SOURCE_CHAIN_ID must be a positive integer, got: "${chainIdRaw}"`,
-    );
+    errors.push(`PERIHELION_SOURCE_CHAIN_ID must be a positive integer, got: "${chainIdRaw}"`);
   }
 
   // --- Required: escrow address ---
@@ -109,6 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   // authenticated by default. A token-less server only starts when the operator
   // explicitly opts into insecure local development (#966).
   const statusToken = env.PERIHELION_MEMPOOL_STATUS_TOKEN || undefined;
+  const metricsToken = env.PERIHELION_METRICS_TOKEN || undefined;
   if (!statusToken && env.PERIHELION_MEMPOOL_INSECURE_DEV !== "1") {
     errors.push(
       "PERIHELION_MEMPOOL_STATUS_TOKEN is required: PATCH /intents/:hash/status must be authenticated. For local development only, set PERIHELION_MEMPOOL_INSECURE_DEV=1 to run without it",
@@ -116,31 +113,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   }
 
   // --- Optional: store and rate-limit tuning ---
-  const maxStoreSize = optionalPositiveInt(
-    env,
-    "PERIHELION_MEMPOOL_MAX_STORE_SIZE",
-    errors,
-  );
-  const expiryGraceMs = optionalPositiveInt(
-    env,
-    "PERIHELION_MEMPOOL_EXPIRY_GRACE_MS",
-    errors,
-  );
+  const maxStoreSize = optionalPositiveInt(env, "PERIHELION_MEMPOOL_MAX_STORE_SIZE", errors);
+  const expiryGraceMs = optionalPositiveInt(env, "PERIHELION_MEMPOOL_EXPIRY_GRACE_MS", errors);
   const rateLimitWindowMs = optionalPositiveInt(
     env,
     "PERIHELION_MEMPOOL_RATE_LIMIT_WINDOW_MS",
     errors,
   );
-  const writeRateLimit = optionalPositiveInt(
-    env,
-    "PERIHELION_MEMPOOL_WRITE_RATE_LIMIT",
-    errors,
-  );
-  const readRateLimit = optionalPositiveInt(
-    env,
-    "PERIHELION_MEMPOOL_READ_RATE_LIMIT",
-    errors,
-  );
+  const writeRateLimit = optionalPositiveInt(env, "PERIHELION_MEMPOOL_WRITE_RATE_LIMIT", errors);
+  const readRateLimit = optionalPositiveInt(env, "PERIHELION_MEMPOOL_READ_RATE_LIMIT", errors);
 
   if (errors.length > 0) {
     throw new Error(

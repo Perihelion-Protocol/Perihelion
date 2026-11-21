@@ -4,7 +4,7 @@
  * Tests for health, readiness, and metrics endpoints.
  * Verifies that:
  * - /healthz returns 200 while the listener is up
- * - /readyz returns 503 before start and 200 after start
+ * - readiness returns 503 before/after listening and 200 while listening
  * - /metrics returns parseable Prometheus text format with correct data
  */
 
@@ -90,13 +90,16 @@ test("/readyz endpoint", async (t) => {
   const readyTestBase = `http://localhost:${readyTestPort}`;
   let readyServer: MempoolServer;
 
-  await t.test("is unreachable before server start (nothing is listening yet)", async () => {
+  await t.test("reports 503 before server start without fetching an unbound port", () => {
     readyServer = new MempoolServer({
       port: readyTestPort,
       chainId: CHAIN_ID,
       verifyingContract: ESCROW,
     });
-    await assert.rejects(fetch(`${readyTestBase}/readyz`));
+    assert.deepEqual(readyServer.getReadiness(), {
+      statusCode: 503,
+      body: { status: "not ready", reason: "server is not listening" },
+    });
   });
 
   await t.test("returns 200 after server start", async () => {
@@ -108,8 +111,8 @@ test("/readyz endpoint", async (t) => {
     await readyServer.stop();
   });
 
-  await t.test("is unreachable after server stop", async () => {
-    await assert.rejects(fetch(`${readyTestBase}/readyz`));
+  await t.test("reports 503 after server stop without fetching an unbound port", () => {
+    assert.equal(readyServer.getReadiness().statusCode, 503);
   });
 });
 

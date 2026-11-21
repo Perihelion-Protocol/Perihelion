@@ -183,7 +183,9 @@ export class MempoolServer {
 
   constructor(opts: MempoolServerOptions) {
     if (opts.chainId === undefined || opts.chainId === null || Number.isNaN(opts.chainId)) {
-      throw new Error("MempoolServer requires a chainId — omitting it defaults signature verification to no real domain.");
+      throw new Error(
+        "MempoolServer requires a chainId — omitting it defaults signature verification to no real domain.",
+      );
     }
     if (!opts.verifyingContract || opts.verifyingContract.toLowerCase() === ZERO_ADDRESS) {
       throw new Error(
@@ -217,6 +219,19 @@ export class MempoolServer {
     this.setupRoutes();
   }
 
+  /** Return readiness without requiring an HTTP listener. */
+  getReadiness():
+    | { statusCode: 200; body: { status: "ready" } }
+    | { statusCode: 503; body: { status: "not ready"; reason: string } } {
+    if (!this.isReady) {
+      return {
+        statusCode: 503,
+        body: { status: "not ready", reason: "server is not listening" },
+      };
+    }
+    return { statusCode: 200, body: { status: "ready" } };
+  }
+
   private setupRoutes(): void {
     this.app.use(express.json({ limit: MAX_BODY_LABEL }));
 
@@ -230,11 +245,8 @@ export class MempoolServer {
       res.status(200).json({ status: "ok" });
     });
     this.app.get("/readyz", (req: Request, res: Response) => {
-      if (!this.isReady) {
-        res.status(503).json({ status: "not ready", reason: "sweep timer not started" });
-        return;
-      }
-      res.status(200).json({ status: "ready" });
+      const readiness = this.getReadiness();
+      res.status(readiness.statusCode).json(readiness.body);
     });
     this.app.get("/metrics", read, (req: Request, res: Response) => {
       if (this.metricsToken && !this.isMetricsAuthorized(req)) {
@@ -245,7 +257,11 @@ export class MempoolServer {
       res.status(200).send(this.getPrometheusMetrics());
     });
     this.app.get("/info", read, this.handleInfo.bind(this));
-    this.app.post("/intents", write, (req: Request, res: Response) => void this.handleSubmitIntent(req, res));
+    this.app.post(
+      "/intents",
+      write,
+      (req: Request, res: Response) => void this.handleSubmitIntent(req, res),
+    );
     this.app.get("/intents/:hash", read, this.handleGetIntent.bind(this));
     this.app.get("/intents", read, this.handleListIntents.bind(this));
     this.app.patch("/intents/:hash/status", write, this.handleUpdateStatus.bind(this));
@@ -260,39 +276,35 @@ export class MempoolServer {
     // the server's JSON error shape. Registered after the routes so it catches
     // errors forwarded from any middleware above. Without it, Express's default
     // handler replies with HTML (and, outside production, a stack trace).
-    this.app.use(
-      (err: unknown, _req: Request, res: Response, next: NextFunction): void => {
-        if (res.headersSent) {
-          next(err);
-          return;
-        }
-        const e = (err ?? {}) as { type?: string; status?: number; statusCode?: number };
-        if (e.type === "entity.too.large") {
-          res
-            .status(413)
-            .json({ error: `Request body exceeds the ${MAX_BODY_LABEL} limit` });
-          return;
-        }
-        if (
-          e.type === "entity.parse.failed" ||
-          e.type === "encoding.unsupported" ||
-          e.type === "charset.unsupported" ||
-          e.type === "request.aborted"
-        ) {
-          res.status(400).json({ error: "Malformed JSON request body" });
-          return;
-        }
-        const status = e.status ?? e.statusCode;
-        if (typeof status === "number" && status >= 400 && status < 500) {
-          res.status(status).json({ error: "Bad request" });
-          return;
-        }
-        this.logger.error("[mempool] unhandled error", {
-          err: err instanceof Error ? (err.stack ?? err.message) : String(err),
-        });
-        res.status(500).json({ error: "Internal server error" });
-      },
-    );
+    this.app.use((err: unknown, _req: Request, res: Response, next: NextFunction): void => {
+      if (res.headersSent) {
+        next(err);
+        return;
+      }
+      const e = (err ?? {}) as { type?: string; status?: number; statusCode?: number };
+      if (e.type === "entity.too.large") {
+        res.status(413).json({ error: `Request body exceeds the ${MAX_BODY_LABEL} limit` });
+        return;
+      }
+      if (
+        e.type === "entity.parse.failed" ||
+        e.type === "encoding.unsupported" ||
+        e.type === "charset.unsupported" ||
+        e.type === "request.aborted"
+      ) {
+        res.status(400).json({ error: "Malformed JSON request body" });
+        return;
+      }
+      const status = e.status ?? e.statusCode;
+      if (typeof status === "number" && status >= 400 && status < 500) {
+        res.status(status).json({ error: "Bad request" });
+        return;
+      }
+      this.logger.error("[mempool] unhandled error", {
+        err: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      });
+      res.status(500).json({ error: "Internal server error" });
+    });
   }
 
   /**
@@ -604,14 +616,25 @@ export class MempoolServer {
 
   async start(): Promise<void> {
     if (this.server) return;
+    await new Promise<void>((resolve, reject) => {
+      const server = this.app.listen(this.port, this.host);
+      const onError = (error: Error) => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        this.server = server;
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+    });
     this.sweepTimer = setInterval(() => {
       this.store.evictExpired();
     }, SWEEP_INTERVAL_MS);
     if (typeof this.sweepTimer.unref === "function") this.sweepTimer.unref();
     this.isReady = true;
-    await new Promise<void>((resolve) => {
-      this.server = this.app.listen(this.port, this.host, () => resolve());
-    });
   }
 
   async stop(): Promise<void> {
