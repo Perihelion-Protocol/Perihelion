@@ -21,7 +21,13 @@ export const CANCEL_INTENT_LENGTH = 35;
  * - FillConfirmed   — Stellar → EVM: confirm that assets were released.
  * - CancelIntent    — either direction: abort and allow a refund.
  */
-export type MessageType = "FillInstruction" | "FillConfirmed" | "CancelIntent";
+export const MessageType = {
+  FillInstruction: "FillInstruction",
+  FillConfirmed: "FillConfirmed",
+  CancelIntent: "CancelIntent",
+} as const;
+
+export type MessageType = (typeof MessageType)[keyof typeof MessageType];
 
 /**
  * Reason code for a `CancelIntent` message, matching the wire format shared by
@@ -140,4 +146,68 @@ export interface MessageKey {
 /** Serialize a MessageKey to a stable, opaque string for use as a map key. */
 export function messageKeyString(k: MessageKey): string {
   return `${k.srcEid}:${k.dstEid}:${k.intentHash}:${k.messageType}:${k.nonce}`;
+}
+
+/** Observes bridge messages emitted on the source chain. */
+export interface SourceWatcher {
+  /**
+   * Return messages emitted since `fromBlock` (inclusive). `head` must be the
+   * source chain's latest block height — it may be smaller than the
+   * configured confirmation depth (e.g. a fresh local/test chain), which
+   * the relayer tick handles by relaying nothing that tick.
+   *
+   * `headHash` is the block hash of `head`; `parentHash` is the parent of
+   * `head`.  Both are used for reorg detection.  Implementations that cannot
+   * supply them may omit these fields; reorg detection is then disabled.
+   *
+   * `blockHeaders` (optional) provides block records for intermediate blocks
+   * in the scanned range (fromBlock through head). If supplied, the relayer
+   * records all of them for deeper reorg detection.
+   */
+  poll(fromBlock: number): Promise<{
+    messages: PendingMessage[];
+    head: number;
+    headHash?: string;
+    parentHash?: string;
+    blockHeaders?: Array<{ number: number; hash: string; parentHash: string }>;
+  }>;
+}
+
+/**
+ * Delivers a verified message to the destination settlement contract.
+ *
+ * ## Composite dedup key
+ *
+ * Idempotency is keyed on the full message identity — `(srcEid, dstEid,
+ * intentHash, messageType, nonce)` — rather than `intentHash` alone.  A
+ * single intent accumulates multiple distinct protocol messages over its
+ * lifetime (FillInstruction → FillConfirmed or CancelIntent); keying on
+ * intentHash alone would cause the second message to be skipped as "already
+ * delivered".
+ */
+export interface DestinationDelivery {
+  /** Submit the message; returns the destination tx hash. */
+  deliver(pending: PendingMessage): Promise<string>;
+  /**
+   * True if this exact message was already delivered.
+   * Keyed on the composite `(srcEid, dstEid, intentHash, messageType, nonce)`.
+   */
+  isDelivered(key: MessageKey): Promise<boolean>;
+}
+
+/**
+ * A `Refunded` or `RefundedLocalTimeout` event observed on the EVM escrow,
+ * reported back to the relayer so the user's refund can be recorded.
+ */
+export interface EvmRefundObservation {
+  /** Intent the refund settles (indexed topic of the escrow event). */
+  readonly intentHash: Hex;
+  /** Which escrow refund event was emitted. */
+  readonly kind: "Refunded" | "RefundedLocalTimeout";
+  /** Block the refund event was emitted in. */
+  readonly blockNumber: number;
+  /** Transaction hash that emitted the refund event. */
+  readonly transactionHash: Hex;
+  /** Log index of the event within its block. */
+  readonly logIndex: number;
 }

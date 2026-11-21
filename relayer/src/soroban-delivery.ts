@@ -26,8 +26,8 @@ import {
   submitWithFeeEscalation,
   type InclusionFeePolicy,
 } from "@perihelion/sdk";
-import { FatalError, type DestinationDelivery } from "./relayer.js";
-import { noopLogger, type Logger } from "@perihelion/node-common";
+import type { DestinationDelivery } from "./types.js";
+import { FatalError, noopLogger, type Logger } from "@perihelion/node-common";
 import {
   CANCEL_INTENT_LENGTH,
   FILL_INSTRUCTION_LENGTH,

@@ -41,8 +41,16 @@
 import type { RelayerConfig } from "./config.js";
 import type { CheckpointStore } from "./checkpoint.js";
 import { NoopCheckpointStore } from "./checkpoint.js";
-import type { PendingMessage, RelayResult, MessageKey } from "./types.js";
+import type {
+  DestinationDelivery,
+  MessageKey,
+  PendingMessage,
+  RelayResult,
+  SourceWatcher,
+} from "./types.js";
 import { messageKeyString } from "./types.js";
+
+export type { DestinationDelivery, SourceWatcher } from "./types.js";
 import { BackoffState, FatalError, type Logger } from "@perihelion/node-common";
 
 export { FatalError };
@@ -50,53 +58,6 @@ export type { Logger };
 import type { DeadLetterStore } from "./dead-letter.js";
 import { InMemoryDeadLetterStore } from "./dead-letter.js";
 import { PerihelionClient, type MempoolIntentStatus } from "@perihelion/sdk";
-
-/** Observes bridge messages emitted on the source chain. */
-export interface SourceWatcher {
-  /**
-   * Return messages emitted since `fromBlock` (inclusive). `head` must be the
-   * source chain's latest block height — it may be smaller than the
-   * configured confirmation depth (e.g. a fresh local/test chain), which
-   * {@link Relayer.tick} handles by relaying nothing that tick.
-   *
-   * `headHash` is the block hash of `head`; `parentHash` is the parent of
-   * `head`.  Both are used for reorg detection.  Implementations that cannot
-   * supply them may omit these fields; reorg detection is then disabled.
-   *
-   * `blockHeaders` (optional) provides block records for intermediate blocks
-   * in the scanned range (fromBlock through head). If supplied, the relayer
-   * records all of them for deeper reorg detection.
-   */
-  poll(fromBlock: number): Promise<{
-    messages: PendingMessage[];
-    head: number;
-    headHash?: string;
-    parentHash?: string;
-    blockHeaders?: Array<{ number: number; hash: string; parentHash: string }>;
-  }>;
-}
-
-/**
- * Delivers a verified message to the destination settlement contract.
- *
- * ## Composite dedup key
- *
- * Idempotency is keyed on the full message identity — `(srcEid, dstEid,
- * intentHash, messageType, nonce)` — rather than `intentHash` alone.  A
- * single intent accumulates multiple distinct protocol messages over its
- * lifetime (FillInstruction → FillConfirmed or CancelIntent); keying on
- * intentHash alone would cause the second message to be skipped as "already
- * delivered".
- */
-export interface DestinationDelivery {
-  /** Submit the message; returns the destination tx hash. */
-  deliver(pending: PendingMessage): Promise<string>;
-  /**
-   * True if this exact message was already delivered.
-   * Keyed on the composite `(srcEid, dstEid, intentHash, messageType, nonce)`.
-   */
-  isDelivered(key: MessageKey): Promise<boolean>;
-}
 
 /**
  * Retry + dead-letter configuration.
