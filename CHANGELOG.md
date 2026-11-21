@@ -12,9 +12,25 @@ versioned independently.
 
 ## [Unreleased]
 
+### Changed
+
+- **sdk (breaking for `PerihelionClient.isRefundable` callers)**: the grace
+  argument is now `confirmationGraceSeconds`, in seconds, matching the on-chain
+  `confirmationGrace()` and `deadline`. Migrate by removing the `* 1_000`
+  conversion. Recommended API: `PerihelionEscrowClient.refundStatus` (or
+  `isRefundable`) for the decision; the mempool-based method is deprecated (#1108).
+
+### Deprecated
+
+- **sdk**: `PerihelionClient.isRefundable(record, grace)` is deprecated. Use
+  `PerihelionEscrowClient.refundStatus(intentHash)` (#1108).
+
 ### Fixed
 
 - Bound and periodically prune mempool per-client rate-limit buckets so one-shot source addresses cannot grow process memory indefinitely (#1111).
+- **relayer**: EVM delivery no longer calls `escrow.lzReceive` from the relayer EOA, which always reverted. Deliveries go through the endpoint, and `mockEndpointAddress`, `srcEid` and `srcSender` are required (#1099).
+- **relayer**: the EVM GUID fallback is now `keccak256(payload)` instead of the first 32 bytes of the payload (#1100).
+- **relayer**: Soroban deliveries pass a non-zero per-message GUID to `lz_receive_bytes` instead of 32 zero bytes (#1101).
 
 ### Added
 

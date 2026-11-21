@@ -43,7 +43,7 @@ If the Stellar-side settlement also fails:
 
 **Operational model**:
 - Best practice: Frontend/SDK detects an expired, unrefunded intent via `waitForSettlement` timeout or `record.status === "expired"`.
-- Calls `escrowClient.isRefundable(hash)` to check from chain state whether `cancelExpired` would succeed. The mempool-based `client.isRefundable(record, graceMs)` is only a hint: mempool statuses are best-effort and can be wrong or stale.
+- Calls `escrowClient.isRefundable(hash)` to check from chain state whether `cancelExpired` would succeed. The mempool-based `client.isRefundable(record, graceSeconds)` (deprecated) is only a hint: mempool statuses are best-effort and can be wrong or stale.
 - Presents a "recover funds" button to the user.
 - User clicks to call `escrow.cancelExpired(hash)` (gas cost ~100k units, paid by user).
 - Funds are refunded to `l.user`.
@@ -150,7 +150,7 @@ The two keeper paths treat an underfunded reserve differently. Operators must mo
      // Refundable from status.refundableAt (unix seconds)
    }
    ```
-   `client.isRefundable(record, confirmationGraceMs)` reads only the mempool record. Use it at most as a cheap pre-filter, never as the decision to call `cancelExpired`.
+   `client.isRefundable(record, confirmationGraceSeconds)` (deprecated) reads only the mempool record. Use it at most as a cheap pre-filter, never as the decision to call `cancelExpired`.
 
 3. **Provide recovery flow**:
    - Button: "Recover your funds"
