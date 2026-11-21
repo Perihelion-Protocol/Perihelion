@@ -19,6 +19,7 @@ import { SorobanDestinationDelivery } from "./soroban-delivery.js";
 import { SorobanSourceWatcher } from "./soroban-watcher.js";
 import { EvmDestinationDelivery } from "./evm-delivery.js";
 import { FileCheckpointStore } from "./file-checkpoint-store.js";
+import { checkpointNonceCounter } from "./checkpoint.js";
 import { HybridDeadLetterStore } from "./file-dead-letter-store.js";
 import { createLogger } from "@perihelion/node-common";
 import { HealthServer } from "./health-server.js";
@@ -81,12 +82,16 @@ async function main(): Promise<void> {
   // ---------------------------------------------------------------------------
   // EVM -> Stellar leg (Locked -> lz_receive on settlement)
   // ---------------------------------------------------------------------------
+  const evmToStellarCheckpoint = new FileCheckpointStore(config.checkpointFile);
+
   const evmWatcher = new EVMSourceWatcher({
     rpcUrl: config.evmRpcUrl,
     escrowAddress: config.escrowAddress,
     sourceEid: config.sourceEid,
     stellarEid: config.stellarEid,
     logger: log,
+    // Fallback nonces persist with the checkpoint so they never repeat across restarts.
+    nonceCounter: checkpointNonceCounter(evmToStellarCheckpoint, config.sourceEid, config.stellarEid),
   });
 
   const sorobanDelivery = new SorobanDestinationDelivery({
@@ -99,8 +104,6 @@ async function main(): Promise<void> {
     inclusionFee: inclusionFeePolicyFromEnv(process.env),
     logger: log,
   });
-
-  const evmToStellarCheckpoint = new FileCheckpointStore(config.checkpointFile);
 
   const evmToStellarDeadLetter = new HybridDeadLetterStore(config.deadLetterFile);
   await evmToStellarDeadLetter.load();
