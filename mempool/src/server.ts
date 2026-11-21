@@ -13,6 +13,7 @@ import {
 } from "@perihelion/sdk";
 import type { Hex, SignedIntent, Address, VerifyIntentOptions } from "@perihelion/sdk";
 import { IntentStore } from "./store.js";
+import { SlidingWindowRateLimitStore } from "./rate-limit.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
 
 const SIGNATURE_RE = /^0x[0-9a-fA-F]+$/;
@@ -167,7 +168,7 @@ export class MempoolServer {
   private verifyingContract: Address;
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
-  private rateLimitHits = new Map<string, number[]>();
+  private readonly rateLimitHits: SlidingWindowRateLimitStore;
   /** Timestamps of failed status-token attempts per client IP (#965). */
   private authFailureHits = new Map<string, number[]>();
   private rateLimitWindowMs: number;
@@ -206,6 +207,7 @@ export class MempoolServer {
       expiryGraceMs: opts.expiryGraceMs,
     });
     this.rateLimitWindowMs = opts.rateLimitWindowMs ?? DEFAULT_RATE_LIMIT_WINDOW_MS;
+    this.rateLimitHits = new SlidingWindowRateLimitStore(this.rateLimitWindowMs);
     this.writeRateLimit = opts.writeRateLimit ?? DEFAULT_WRITE_RATE_LIMIT;
     this.readRateLimit = opts.readRateLimit ?? DEFAULT_READ_RATE_LIMIT;
     // Warn on the absence of a status token, not on the bind host: a loopback
@@ -326,18 +328,12 @@ export class MempoolServer {
 
   private rateLimit(kind: "read" | "write", limit: number) {
     return (req: Request, res: Response, next: NextFunction): void => {
-      const now = Date.now();
       const key = `${kind}:${req.ip ?? "unknown"}`;
-      const hits = (this.rateLimitHits.get(key) ?? []).filter(
-        (t) => now - t < this.rateLimitWindowMs,
-      );
-      if (hits.length >= limit) {
+      if (!this.rateLimitHits.allow(key, limit)) {
         this.rateLimitRejections++;
         res.status(429).json({ error: "Too many requests" });
         return;
       }
-      hits.push(now);
-      this.rateLimitHits.set(key, hits);
       next();
     };
   }
@@ -609,6 +605,9 @@ export class MempoolServer {
       "# HELP mempool_rate_limit_rejections_total Total number of rate-limit rejections",
       "# TYPE mempool_rate_limit_rejections_total counter",
       `mempool_rate_limit_rejections_total ${this.rateLimitRejections}`,
+      "# HELP mempool_rate_limit_entries Current number of tracked client rate-limit buckets",
+      "# TYPE mempool_rate_limit_entries gauge",
+      `mempool_rate_limit_entries ${this.rateLimitHits.size}`,
     ];
 
     return lines.join("\n") + "\n";
@@ -632,6 +631,7 @@ export class MempoolServer {
     });
     this.sweepTimer = setInterval(() => {
       this.store.evictExpired();
+      this.rateLimitHits.prune();
     }, SWEEP_INTERVAL_MS);
     if (typeof this.sweepTimer.unref === "function") this.sweepTimer.unref();
     this.isReady = true;
