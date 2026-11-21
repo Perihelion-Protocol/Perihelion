@@ -479,3 +479,33 @@ test("multiple forged X-Forwarded-For entries do not bypass rate limiting (#739)
     await serverNoTrustProxy.stop();
   }
 });
+
+test("trusted proxy headers create separate per-client rate-limit buckets (#1112)", async () => {
+  const trustedProxyServer = new MempoolServer({
+    port: 3993,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    rateLimitWindowMs: 1000,
+    writeRateLimit: 1,
+    trustProxy: 1,
+  });
+  await trustedProxyServer.start();
+
+  const submitFrom = async (sourceAmount: string, forwardedFor: string) => {
+    const intent = { ...sampleIntent(), sourceAmount };
+    const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+    return fetch("http://localhost:3993/intents", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Forwarded-For": forwardedFor },
+      body: JSON.stringify({ intent, signature }),
+    });
+  };
+
+  try {
+    assert.equal((await submitFrom("10000000", "203.0.113.1")).status, 201);
+    assert.equal((await submitFrom("20000000", "203.0.113.2")).status, 201);
+    assert.equal((await submitFrom("30000000", "203.0.113.1")).status, 429);
+  } finally {
+    await trustedProxyServer.stop();
+  }
+});

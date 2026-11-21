@@ -35,6 +35,10 @@ versioned independently.
 
 ### Fixed
 
+- **mempool**: reverse-proxy trust is now explicitly configurable by hop count
+  or IP/CIDR allowlist, keeping per-client rate limits accurate without
+  trusting spoofed forwarding headers by default (#1112).
+
 - **relayer**: `loadConfig` now rejects fractional or out-of-range endpoint ids
   (`PERIHELION_SOURCE_EID`, `PERIHELION_STELLAR_EID` must be integers in
   1..4294967295), fractional `PERIHELION_START_BLOCK` and

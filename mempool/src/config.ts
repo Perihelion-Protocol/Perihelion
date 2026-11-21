@@ -3,6 +3,9 @@
 /** Mempool runtime configuration, loaded and validated from environment variables. */
 
 import type { Address } from "@perihelion/sdk";
+import { isIP } from "node:net";
+
+export type TrustProxy = number | string[];
 
 export interface MempoolConfig {
   /** TCP port the HTTP server binds. */
@@ -27,6 +30,8 @@ export interface MempoolConfig {
   readonly writeRateLimit?: number;
   /** Maximum reads per window per client, if configured. */
   readonly readRateLimit?: number;
+  /** Trusted reverse-proxy hop count or IP/CIDR list. Off when omitted. */
+  readonly trustProxy?: TrustProxy;
 }
 
 /**
@@ -38,6 +43,35 @@ export interface MempoolConfig {
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 const MAX_PORT = 65_535;
+
+const TRUST_PROXY_PRESETS = new Set(["loopback", "linklocal", "uniquelocal"]);
+
+function parseTrustProxy(raw: string | undefined, errors: string[]): TrustProxy | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = raw.trim();
+  if (/^\d+$/.test(value)) {
+    const hops = Number(value);
+    if (hops > 0 && Number.isSafeInteger(hops)) return hops;
+  }
+
+  const entries = value.split(",").map((entry) => entry.trim());
+  const validEntry = (entry: string): boolean => {
+    if (TRUST_PROXY_PRESETS.has(entry)) return true;
+    const [address = "", prefixRaw, extra] = entry.split("/");
+    const family = isIP(address);
+    if (family === 0 || extra !== undefined) return false;
+    if (prefixRaw === undefined) return true;
+    if (!/^\d+$/.test(prefixRaw)) return false;
+    const prefix = Number(prefixRaw);
+    return prefix <= (family === 4 ? 32 : 128);
+  };
+  if (entries.length > 0 && entries.every(validEntry)) return entries;
+
+  errors.push(
+    `PERIHELION_MEMPOOL_TRUST_PROXY must be a positive hop count or a comma-separated IP/CIDR list, got: "${raw}"`,
+  );
+  return undefined;
+}
 
 /**
  * Parse an optional positive-integer env var. Returns `undefined` when unset or
@@ -72,9 +106,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   const portRaw = env.PORT ?? "3000";
   const port = Number(portRaw);
   if (!Number.isInteger(port) || port < 1 || port > MAX_PORT) {
-    errors.push(
-      `PORT must be an integer between 1 and ${MAX_PORT}, got: "${portRaw}"`,
-    );
+    errors.push(`PORT must be an integer between 1 and ${MAX_PORT}, got: "${portRaw}"`);
   }
 
   // --- Bind host: mempool-specific name wins, then the shared names ---
@@ -90,9 +122,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   if (!chainIdRaw) {
     errors.push("PERIHELION_SOURCE_CHAIN_ID is required");
   } else if (!Number.isInteger(chainId) || chainId <= 0) {
-    errors.push(
-      `PERIHELION_SOURCE_CHAIN_ID must be a positive integer, got: "${chainIdRaw}"`,
-    );
+    errors.push(`PERIHELION_SOURCE_CHAIN_ID must be a positive integer, got: "${chainIdRaw}"`);
   }
 
   // --- Required: escrow address ---
@@ -116,31 +146,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
   }
 
   // --- Optional: store and rate-limit tuning ---
-  const maxStoreSize = optionalPositiveInt(
-    env,
-    "PERIHELION_MEMPOOL_MAX_STORE_SIZE",
-    errors,
-  );
-  const expiryGraceMs = optionalPositiveInt(
-    env,
-    "PERIHELION_MEMPOOL_EXPIRY_GRACE_MS",
-    errors,
-  );
+  const maxStoreSize = optionalPositiveInt(env, "PERIHELION_MEMPOOL_MAX_STORE_SIZE", errors);
+  const expiryGraceMs = optionalPositiveInt(env, "PERIHELION_MEMPOOL_EXPIRY_GRACE_MS", errors);
   const rateLimitWindowMs = optionalPositiveInt(
     env,
     "PERIHELION_MEMPOOL_RATE_LIMIT_WINDOW_MS",
     errors,
   );
-  const writeRateLimit = optionalPositiveInt(
-    env,
-    "PERIHELION_MEMPOOL_WRITE_RATE_LIMIT",
-    errors,
-  );
-  const readRateLimit = optionalPositiveInt(
-    env,
-    "PERIHELION_MEMPOOL_READ_RATE_LIMIT",
-    errors,
-  );
+  const writeRateLimit = optionalPositiveInt(env, "PERIHELION_MEMPOOL_WRITE_RATE_LIMIT", errors);
+  const readRateLimit = optionalPositiveInt(env, "PERIHELION_MEMPOOL_READ_RATE_LIMIT", errors);
+  const trustProxy = parseTrustProxy(env.PERIHELION_MEMPOOL_TRUST_PROXY, errors);
 
   if (errors.length > 0) {
     throw new Error(
@@ -160,5 +175,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MempoolConfig 
     rateLimitWindowMs,
     writeRateLimit,
     readRateLimit,
+    trustProxy,
   };
 }

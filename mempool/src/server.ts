@@ -14,6 +14,7 @@ import {
 import type { Hex, SignedIntent, Address, VerifyIntentOptions } from "@perihelion/sdk";
 import { IntentStore } from "./store.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
+import type { TrustProxy } from "./config.js";
 
 const SIGNATURE_RE = /^0x[0-9a-fA-F]+$/;
 
@@ -144,6 +145,8 @@ export interface MempoolServerOptions {
   writeRateLimit?: number;
   /** Per-IP request budget within the window for read routes (GET). Default 600. */
   readRateLimit?: number;
+  /** Trusted reverse-proxy hop count or IP/CIDR list. Defaults to off. */
+  trustProxy?: TrustProxy;
   /**
    * Optional viem `PublicClient` used to verify signatures from contract
    * wallets (ERC-1271). When omitted, contract-wallet intents are rejected
@@ -183,7 +186,9 @@ export class MempoolServer {
 
   constructor(opts: MempoolServerOptions) {
     if (opts.chainId === undefined || opts.chainId === null || Number.isNaN(opts.chainId)) {
-      throw new Error("MempoolServer requires a chainId — omitting it defaults signature verification to no real domain.");
+      throw new Error(
+        "MempoolServer requires a chainId — omitting it defaults signature verification to no real domain.",
+      );
     }
     if (!opts.verifyingContract || opts.verifyingContract.toLowerCase() === ZERO_ADDRESS) {
       throw new Error(
@@ -206,6 +211,9 @@ export class MempoolServer {
     this.rateLimitWindowMs = opts.rateLimitWindowMs ?? DEFAULT_RATE_LIMIT_WINDOW_MS;
     this.writeRateLimit = opts.writeRateLimit ?? DEFAULT_WRITE_RATE_LIMIT;
     this.readRateLimit = opts.readRateLimit ?? DEFAULT_READ_RATE_LIMIT;
+    if (opts.trustProxy !== undefined) {
+      this.app.set("trust proxy", opts.trustProxy);
+    }
     // Warn on the absence of a status token, not on the bind host: a loopback
     // bind behind a reverse proxy is still reachable by remote callers, and a
     // configured token is authentication whatever the host (#966).
@@ -245,7 +253,11 @@ export class MempoolServer {
       res.status(200).send(this.getPrometheusMetrics());
     });
     this.app.get("/info", read, this.handleInfo.bind(this));
-    this.app.post("/intents", write, (req: Request, res: Response) => void this.handleSubmitIntent(req, res));
+    this.app.post(
+      "/intents",
+      write,
+      (req: Request, res: Response) => void this.handleSubmitIntent(req, res),
+    );
     this.app.get("/intents/:hash", read, this.handleGetIntent.bind(this));
     this.app.get("/intents", read, this.handleListIntents.bind(this));
     this.app.patch("/intents/:hash/status", write, this.handleUpdateStatus.bind(this));
@@ -260,39 +272,35 @@ export class MempoolServer {
     // the server's JSON error shape. Registered after the routes so it catches
     // errors forwarded from any middleware above. Without it, Express's default
     // handler replies with HTML (and, outside production, a stack trace).
-    this.app.use(
-      (err: unknown, _req: Request, res: Response, next: NextFunction): void => {
-        if (res.headersSent) {
-          next(err);
-          return;
-        }
-        const e = (err ?? {}) as { type?: string; status?: number; statusCode?: number };
-        if (e.type === "entity.too.large") {
-          res
-            .status(413)
-            .json({ error: `Request body exceeds the ${MAX_BODY_LABEL} limit` });
-          return;
-        }
-        if (
-          e.type === "entity.parse.failed" ||
-          e.type === "encoding.unsupported" ||
-          e.type === "charset.unsupported" ||
-          e.type === "request.aborted"
-        ) {
-          res.status(400).json({ error: "Malformed JSON request body" });
-          return;
-        }
-        const status = e.status ?? e.statusCode;
-        if (typeof status === "number" && status >= 400 && status < 500) {
-          res.status(status).json({ error: "Bad request" });
-          return;
-        }
-        this.logger.error("[mempool] unhandled error", {
-          err: err instanceof Error ? (err.stack ?? err.message) : String(err),
-        });
-        res.status(500).json({ error: "Internal server error" });
-      },
-    );
+    this.app.use((err: unknown, _req: Request, res: Response, next: NextFunction): void => {
+      if (res.headersSent) {
+        next(err);
+        return;
+      }
+      const e = (err ?? {}) as { type?: string; status?: number; statusCode?: number };
+      if (e.type === "entity.too.large") {
+        res.status(413).json({ error: `Request body exceeds the ${MAX_BODY_LABEL} limit` });
+        return;
+      }
+      if (
+        e.type === "entity.parse.failed" ||
+        e.type === "encoding.unsupported" ||
+        e.type === "charset.unsupported" ||
+        e.type === "request.aborted"
+      ) {
+        res.status(400).json({ error: "Malformed JSON request body" });
+        return;
+      }
+      const status = e.status ?? e.statusCode;
+      if (typeof status === "number" && status >= 400 && status < 500) {
+        res.status(status).json({ error: "Bad request" });
+        return;
+      }
+      this.logger.error("[mempool] unhandled error", {
+        err: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      });
+      res.status(500).json({ error: "Internal server error" });
+    });
   }
 
   /**
