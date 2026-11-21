@@ -247,30 +247,17 @@ export class EvmDestinationDelivery implements DestinationDelivery {
   }
 
   /**
-   * Encodes the settlement payload the escrow expects for the given message.
+   * Returns the message bytes the escrow's `lzReceive` expects.
    *
-   * The encoding is a simple, stable layout:
-   *   bytes32 guid | uint8 messageType | bytes body
-   * where `body` is the message's already-encoded payload.
+   * The payload is delivered unchanged: it already carries the protocol
+   * version byte and message type (`version(0x01) | type | body`), and the
+   * escrow rejects anything else with `UnknownVersion` or `MalformedPayload`.
+   * The GUID travels separately as the `lzReceive` `_guid` argument.
    */
   private encodePayload(message: Message): Hex {
-    const guid = this.guidFor(message).slice(2);
-    const typeByte = this.typeCode(message.type).toString(16).padStart(2, "0");
-    const body = message.payload.startsWith("0x")
-      ? message.payload.slice(2)
-      : message.payload;
-    return `0x${guid}${typeByte}${body}` as Hex;
-  }
-
-  private typeCode(type: MessageType): number {
-    switch (type) {
-      case "FillConfirmed":
-        return 1;
-      case "CancelIntent":
-        return 2;
-      default:
-        throw new Error(`Unsupported outbound message type: ${type}`);
-    }
+    return (message.payload.startsWith("0x")
+      ? message.payload
+      : `0x${message.payload}`) as Hex;
   }
 
   /**
