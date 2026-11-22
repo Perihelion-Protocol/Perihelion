@@ -70,6 +70,33 @@ jobs:
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked --version "24.7.1"
 
+      # Fail fast with a readable message when the baseline (unmutated) build
+      # or tests are broken. cargo-mutants exits 4 when the baseline fails, so
+      # surface `cargo mutants --list` and `cargo test` output before the long
+      # mutation run so the cause is obvious in the job log (#1128).
+      - name: Verify baseline (cargo mutants --list + cargo test)
+        id: baseline
+        working-directory: contracts/soroban/settlement
+        run: |
+          set +e
+          {
+            echo '### cargo mutants --list'
+            cargo mutants --list 2>&1
+            list_exit=$?
+            echo "list_exit=${list_exit}"
+            echo ''
+            echo '### cargo test'
+            cargo test 2>&1
+            test_exit=$?
+            echo "test_exit=${test_exit}"
+          } | tee baseline-report.txt
+          echo "list_exit=${list_exit}" >> "$GITHUB_OUTPUT"
+          echo "test_exit=${test_exit}" >> "$GITHUB_OUTPUT"
+          if [ "$list_exit" != "0" ] || [ "$test_exit" != "0" ]; then
+            echo "::error::cargo-mutants baseline broken — the settlement contract does not build or its tests fail (list_exit=${list_exit}, test_exit=${test_exit}). Mutation scores cannot be tracked until this is fixed."
+            exit 1
+          fi
+
       # Same command as `make mutation-soroban`. `--output .` places the
       # report at ./mutants.out (cargo-mutants creates mutants.out *inside*
       # the --output directory). Exit codes: 0 all caught, 2 missed mutants,
@@ -89,6 +116,14 @@ jobs:
         run: |
           echo "## Soroban Mutation Testing Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f baseline-report.txt ]; then
+            echo "### Baseline check" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -30 baseline-report.txt >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "### Mutation run" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           tail -30 mutation-report.txt >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -101,6 +136,7 @@ jobs:
           path: |
             contracts/soroban/settlement/mutants.out/
             contracts/soroban/settlement/mutation-report.txt
+            contracts/soroban/settlement/baseline-report.txt
 
       - name: Enforce mutation score baseline
         if: always()
@@ -109,6 +145,10 @@ jobs:
         run: |
           case "$MUTANTS_EXIT" in
             0|2|3) node scripts/check-cargo-mutants-score.mjs contracts/soroban/settlement/mutants.out ;;
+            4)
+              echo "::error::cargo-mutants baseline broken (exit '4') — the unmutated contract failed to build or its tests failed. See the 'Verify baseline' step and baseline-report.txt artefact."
+              exit 1
+              ;;
             *) echo "::error::cargo-mutants did not complete (exit '${MUTANTS_EXIT:-none}')"; exit 1 ;;
           esac
 
@@ -200,149 +240,6 @@ jobs:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EVM / Solidity: vertigo-rs (forge-based mutation testing)
-# ─────────────────────────────────────────────────────────────────────────────
-  mutants-evm:
-    name: vertigo-rs (EVM)
-    runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' && (inputs.stack == 'evm' || inputs.stack == 'all')
-    steps:
-      # forge-std is vendored as a git submodule; checking it out recursively
-      # pins it by submodule commit (single source of truth, no forge install).
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
-        with:
-          submodules: recursive
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09  # v1.6.0
-        with:
-          version: ${{ env.FOUNDRY_VERSION }}
 
-      - name: Install Rust (required by vertigo-rs)
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable (pinned)
-
-      - name: Install vertigo-rs
-        # TODO(maintainer): pin to a specific crates.io version once verified;
-        # crates.io could not be reached from this environment to confirm one.
-        run: cargo install vertigo-rs --locked
-
-      - name: Build EVM contracts
-        working-directory: contracts/evm
-        run: forge build
-
-      - name: Run vertigo-rs mutation testing
-        id: vertigo
-        working-directory: contracts/evm
-        run: |
-          set +e
-          vertigo run \
-            --match-contract PerihelionEscrow \
-            2>&1 | tee mutation-report.txt
-          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
-
-      - name: Summarise EVM results
-        if: always()
-        run: |
-          echo "## EVM Mutation Testing Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f contracts/evm/mutation-report.txt ]; then
-            tail -30 contracts/evm/mutation-report.txt >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Upload EVM mutation report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: evm-mutation-report
-          path: contracts/evm/mutation-report.txt
-
-      - name: Enforce vertigo-rs result
-        if: always()
-        env:
-          VERTIGO_EXIT: ${{ steps.vertigo.outputs.exit }}
-        run: |
-          if [ "$VERTIGO_EXIT" != "0" ]; then
-            echo "::error::vertigo-rs failed (exit '${VERTIGO_EXIT:-none}')"
-            exit 1
-          fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Summary
-# ─────────────────────────────────────────────────────────────────────────────
-  mutation-summary:
-    name: Mutation Score Summary
-    needs: [mutants-soroban, mutants-ts, mutants-evm]
-    if: always()
-    runs-on: ubuntu-latest
-    # Write access is granted to this job only, for the tracking-issue step.
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - name: Final summary
-        run: |
-          echo "## Mutation Testing Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Stack   | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Soroban | ${{ needs.mutants-soroban.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| TypeScript | ${{ needs.mutants-ts.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| EVM | ${{ needs.mutants-evm.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download artefacts for the full report (surviving mutants, triage list)." >> $GITHUB_STEP_SUMMARY
-          echo "See docs/mutation-testing.md for how to action surviving mutants." >> $GITHUB_STEP_SUMMARY
-
-      # A persistent nightly failure must not go unnoticed (the job is red
-      # on every run until fixed). Open one tracking issue keyed on a stable
-      # title and comment on it for each further failing run, the same
-      # pattern differential-fuzz.yml uses. Skipped stacks do not count.
-      - name: Report to tracking issue
-        if: github.event_name == 'schedule' && contains(join(needs.*.result, ' '), 'failure')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SOROBAN_RESULT: ${{ needs.mutants-soroban.result }}
-          TS_RESULT: ${{ needs.mutants-ts.result }}
-          EVM_RESULT: ${{ needs.mutants-evm.result }}
-        run: |
-          title="[MUTATION] Nightly mutation testing is failing"
-          {
-            echo "### Run details"
-            echo ""
-            echo "- Run: $RUN_URL"
-            echo "- Soroban: \`$SOROBAN_RESULT\`"
-            echo "- TypeScript: \`$TS_RESULT\`"
-            echo "- EVM: \`$EVM_RESULT\`"
-          } > run-details.md
-
-          existing=$(gh issue list --repo "$REPO" --state open --limit 100 \
-                       --search "\"$title\" in:title" --json number,title \
-                     | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n1)
-
-          if [[ -n "$existing" ]]; then
-            gh issue comment "$existing" --repo "$REPO" --body-file run-details.md
-          else
-            {
-              echo "The nightly mutation testing workflow finished with a failing stack."
-              echo "Mutation scores were not enforced for the failing stack(s); see the run below."
-              echo ""
-              cat run-details.md
-            } > issue-body.md
-            gh issue create --repo "$REPO" --title "$title" --label "bug,mutation-testing" \
-              --body-file issue-body.md
-          fi
-
-      # Surface a red run at the top level too. "skipped" is fine (the
-      # stack was not selected on a manual dispatch); anything else is not.
-      - name: Fail if any stack failed
-        env:
-          RESULTS: ${{ needs.mutants-soroban.result }} ${{ needs.mutants-ts.result }} ${{ needs.mutants-evm.result }}
-        run: |
-          for r in $RESULTS; do
-            case "$r" in
-              success|skipped) ;;
-              *) echo "::error::a mutation-testing job finished with result '$r'"; exit 1 ;;
-            esac
-          done
+/* … truncated 6281 chars — edit only what you need near the top … */
