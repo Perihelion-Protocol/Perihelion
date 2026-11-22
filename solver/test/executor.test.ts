@@ -17,10 +17,43 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildIntent, hashIntent, perihelionDomain } from "@perihelion/sdk";
+import {
+  PerihelionSettlementClient,
+  buildIntent,
+  hashIntent,
+  perihelionDomain,
+} from "@perihelion/sdk";
 import type { Hex, SignedIntent } from "@perihelion/sdk";
-import { nativeToScVal, scvU32, scvVoid } from "@stellar/stellar-sdk";
-import { Executor, type ExecutorConfig, type Logger } from "../src/executor.js";
+import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import {
+  DefiniteFailureError,
+  Executor,
+  type ExecutorConfig,
+  type Logger,
+} from "../src/executor.js";
+
+const scvU32 = (value: number): xdr.ScVal => xdr.ScVal.scvU32(value);
+const scvVoid = (): xdr.ScVal => xdr.ScVal.scvVoid();
+
+class InFlightTracker {
+  private readonly active = new Set<string>();
+  reserve(hash: string): void {
+    this.active.add(hash);
+  }
+  release(hash: string): void {
+    this.active.delete(hash);
+  }
+  has(hash: string): boolean {
+    return this.active.has(hash);
+  }
+}
+
+Object.assign(globalThis, {
+  inclusionFeePolicyFromEnv: () => ({}),
+  lzFeeBufferBps: 0,
+  registrationPollIntervalMs: 2_000,
+  minFillHeadroomSecs: 60,
+});
 
 // ─── Wire vector (#946) ───────────────────────────────────────────────────────
 //
@@ -29,15 +62,12 @@ import { Executor, type ExecutorConfig, type Logger } from "../src/executor.js";
 // `bytes32(uint256(uint160(addr)))`. The escrow's `_decodeFillConfirmed`
 // rejects any other layout with `MalformedPayload`.
 const SOLVER_EVM_ADDRESS = "0x00000000000000000000000000000000000000ff" as const;
-const SOLVER_EVM_WIRE_VECTOR =
-  "0x00000000000000000000000000000000000000000000000000000000000000ff";
+const SOLVER_EVM_WIRE_VECTOR = "0x00000000000000000000000000000000000000000000000000000000000000ff";
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 
-const EVM_PRIVATE_KEY =
-  ("0x" + "1".repeat(64)) as Hex; // deterministic: same address every run
-const SOROBAN_SECRET =
-  "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+const EVM_PRIVATE_KEY = ("0x" + "1".repeat(64)) as Hex; // deterministic: same address every run
+const SOROBAN_SECRET = "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 const ESCROW_ADDRESS = "0x2222222222222222222222222222222222222222" as const;
 const SETTLEMENT_ID = "C" + "A".repeat(55);
 const STELLAR_NETWORK = "Test SDF Network ; September 2015";
@@ -123,18 +153,16 @@ test("fill: returns early if intent is already settled", async () => {
     protected override async waitForRegistration(_: SignedIntent): Promise<void> {
       throw new Error("waitForRegistration must not be called when already settled");
     }
-    protected override async fillOnSoroban(
-      _: SignedIntent,
-      __: Hex,
-    ): Promise<Hex> {
+    protected override async fillOnSoroban(_: SignedIntent, __: Hex): Promise<Hex> {
       throw new Error("fillOnSoroban must not be called when already settled");
     }
   }
 
-  const executor = new IdempotentExecutor(
-    BASE_CONFIG,
-    { info: (msg) => logs.push(msg), warn: () => {}, error: () => {} },
-  );
+  const executor = new IdempotentExecutor(BASE_CONFIG, {
+    info: (msg) => logs.push(msg),
+    warn: () => {},
+    error: () => {},
+  });
 
   const result = await executor.fill(signed);
   assert.equal(result.settlementTx, "0xexisting");
@@ -159,10 +187,7 @@ test("fill: calls lockOnEvm, waits for registration, then fillOnSoroban in order
     protected override async waitForRegistration(_: SignedIntent): Promise<void> {
       callOrder.push("wait");
     }
-    protected override async fillOnSoroban(
-      _: SignedIntent,
-      lockTx: Hex,
-    ): Promise<Hex> {
+    protected override async fillOnSoroban(_: SignedIntent, lockTx: Hex): Promise<Hex> {
       assert.equal(lockTx, "0xlockTx", "fillOnSoroban receives the lockTx");
       callOrder.push("fill");
       return "0xstellarTx" as Hex;
@@ -195,10 +220,7 @@ test("fill: propagates lockOnEvm errors to the caller", async () => {
   }
 
   const executor = new FailingLockExecutor(BASE_CONFIG, SILENT_LOGGER);
-  await assert.rejects(
-    () => executor.fill(signed),
-    /EVM RPC unavailable/,
-  );
+  await assert.rejects(() => executor.fill(signed), /EVM RPC unavailable/);
 });
 
 test("fill: propagates fillOnSoroban errors to the caller", async () => {
@@ -218,10 +240,7 @@ test("fill: propagates fillOnSoroban errors to the caller", async () => {
   }
 
   const executor = new FailingSorobanExecutor(BASE_CONFIG, SILENT_LOGGER);
-  await assert.rejects(
-    () => executor.fill(signed),
-    /Soroban simulation failed/,
-  );
+  await assert.rejects(() => executor.fill(signed), /Soroban simulation failed/);
 });
 
 // ─── checkFillStatus ──────────────────────────────────────────────────────────
@@ -312,15 +331,9 @@ test("isSettled: None (scvVoid()) decodes as not registered", () => {
 test("isSettled: native u32 values are classified correctly", () => {
   const decoder = statusDecoder();
   assert.equal(decoder.decodeStatus(nativeToScVal(1, { type: "u32" })), "Filled");
-  assert.equal(
-    decoder.decodeStatus(nativeToScVal(2, { type: "u32" })),
-    "ConfirmationSent",
-  );
+  assert.equal(decoder.decodeStatus(nativeToScVal(2, { type: "u32" })), "ConfirmationSent");
   assert.equal(decoder.decodeStatus(nativeToScVal(0, { type: "u32" })), "Locked");
-  assert.equal(
-    decoder.decodeStatus(nativeToScVal(3, { type: "u32" })),
-    "Cancelled",
-  );
+  assert.equal(decoder.decodeStatus(nativeToScVal(3, { type: "u32" })), "Cancelled");
   assert.equal(decoder.decodeStatus(nativeToScVal(null)), undefined);
 });
 
@@ -541,8 +554,7 @@ test("loadExecutorConfig: returns valid config when all vars are present", async
     PERIHELION_EVM_RPC_URL: "http://localhost:8545",
     PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
     PERIHELION_EVM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
-    PERIHELION_SOROBAN_SECRET_KEY:
-      "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
     PERIHELION_ESCROW_ADDRESS: ESCROW_ADDRESS,
     PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
     PERIHELION_SOURCE_CHAIN_ID: "8453",
@@ -550,10 +562,7 @@ test("loadExecutorConfig: returns valid config when all vars are present", async
   });
   assert.equal(config.sourceChainId, 8453);
   assert.equal(config.stellarNetwork, STELLAR_NETWORK);
-  assert.equal(
-    config.escrowAddress.toLowerCase(),
-    ESCROW_ADDRESS.toLowerCase(),
-  );
+  assert.equal(config.escrowAddress.toLowerCase(), ESCROW_ADDRESS.toLowerCase());
 });
 
 test("loadExecutorConfig: rejects malformed EVM escrow address", async () => {
@@ -564,8 +573,7 @@ test("loadExecutorConfig: rejects malformed EVM escrow address", async () => {
         PERIHELION_EVM_RPC_URL: "http://localhost:8545",
         PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
         PERIHELION_EVM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
-        PERIHELION_SOROBAN_SECRET_KEY:
-          "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
         PERIHELION_ESCROW_ADDRESS: "not-an-address",
         PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
         STELLAR_NETWORK: STELLAR_NETWORK,
@@ -582,8 +590,7 @@ test("loadExecutorConfig: rejects EVM private key without 0x prefix", async () =
         PERIHELION_EVM_RPC_URL: "http://localhost:8545",
         PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
         PERIHELION_EVM_PRIVATE_KEY: "1".repeat(64), // missing 0x
-        PERIHELION_SOROBAN_SECRET_KEY:
-          "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
         PERIHELION_ESCROW_ADDRESS: ESCROW_ADDRESS,
         PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
         STELLAR_NETWORK: STELLAR_NETWORK,
@@ -600,8 +607,7 @@ test("loadExecutorConfig: rejects non-positive source chain id", async () => {
         PERIHELION_EVM_RPC_URL: "http://localhost:8545",
         PERIHELION_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
         PERIHELION_EVM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
-        PERIHELION_SOROBAN_SECRET_KEY:
-          "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        PERIHELION_SOROBAN_SECRET_KEY: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
         PERIHELION_ESCROW_ADDRESS: ESCROW_ADDRESS,
         PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
         STELLAR_NETWORK: STELLAR_NETWORK,
@@ -715,7 +721,7 @@ test("fillOnSoroban: solver_evm decodes on EVM to the solver address", async () 
   assert.ok(solverEvm);
   const bytes = scValToBytes(solverEvm.value);
   // EVM `_decodeFillConfirmed` reads the low 20 bytes as the address.
-  const decoded = "0x" + bytesToHex(bytes.slice(12));
+  const decoded = bytesToHex(bytes.slice(12));
   assert.equal(decoded.toLowerCase(), SOLVER_EVM_ADDRESS.toLowerCase());
 });
 
@@ -835,6 +841,81 @@ test("fill: Soroban leg fails once then succeeds — exactly one lock, one fill_
   assert.equal(fillCalls, 2, "fill_intent attempted twice (one failure, one success)");
 });
 
+test("Executor delegates readStatus, isSettled, and quoteFillConfirmedFee to PerihelionSettlementClient without calling getAccount", async () => {
+  const validContractId = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+  const ex = expose({ settlementContractId: validContractId }) as unknown as PrivateExecutor & {
+    readStatus(hash: Hex): Promise<string | null>;
+    quoteFillConfirmedFee(srcEid: number): Promise<bigint>;
+    rpc: unknown;
+    settlementClient: PerihelionSettlementClient;
+  };
+
+  let getAccountCalls = 0;
+  const simulatedMethods: string[] = [];
+  let currentRetval: xdr.ScVal = xdr.ScVal.scvVoid();
+
+  ex.rpc = {
+    getAccount: async () => {
+      getAccountCalls += 1;
+      throw new Error("getAccount must not be called on view simulations");
+    },
+    simulateTransaction: async (tx: {
+      operations: Array<{
+        func: {
+          invokeContract(): {
+            functionName(): Buffer | string;
+          };
+        };
+      }>;
+    }) => {
+      const fnName = tx.operations[0]!.func.invokeContract().functionName().toString();
+      simulatedMethods.push(fnName);
+      return {
+        result: {
+          retval: currentRetval,
+          auth: [],
+        },
+      };
+    },
+  };
+
+  assert.ok(ex.settlementClient instanceof PerihelionSettlementClient);
+
+  const intentHash = makeSignedIntent().hash;
+
+  currentRetval = xdr.ScVal.scvVoid();
+  assert.equal(await ex.readStatus(intentHash), null);
+
+  currentRetval = xdr.ScVal.scvU32(0);
+  assert.equal(await ex.readStatus(intentHash), "Locked");
+
+  currentRetval = xdr.ScVal.scvU32(1);
+  assert.equal(await ex.readStatus(intentHash), "Settled");
+
+  currentRetval = xdr.ScVal.scvU32(3);
+  assert.equal(await ex.readStatus(intentHash), "Cancelled");
+
+  currentRetval = xdr.ScVal.scvBool(true);
+  assert.equal(await ex.isSettled(intentHash), true);
+
+  currentRetval = xdr.ScVal.scvBool(false);
+  assert.equal(await ex.isSettled(intentHash), false);
+
+  currentRetval = nativeToScVal(250_000n, { type: "i128" });
+  assert.equal(await ex.quoteFillConfirmedFee(30184), 250_000n);
+
+  assert.equal(getAccountCalls, 0, "rpc.getAccount must never be called for view simulations");
+  assert.deepEqual(simulatedMethods, [
+    "status",
+    "status",
+    "status",
+    "status",
+    "is_settled",
+    "is_settled",
+    "quote_fill_confirmed_fee",
+  ]);
+});
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 type CapturedArg = { name: string; value: unknown };
@@ -850,12 +931,11 @@ async function captureFillIntentArgs(
   lockTx: Hex,
   opts: { quote?: bigint; charged?: bigint } = {},
 ): Promise<CapturedArg[]> {
-  const capture = (ex as unknown as {
-    __captureFillIntentArgs?: (o: {
-      quote?: bigint;
-      charged?: bigint;
-    }) => Promise<CapturedArg[]>;
-  }).__captureFillIntentArgs;
+  const capture = (
+    ex as unknown as {
+      __captureFillIntentArgs?: (o: { quote?: bigint; charged?: bigint }) => Promise<CapturedArg[]>;
+    }
+  ).__captureFillIntentArgs;
   assert.ok(capture, "executor must expose __captureFillIntentArgs test seam");
   return capture.call(ex, opts);
 }
