@@ -66,6 +66,19 @@ they moved into `mod events` but their topics are unchanged.
 Both names exceed 9 characters and are built with `Symbol::new` via `mod
 events`.
 
+## Payload changes (issues #1116, #1117)
+
+`initialized` now carries all three constructor arguments: `admin`,
+`endpoint` and `native_token`. Deployment tooling can confirm the native SAC
+address from the event instead of trusting the deploy transaction's calldata.
+
+The `native` destination asset no longer resolves through an admin-settable
+`NativeToken` storage entry; it is derived on-chain from the network's native
+Stellar Asset Contract, so `set_native_token` and the `native_token_set` event
+have been removed. Indexers that subscribed to `native_token_set` should drop
+that subscription; the `native_token` value is now observable only via
+`initialized`.
+
 ## Payload changes (issue #1066)
 
 `confirmation_sent` and `cancelled` now include the **actual** LayerZero fee

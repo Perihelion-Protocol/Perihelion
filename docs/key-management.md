@@ -38,7 +38,7 @@ keys for each deployment environment.
 | **Timelock owners** | EVM | M-of-N multisig (hardware wallets) | Governance: `setPeer`, `setGuardian`, `setConfirmationGrace`, `setPaused`, `setDelegate`, ownership rotation | Low (≤1 tx per week typically) | Critical |
 | **LayerZero delegate** | EVM | `PerihelionTimelock` (set via `setDelegate`; was the deployer EOA until handed over) | Controls the escrow's LayerZero security config: DVN set, send/receive libraries, and skip/clear/nilify of inbound packets | Very low (only on DVN or library changes) | Critical |
 | **Guardian** | EVM | Hot key or 1-of-N Safe | Emergency pause: `pause()` | Very low (only during incidents) | High |
-| **Soroban admin** | Stellar | Multisig account | Settlement contract config: `propose_endpoint`/`confirm_endpoint`, `set_peer`, `set_admin`, `set_paused` | Low (≤1 tx per month typically) | Critical |
+| **Soroban admin** | Stellar | Multisig account | Settlement contract config: `propose_endpoint`/`confirm_endpoint`, `propose_peer`/`confirm_peer`, `set_admin`/`accept_admin`, `set_paused` | Low (≤1 tx per month typically) | Critical |
 | **Relayer signing key** | Off-chain | Relayer operator | Signs LayerZero messages for replay guards | Medium (1+ tx per transfer) | High |
 | **Relayer RPC key** | Off-chain | Relayer operator | Authenticates RPC queries and relay submissions | Medium | Medium |
 | **Solver signing key** | Off-chain | Solver operator | Signs fill instructions on Stellar | Medium (1+ tx per fill) | High |
@@ -378,15 +378,81 @@ The admin set is stored on-chain in the `Perihelion::admin` field.
 
 ### 3.3 Operational Use
 
-**Admin action (e.g., peer rotation):**
+**Peer registration and rotation (delayed, two-step):**
 
-1. **Prepare the transaction:**
+Peer changes are never instant. The admin must propose, wait out the
+bounded delay, then confirm. There is no `set_peer` entry point.
+
+1. **Propose:**
    ```bash
-   stellar contract invoke --id $SETTLEMENT -- set_peer \
+   stellar contract invoke --id $SETTLEMENT -- propose_peer \
      --eid $EVM_EID --peer $ESCROW_ADDRESS \
-     --source-account $ADMIN_ACCOUNT \
-     --simulate
+     --delay $DELAY_SECONDS \
+     --source-account $ADMIN_ACCOUNT
    ```
+   - Rejected with `PendingPeerChangeExists` if a proposal is already pending
+     for that eid (cancel or wait it out first)
+   - Emits `peer_change_proposed`; the delay is stored with the proposal
+
+2. **Wait** the stored delay (monitor the `peer_change_proposed` event and the
+   governance calendar).
+
+3. **Confirm:**
+   ```bash
+   stellar contract invoke --id $SETTLEMENT -- confirm_peer \
+     --eid $EVM_EID \
+     --source-account $ADMIN_ACCOUNT
+   ```
+   - Re-checks the elapsed delay
+   - Emits `peer_set` on success
+
+**Bootstrap of a new eid (delay 0):**
+
+For a fresh deployment or a brand-new corridor, `Peer(eid)` has never been
+set and no intents have ever been registered for that eid. In that case only,
+`propose_peer` accepts `--delay 0`, so the initial peer can be registered in a
+single ledger:
+
+```bash
+stellar contract invoke --id $SETTLEMENT -- propose_peer \
+  --eid $EVM_EID --peer $ESCROW_ADDRESS \
+  --delay 0 \
+  --source-account $ADMIN_ACCOUNT
+stellar contract invoke --id $SETTLEMENT -- confirm_peer \
+  --eid $EVM_EID \
+  --source-account $ADMIN_ACCOUNT
+```
+
+The bootstrap path emits the same `peer_set` event as a delayed confirmation.
+It is available **only** while `Peer(eid)` is unset and no intents have been
+registered for that eid. Every subsequent change (rotation) requires
+`delay >= MIN_PEER_CHANGE_DELAY` (86 400 s, one day); a `delay` below the
+minimum is rejected with `PeerChangeDelayTooShort`. Do not work around the
+rotation delay by keeping a hot admin or redeploying the contract.
+
+**Admin rotation (delayed, two-step):**
+
+Admin changes are also two-step and enforce the admin ≠ endpoint invariant
+(#18):
+
+1. **Propose:**
+   ```bash
+   stellar contract invoke --id $SETTLEMENT -- set_admin \
+     --new_admin $NEW_ADMIN \
+     --source-account $ADMIN_ACCOUNT
+   ```
+   - Rejected with `AdminEndpointCollision` if `new_admin == endpoint`
+   - Emits `admin_change_proposed`
+
+2. **Accept** (authorised by the new admin):
+   ```bash
+   stellar contract invoke --id $SETTLEMENT -- accept_admin \
+     --source-account $NEW_ADMIN
+   ```
+   - Re-checks `AdminEndpointCollision` in case the endpoint changed in
+     between; the invariant holds for every sequence of admin and endpoint
+     operations
+   - Emits `admin_set` on success
 
 **Endpoint rotation (delayed, two-step):**
 
@@ -430,9 +496,16 @@ bounded delay, then confirm:
 ### 3.4 Monitoring
 
 **On-chain (Soroban events):**
-- Subscribe to `Perihelion::set_peer` events
+- Subscribe to `Perihelion::peer_change_proposed` events: any proposal is a
+  security-sensitive config change and must be matched against the governance
+  calendar. A `delay` of 0 is only valid for the first peer of a new eid; a
+  zero-delay proposal for an eid that already has a peer (or has seen intents)
+  is rejected on-chain and indicates confusion or an attempt to bypass the
+  rotation delay.
+- Subscribe to `Perihelion::peer_set` events
 - Alert on unexpected peer changes
-- Subscribe to `Perihelion::set_admin` events
+- Subscribe to `Perihelion::admin_change_proposed` and `Perihelion::admin_set`
+  events; verify `admin != endpoint` after every change
 - Subscribe to `Perihelion::endpoint_change_proposed` events: any proposal is a
   security-sensitive config change and must be matched against the governance
   calendar. A second proposal while one is pending is rejected on-chain
@@ -451,18 +524,25 @@ bounded delay, then confirm:
 
 **Planned rotation:**
 - Recommended cadence: Every 12 months
-- Process: `set_admin(new_admin)` via existing admin multisig
-  - Immediate (no timelock on Stellar)
-  - Old admin loses all powers after execution
+- Process: `set_admin(new_admin)` via existing admin multisig, then the new
+  admin calls `accept_admin` (see §3.3)
+  - `set_admin` rejects `new_admin == endpoint` (`AdminEndpointCollision`) and
+    `accept_admin` re-checks the invariant, so no sequence of admin and
+    endpoint operations can make the two equal
+  - Old admin loses all powers after the new admin accepts
 - Endpoint rotation is separate and always delayed: use
   `propose_endpoint` → wait → `confirm_endpoint` (see §3.3). There is no
   instant endpoint setter; the delay is the only protection on this
   security-sensitive change.
+- Peer rotation is likewise delayed: use `propose_peer` → wait →
+  `confirm_peer`. Only the first peer for a new eid may be registered with
+  `delay 0` (bootstrap path, see §3.3).
 
 **Emergency rotation (suspected compromise):**
 
 **Signs of compromise:**
-- Unexpected `set_peer` invocations
+- Unexpected `peer_change_proposed` or `peer_set` events
+- Unexpected `admin_change_proposed` or `admin_set` events
 - Unexpected `endpoint_change_proposed` or `endpoint_set` events
 - Signer key theft or device compromise
 - Unauthorized Stellar transactions from admin account
@@ -478,19 +558,25 @@ bounded delay, then confirm:
 
 2. **Propose new admin:**
    - Current admin (with enough uncompromised signers) proposes `set_admin(new_multisig_address)`
+     (rejected if `new_multisig_address == endpoint`)
    - New multisig should have a fresh set of signers on new keys
 
 3. **Sign & submit:**
    - Uncompromised signers sign the transaction
+   - The new admin signs `accept_admin` (re-checks `AdminEndpointCollision`)
    - Submit immediately (no delay)
 
 4. **Verify:**
-   - Confirm on-chain: `Perihelion::admin == new_address`
+   - Confirm on-chain: `Perihelion::admin == new_address` and
+     `Perihelion::admin != Perihelion::endpoint`
    - Compromised keys lose all privileges
    - If the endpoint itself must be changed, use the delayed path: the new
      admin calls `propose_endpoint(new_endpoint, delay)` (rejected if a proposal
      is already pending, or if `new_endpoint == admin`), waits out the delay,
      then calls `confirm_endpoint`. There is no instant endpoint setter.
+   - If a peer must be changed, use the delayed path: `propose_peer` → wait →
+     `confirm_peer`. The zero-delay bootstrap path is only available for an
+     eid that has never had a peer or any registered intents.
 
 5. **Post-rotation:**
    - Audit Stellar transaction history for unauthorized activity

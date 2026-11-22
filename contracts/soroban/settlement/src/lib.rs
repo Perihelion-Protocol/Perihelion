@@ -124,7 +124,7 @@ mod events {
 //
 // | Symbol                         | Topics                                 | Data
 // |--------------------------------|----------------------------------------|------
-// | `initialized`                  | ("initialized",)                       | (admin: Address, endpoint: Address)
+// | `initialized`                  | ("initialized",)                       | (admin: Address, endpoint: Address, native_token: Address)
 // | `endpoint_set`                 | ("endpoint_set",)                      | (old: Option<Address>, new: Address)
 // | `endpoint_change_proposed`     | ("endpoint_change_proposed",)          | (old: Option<Address>, new: Address, ready_at: u64)
 // | `endpoint_change_cancelled`    | ("endpoint_change_cancelled",)         | ()
@@ -360,7 +360,7 @@ impl Perihelion {
         // Issue #16/#18: emit an event so deployment tooling and off-chain
         // monitors can confirm the configured roles without polling storage.
         env.events()
-            .publish((events::initialized(&env),), (admin, endpoint));
+            .publish((events::initialized(&env),), (admin, endpoint, native_token));
     }
 
     // --- Admin configuration ---------------------------------------------------
@@ -598,7 +598,17 @@ impl Perihelion {
     ) -> Result<(), PerihelionError> {
         Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
-        if !(MIN_PEER_CHANGE_DELAY..=MAX_PEER_CHANGE_DELAY).contains(&delay) {
+
+        // Issue #1115: bootstrap path. The first peer for an eid may be set with
+        // `delay = 0` so a fresh corridor can go live in one ledger. Every
+        // rotation (Peer(eid) already set) still requires the full delay.
+        let is_bootstrap = !env.storage().instance().has(&DataKey::Peer(eid))
+            && !env
+                .storage()
+                .instance()
+                .has(&DataKey::PeerEverSet(eid));
+        let min_delay = if is_bootstrap { 0 } else { MIN_PEER_CHANGE_DELAY };
+        if !(min_delay..=MAX_PEER_CHANGE_DELAY).contains(&delay) {
             return Err(PerihelionError::InvalidDelay);
         }
 
@@ -709,6 +719,9 @@ impl Perihelion {
         env.storage()
             .instance()
             .set(&DataKey::Peer(eid), &proposed_peer);
+        // Issue #1115: remember that this eid has had a peer so the bootstrap
+        // path (delay = 0) is never available again for it.
+        env.storage().instance().set(&DataKey::PeerEverSet(eid), &true);
         env.storage().instance().remove(&DataKey::PendingPeer(eid));
         env.storage()
             .instance()
@@ -794,6 +807,17 @@ impl Perihelion {
         if new_admin == current {
             return Err(PerihelionError::AdminTransferToSelf);
         }
+        // Issue #1114: role separation must hold on the admin side too. An
+        // endpoint that also becomes admin collapses two trust domains into one.
+        if let Some(endpoint) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::Endpoint)
+        {
+            if new_admin == endpoint {
+                return Err(PerihelionError::AdminEndpointCollision);
+            }
+        }
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -840,6 +864,18 @@ impl Perihelion {
             .ok_or(PerihelionError::NotPendingAdmin)?;
         pending.require_auth();
         let old = Self::require_admin(&env)?;
+        // Issue #1114: re-check role separation at acceptance time. The endpoint
+        // may have been rotated between `set_admin` and `accept_admin`, so the
+        // check in `set_admin` alone is not sufficient.
+        if let Some(endpoint) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::Endpoint)
+        {
+            if pending == endpoint {
+                return Err(PerihelionError::AdminEndpointCollision);
+            }
+        }
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Self::bump_instance(&env);
