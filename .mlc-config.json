@@ -4,9 +4,17 @@
     { "pattern": "^https://github.com/.*/(actions|blob)/" }
   ],
   "replacementPatterns": [],
-  "aliveStatusCodes": [200, 206, 301, 302, 307, 308],
+  "aliveStatusCodes": [200, 206, 301, 302, 307, 308, 429],
   "retryOn429": true,
   "retryCount": 3,
   "timeout": "20s",
-  "retryOn5xx": true
+  "retryOn5xx": true,
+  "httpHeaders": [
+    {
+      "urls": ["^https://github.com/"],
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      }
+    }
+  ]
 }
