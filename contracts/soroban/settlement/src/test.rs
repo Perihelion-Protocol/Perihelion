@@ -3889,27 +3889,31 @@ fn cross_language_grace_constants_are_consistent() {
     );
 }
 
-/// Parse `MIN_CONFIRMATION_GRACE` out of `contracts/evm/src/PerihelionEscrow.sol`.
+/// Parse `MIN_CONFIRMATION_GRACE` out of `contracts/evm/src/ProtocolConstants.sol`.
 fn read_evm_min_confirmation_grace() -> u64 {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("evm")
         .join("src")
-        .join("PerihelionEscrow.sol");
+        .join("ProtocolConstants.sol");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {:?}: {err}", path));
     for line in source.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("uint256") {
             let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix("public") {
+            let rest = rest
+                .strip_prefix("internal")
+                .or_else(|| rest.strip_prefix("public"));
+            if let Some(rest) = rest {
                 let rest = rest.trim_start();
                 if let Some(rest) = rest.strip_prefix("constant") {
                     let rest = rest.trim_start();
                     if let Some(rest) = rest.strip_prefix("MIN_CONFIRMATION_GRACE") {
                         let rest = rest.trim_start();
                         if let Some(rest) = rest.strip_prefix('=') {
+                            let rest = rest.trim_start();
                             let value: std::string::String = rest
                                 .chars()
                                 .take_while(|c| c.is_ascii_digit() || *c == '_')

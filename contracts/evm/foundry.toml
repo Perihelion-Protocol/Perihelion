@@ -13,6 +13,7 @@ cbor_metadata = false
 # Read access to the shared cross-chain wire-format conformance vectors.
 fs_permissions = [
   { access = "read", path = "../shared" },
+  { access = "read", path = "../soroban/settlement/src" },
   { access = "read", path = "./script/config" },
   { access = "read", path = "./test/fixtures" },
 ]
@@ -42,6 +43,7 @@ bytecode_hash = "none"
 cbor_metadata = false
 fs_permissions = [
   { access = "read", path = "../shared" },
+  { access = "read", path = "../soroban/settlement/src" },
   { access = "read", path = "./script/config" },
   { access = "read", path = "./test/fixtures" },
 ]

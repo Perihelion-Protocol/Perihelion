@@ -28,6 +28,7 @@ import {
 } from "@stellar/stellar-sdk";
 import {
   ESCROW_ABI,
+  MIN_FILL_HEADROOM_SECS,
   OnChainIntentStatus,
   decodeIntentStatus,
   evmAddressToBytes32,
@@ -179,9 +180,9 @@ const SOROBAN_POLL_INTERVAL_MS = 2_000;
 /**
  * Minimum headroom (in seconds) that must remain before the intent deadline
  * for the executor to attempt a fill. Registration polling stops once the
- * deadline minus this headroom is reached.
+ * deadline minus this headroom is reached. Re-exported from `@perihelion/sdk`.
  */
-export const MIN_FILL_HEADROOM_SECS = 60;
+export { MIN_FILL_HEADROOM_SECS };
 
 /** How often to poll the settlement contract's `status` view, in ms. */
 const REGISTRATION_POLL_INTERVAL_MS = 2_000;

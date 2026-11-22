@@ -43,6 +43,7 @@ on:
       - "relayer/**"
       - "solver/**"
       - "mempool/**"
+      - "contracts/shared/**"
       - "test/**"
       - "docker/**"
       - "scripts/**"
@@ -61,6 +62,7 @@ on:
       - "relayer/**"
       - "solver/**"
       - "mempool/**"
+      - "contracts/shared/**"
       - "test/**"
       - "docker/**"
       - "scripts/**"
@@ -106,6 +108,7 @@ jobs:
               - "relayer/**"
               - "solver/**"
               - "mempool/**"
+              - "contracts/shared/**"
               - "test/**"
               - "docker/**"
               - "scripts/**"
@@ -158,6 +161,9 @@ jobs:
 
       - name: Check SPDX license headers
         run: ./scripts/check-spdx-headers.sh
+
+      - name: Check generated protocol constants
+        run: node scripts/gen-protocol-constants.mjs --check
 
       - name: Build all packages
         run: make build-ts

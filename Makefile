@@ -24,6 +24,7 @@
         gas                                    \
         audit audit-ts audit-evm audit-rust    \
         bytecode-check sdk-abi sdk-abi-check event-spec-check \
+        protocol-constants protocol-constants-check \
         clean                                  \
         fuzz fuzz-bounded fuzz-extended fuzz-nightly \
         fuzz-evm fuzz-rust fuzz-cross          \
@@ -270,6 +271,14 @@ event-spec-check: ## Fail if the EVM event spec table in PerihelionEscrow.sol dr
 	@echo "▶ event-spec-check"
 	cd contracts/evm && forge build --skip test --skip script
 	node scripts/check-event-spec.mjs
+
+protocol-constants: ## Regenerate ProtocolConstants.sol, constants.rs, and sdk/src/constants.ts from contracts/shared/protocol-constants.json
+	@echo "▶ protocol-constants"
+	node scripts/gen-protocol-constants.mjs
+
+protocol-constants-check: ## Fail if generated protocol constants drift from contracts/shared/protocol-constants.json
+	@echo "▶ protocol-constants-check"
+	node scripts/gen-protocol-constants.mjs --check
 
 audit-rust: ## cargo-deny policy check for the Soroban workspace (advisories, licences, bans, sources)
 	@echo "▶ audit-rust"
