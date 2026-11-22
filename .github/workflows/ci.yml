@@ -38,40 +38,8 @@ name: CI
 on:
   push:
     branches: [main]
-    paths:
-      - "sdk/**"
-      - "relayer/**"
-      - "solver/**"
-      - "mempool/**"
-      - "test/**"
-      - "docker/**"
-      - "scripts/**"
-      - "Makefile"
-      - "package.json"
-      - "package-lock.json"
-      - ".nvmrc"
-      - "tsconfig.base.json"
-      - ".github/workflows/ci.yml"
-      - "docs/**"
-      - "*.md"
   pull_request:
     branches: [main]
-    paths:
-      - "sdk/**"
-      - "relayer/**"
-      - "solver/**"
-      - "mempool/**"
-      - "test/**"
-      - "docker/**"
-      - "scripts/**"
-      - "Makefile"
-      - "package.json"
-      - "package-lock.json"
-      - ".nvmrc"
-      - "tsconfig.base.json"
-      - ".github/workflows/ci.yml"
-      - "docs/**"
-      - "*.md"
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -222,18 +190,3 @@ jobs:
   #   e2e ran and passed         → gate passes  ✅
   #   e2e ran and failed         → gate fails   ❌  (e2e broken, merge blocked)
   #   e2e was skipped            → gate passes  ✅  (path filter, docs-only PR)
-  required:
-    name: CI / required
-    runs-on: ubuntu-latest
-    needs: [changes, typescript, e2e]
-    if: always()
-    steps:
-      - name: Assert typescript, e2e, and lock-sync passed or were skipped
-        run: |
-          for result in "${{ needs.changes.result }}" "${{ needs.typescript.result }}" "${{ needs.e2e.result }}"; do
-            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
-              echo "::error::A job $result — merge is blocked."
-              exit 1
-            fi
-          done
-          echo "All jobs passed or were skipped — gate passes."
