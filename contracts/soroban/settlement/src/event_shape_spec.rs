@@ -331,6 +331,42 @@ fn initialized_topic() {
     assert_event_shape(&s.env, "initialized", 1);
 }
 
+/// Issue #1116: the `initialized` event must carry all three constructor
+/// arguments — `admin`, `endpoint` and `native_token` — so deployment
+/// tooling can confirm the native SAC address from the event alone.
+#[test]
+fn initialized_event_carries_all_constructor_args() {
+    let s = setup();
+    let admin = Address::generate(&s.env);
+    let endpoint = s.env.register(EventSpecMockEndpoint, ());
+    let _id = s
+        .env
+        .register(Perihelion, (&admin, &endpoint, &s.native_token));
+
+    let topic = Symbol::new(&s.env, "initialized");
+    let events = s.env.events().all();
+    let found = events.iter().any(|(_, topics, data)| {
+        let topic_matches = topics.len() == 1
+            && topics
+                .iter()
+                .any(|t| Symbol::try_from_val(&s.env, &t).map(|v| v == topic).unwrap_or(false));
+        if !topic_matches {
+            return false;
+        }
+        let payload: (Address, Address, Address) = match <(Address, Address, Address)>::try_from_val(
+            &s.env, &data,
+        ) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        payload.0 == admin && payload.1 == endpoint && payload.2 == s.native_token
+    });
+    assert!(
+        found,
+        "expected an 'initialized' event carrying (admin, endpoint, native_token)"
+    );
+}
+
 #[test]
 fn endpoint_set_topic() {
     let s = setup();

@@ -30,6 +30,7 @@ jobs:
           filters: |
             soroban:
               - 'contracts/soroban/**'
+              - 'contracts/shared/**'
               - '.github/workflows/soroban.yml'
               - 'scripts/check-spdx-headers.sh'
 

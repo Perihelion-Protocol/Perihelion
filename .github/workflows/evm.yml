@@ -43,9 +43,11 @@ jobs:
           filters: |
             evm:
               - 'contracts/evm/**'
+              - 'contracts/shared/**'
               - '.github/workflows/evm.yml'
             sdk_escrow:
               - 'contracts/evm/**'
+              - 'contracts/shared/**'
               - '.github/workflows/evm.yml'
               - 'sdk/src/escrow-abi.ts'
               - 'sdk/src/escrow-client.ts'

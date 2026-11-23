@@ -20,9 +20,15 @@ import {
 } from "viem";
 import { verifyTypedData } from "viem/actions";
 import type { Address, Hex, Intent } from "./types.js";
+import {
+  MAX_DEADLINE_HORIZON,
+  MAX_DEADLINE_HORIZON_SEC,
+  MAX_DESTINATION_LEN,
+  MAX_DEST_ASSET_LEN,
+  MIN_FILL_HEADROOM_SECS,
+} from "./constants.js";
 import { isStellarAddress, isStellarAsset } from "./stellar.js";
 import { IntentValidationError, PerihelionValidationError } from "./errors.js";
-
 
 /**
  * Build the EIP-712 domain for a specific Perihelion escrow deployment.
@@ -59,8 +65,6 @@ export const INTENT_TYPES = {
 export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
   Partial<Pick<Intent, "nonce" | "preferredSolver">>;
 
-
-
 /**
  * Strictly-positive decimal integer string: no `"0"`, no leading zeros, no
  * sign. Exported so `validate.ts`'s `parseIntent` can enforce the exact same
@@ -82,12 +86,12 @@ function isNonNegIntString(s: string): boolean {
  * @param params - Intent parameters to validate.
  * @param now    - Current Unix timestamp in seconds (defaults to `Date.now()`).
  */
-export function validateIntent(
-  params: IntentParams,
-  now = Math.floor(Date.now() / 1000),
-): void {
+export function validateIntent(params: IntentParams, now = Math.floor(Date.now() / 1000)): void {
   if (!isAddress(params.user)) {
-    throw new IntentValidationError("user", `must be a valid 20-byte EVM address (got '${params.user}')`);
+    throw new IntentValidationError(
+      "user",
+      `must be a valid 20-byte EVM address (got '${params.user}')`,
+    );
   }
   if (!isStellarAddress(params.destination)) {
     throw new IntentValidationError(
@@ -136,7 +140,8 @@ export function validateIntent(
   }
   if (!isStellarAsset(params.destAsset)) {
     throw new PerihelionValidationError(
-      `must be 'native', '<CODE>:<G...ISSUER>' or a 'C...' token contract strkey, with a valid checksum (got '${params.destAsset}')`, "destAsset",
+      `must be 'native', '<CODE>:<G...ISSUER>' or a 'C...' token contract strkey, with a valid checksum (got '${params.destAsset}')`,
+      "destAsset",
     );
   }
   // Enforce byte-length bound on destAsset as defence-in-depth, independent of isStellarAsset.
@@ -187,10 +192,7 @@ export function validateIntent(
       );
     }
     if (BigInt(params.nonce) > (1n << 256n) - 1n) {
-      throw new IntentValidationError(
-        "nonce",
-        `exceeds uint256 maximum (got ${params.nonce})`,
-      );
+      throw new IntentValidationError("nonce", `exceeds uint256 maximum (got ${params.nonce})`);
     }
   }
   if (params.preferredSolver !== undefined && !isAddress(params.preferredSolver)) {
@@ -201,65 +203,13 @@ export function validateIntent(
   }
 }
 
-/**
- * Maximum byte length of `Intent.destination`. A Stellar strkey (G.../C...) is
- * exactly 56 characters. Matches `PerihelionEscrow.MAX_DESTINATION_LEN`.
- */
-export const MAX_DESTINATION_LEN = 56;
-
-/**
- * Maximum byte length of `Intent.destAsset`. The longest valid form is
- * `<CODE>:<ISSUER>` (12 + 1 + 56 = 69 bytes); a `C...` contract strkey is 56
- * bytes and `"native"` is 6. Matches `PerihelionEscrow.MAX_DEST_ASSET_LEN`
- * and the Soroban `asset::MAX_DEST_ASSET_LEN`.
- */
-export const MAX_DEST_ASSET_LEN = 69;
-
-/**
- * Maximum deadline horizon, in seconds from the current time, accepted for
- * `Intent.deadline`. Matches `settlement::MAX_DEADLINE_HORIZON` on the Soroban
- * side: a `FillInstruction` carrying a deadline further out than this is
- * rejected there to prevent trivially pinning an entry at MAX_TTL with a
- * far-future deadline. Enforcing the same ceiling here, before the intent is
- * ever signed or submitted to the EVM escrow, avoids a stuck state where
- * funds are locked and the LayerZero fee paid for an intent that the
- * destination chain will never register.
- * 7 days = 604_800 s.
- */
-export const MAX_DEADLINE_HORIZON = 604_800;
-
-/**
- * Alias for {@link MAX_DEADLINE_HORIZON}. Exported under the `_SEC` suffix so
- * it is unambiguous at call sites and consistent with the issue #523
- * requirement for an explicit unit suffix in the public API.
- */
-export const MAX_DEADLINE_HORIZON_SEC = MAX_DEADLINE_HORIZON;
-
-/**
- * Minimum fill headroom required by the Soroban settlement contract, in
- * seconds.
- *
- * The contract's `validate_and_stage_fill` guard is:
- * ```
- * if now.saturating_add(MIN_DISPATCH_WINDOW) > rec.deadline { return Err(IntentExpired) }
- * ```
- * where `MIN_DISPATCH_WINDOW = 1_800` (30 minutes). Any intent whose deadline
- * is within 30 minutes of the current ledger time is rejected on-chain even
- * though it has not yet expired.
- *
- * The solver must therefore refuse fills whose remaining time is below this
- * constant *before* committing to the lock, paying the LayerZero fee, and
- * dispatching the cross-chain message — all of which are sunk costs that
- * cannot be recovered if the destination leg is rejected.
- *
- * The value here is `MIN_DISPATCH_WINDOW + 120 s` (2 minutes of relay-latency
- * and clock-skew margin). It is defined once in the SDK so the solver,
- * the relayer, and any future tooling can import the same constant rather than
- * each duplicating the magic number.
- *
- * Mirrors `contracts/soroban/settlement/src/lib.rs::MIN_DISPATCH_WINDOW`.
- */
-export const MIN_FILL_HEADROOM_SECS = 1_920; // 1_800 s dispatch window + 120 s margin
+export {
+  MAX_DEADLINE_HORIZON,
+  MAX_DEADLINE_HORIZON_SEC,
+  MAX_DESTINATION_LEN,
+  MAX_DEST_ASSET_LEN,
+  MIN_FILL_HEADROOM_SECS,
+};
 
 /**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
@@ -317,9 +267,7 @@ export function validateAmount(value: string, field: string, max = I128_MAX): vo
     throw new PerihelionValidationError(`must be > 0 (got ${value})`, field);
   }
   if (n > max) {
-    throw new PerihelionValidationError(
-      `exceeds maximum bridgeable amount (${max})`, field
-    );
+    throw new PerihelionValidationError(`exceeds maximum bridgeable amount (${max})`, field);
   }
 }
 
@@ -417,13 +365,14 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
     const lhs = sourceAmountBig * 10n ** 6n;
     const rhs = vMinBig * 10n ** BigInt(sourceDecimals);
     if (lhs < rhs) {
-      const decimalNote = options?.sourceDecimals === undefined
-        ? " (sourceDecimals not provided; assuming default 6-decimal precision)"
-        : ` (normalized from ${sourceDecimals}-decimal source units)`;
+      const decimalNote =
+        options?.sourceDecimals === undefined
+          ? " (sourceDecimals not provided; assuming default 6-decimal precision)"
+          : ` (normalized from ${sourceDecimals}-decimal source units)`;
       options?.onWarning?.(
         `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
-        `economical minimum V_min (${vMin})${decimalNote}. The fixed LayerZero messaging fee may ` +
-        `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
+          `economical minimum V_min (${vMin})${decimalNote}. The fixed LayerZero messaging fee may ` +
+          `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`,
       );
     }
   }
@@ -453,8 +402,7 @@ export function hashIntent(intent: Intent, domain: TypedDataDomain): Hex {
  * and is therefore malleable. We reject it so each intent has exactly one valid
  * signature — otherwise replay/dedup keyed on the signature could be bypassed.
  */
-const SECP256K1_HALF_N =
-  0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
+const SECP256K1_HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
 
 /**
  * ERC-1271 magic value returned by `isValidSignature(bytes32,bytes)` when a
@@ -486,8 +434,7 @@ export const ERC6492_MAGIC_SUFFIX =
 /** True iff `signature` carries the ERC-6492 magic suffix. */
 export function isErc6492Signature(signature: Hex): boolean {
   return (
-    signature.length >= 2 + 64 &&
-    signature.toLowerCase().endsWith(ERC6492_MAGIC_SUFFIX.slice(2))
+    signature.length >= 2 + 64 && signature.toLowerCase().endsWith(ERC6492_MAGIC_SUFFIX.slice(2))
   );
 }
 
@@ -593,10 +540,7 @@ export async function verifyIntent(
         functionName: "isValidSignature",
         args: [digest as ViemHex, signature as ViemHex],
       });
-      return (
-        typeof result === "string" &&
-        result.toLowerCase() === ERC1271_MAGIC_VALUE
-      );
+      return typeof result === "string" && result.toLowerCase() === ERC1271_MAGIC_VALUE;
     } catch {
       // Reverts (including a missing function) mean the signature is invalid.
       return false;

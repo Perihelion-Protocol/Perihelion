@@ -20,7 +20,12 @@ import { test } from "node:test";
 import { buildIntent, hashIntent, perihelionDomain } from "@perihelion/sdk";
 import type { Hex, SignedIntent } from "@perihelion/sdk";
 import { nativeToScVal, scvU32, scvVoid } from "@stellar/stellar-sdk";
-import { Executor, type ExecutorConfig, type Logger } from "../src/executor.js";
+import {
+  Executor,
+  LockOwnedByOtherError,
+  type ExecutorConfig,
+  type Logger,
+} from "../src/executor.js";
 
 // ─── Wire vector (#946) ───────────────────────────────────────────────────────
 //
@@ -96,6 +101,9 @@ function makeSignedIntent(): SignedIntent {
 type PrivateExecutor = Executor & {
   checkFillStatus(hash: Hex): Promise<{ filled: boolean; settlementTx?: string }>;
   isSettled(hash: Hex): Promise<boolean>;
+  getLock(hash: Hex): Promise<
+    { user: string; solver: string; released: boolean; refunded: boolean } | undefined
+  >;
   lockOnEvm(signed: SignedIntent): Promise<Hex>;
   waitForRegistration(signed: SignedIntent): Promise<void>;
   fillOnSoroban(signed: SignedIntent, lockTx: Hex): Promise<Hex>;
@@ -962,4 +970,123 @@ test("Executor: rejects a fill headroom below the SDK / contract dispatch window
   assert.doesNotThrow(
     () => new Executor({ ...BASE_CONFIG, minFillHeadroomSecs: MIN_FILL_HEADROOM_SECS }),
   );
+});
+
+// ─── #1083: getLock decodes the 8-field locks(bytes32) getter ────────────────
+
+interface LockWords {
+  solver: string;
+  user: string;
+  asset: string;
+  amount: bigint;
+  minDestAmount: bigint;
+  deadline: bigint;
+  released: boolean;
+  refunded: boolean;
+}
+
+/** ABI-encodes the 8 static words returned by `locks(bytes32)`, in order. */
+function encodeLockWords(w: LockWords): Hex {
+  const addr = (a: string) => a.slice(2).padStart(64, "0");
+  const uint = (v: bigint) => v.toString(16).padStart(64, "0");
+  const bool = (b: boolean) => uint(b ? 1n : 0n);
+  return ("0x" +
+    [
+      addr(w.solver),
+      addr(w.user),
+      addr(w.asset),
+      uint(w.amount),
+      uint(w.minDestAmount),
+      uint(w.deadline),
+      bool(w.released),
+      bool(w.refunded),
+    ].join("")) as Hex;
+}
+
+async function withEthCallResult<T>(result: Hex, fn: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+const LOCK_HASH = ("0x" + "ab".repeat(32)) as Hex;
+const LOCK_BASE: LockWords = {
+  solver: "0x00000000000000000000000000000000000000ff",
+  user: "0x0000000000000000000000000000000000000002",
+  // Non-zero on purpose: the old hand-rolled decoder read this word as `released`.
+  asset: "0x0000000000000000000000000000000000000003",
+  amount: 1_000_000n,
+  minDestAmount: 990_000n,
+  deadline: 1_900_000_000n,
+  released: false,
+  refunded: false,
+};
+
+test("getLock: reads released and refunded from positions 6 and 7 of locks()", async () => {
+  const exec = expose();
+
+  const refunded = await withEthCallResult(
+    encodeLockWords({ ...LOCK_BASE, refunded: true }),
+    () => exec.getLock(LOCK_HASH),
+  );
+  assert.deepEqual(refunded, {
+    user: LOCK_BASE.user,
+    solver: LOCK_BASE.solver,
+    released: false,
+    refunded: true,
+  });
+
+  const released = await withEthCallResult(
+    encodeLockWords({ ...LOCK_BASE, released: true }),
+    () => exec.getLock(LOCK_HASH),
+  );
+  assert.deepEqual(released, {
+    user: LOCK_BASE.user,
+    solver: LOCK_BASE.solver,
+    released: true,
+    refunded: false,
+  });
+});
+
+test("getLock: returns undefined when the lock's user is the zero address", async () => {
+  const exec = expose();
+  const lock = await withEthCallResult(
+    encodeLockWords({
+      ...LOCK_BASE,
+      user: "0x0000000000000000000000000000000000000000",
+      solver: "0x0000000000000000000000000000000000000000",
+      asset: "0x0000000000000000000000000000000000000000",
+    }),
+    () => exec.getLock(LOCK_HASH),
+  );
+  assert.equal(lock, undefined);
+});
+
+// ─── #1086: lock owned by another solver raises LockOwnedByOtherError ─────────
+
+test("fill: a lock owned by another solver throws LockOwnedByOtherError with the owner", async () => {
+  const otherSolver = "0x00000000000000000000000000000000000000ff" as const;
+  const exec = expose();
+  // Not filled yet, so fill proceeds to the lock stage.
+  exec.checkFillStatus = async () => ({ filled: false });
+
+  const signed = makeSignedIntent();
+  const err = await withEthCallResult(
+    encodeLockWords({ ...LOCK_BASE, solver: otherSolver }),
+    () => exec.fill(signed).then(
+      () => assert.fail("fill should have thrown"),
+      (e: unknown) => e,
+    ),
+  );
+
+  assert.ok(err instanceof LockOwnedByOtherError, "expected LockOwnedByOtherError");
+  assert.equal(err.owner, otherSolver);
 });

@@ -39,11 +39,11 @@
   "dependencies": {
     "@perihelion/node-common": "*",
     "@perihelion/sdk": "*",
-    "@stellar/stellar-sdk": "^12.3.0",
+    "@stellar/stellar-sdk": "^13.0.0",
     "viem": "^2.55.8"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/node": "^22.0.0",
     "c8": "^10.1.2",
     "tsx": "^4.16.0",
     "typescript": "^5.4.0"

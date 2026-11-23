@@ -28,8 +28,7 @@ use soroban_sdk::{Bytes, Env};
 
 use crate::strkey;
 
-/// Maximum byte length of a canonical `destAsset` identifier (`CODE:ISSUER`).
-pub const MAX_DEST_ASSET_LEN: usize = 69;
+pub use crate::constants::MAX_DEST_ASSET_LEN;
 
 /// A parsed canonical `destAsset` identifier.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
