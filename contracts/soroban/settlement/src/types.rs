@@ -133,23 +133,23 @@ pub enum DataKey {
     EnforcedOptions(u32),
 
     // Instance tier (value caps, issue #145).
-    /// Maximum amount a single intent can register (0 = unlimited).
-    MaxIntentAmount,
-    /// Rolling window duration in seconds (0 = disabled).
-    RollingWindowDuration,
-    /// Maximum aggregate settled amount within rolling window (0 = unlimited).
-    RollingWindowCap,
-    /// Whether rolling-window cap has been triggered.
-    RollingWindowTriggered,
-    /// Earliest timestamp to allow resetting the rolling-window cap.
-    RollingWindowResetEarliestAt,
+    /// Maximum amount a single intent can register per asset (0 = unlimited).
+    MaxIntentAmount(Address),
+    /// Rolling window duration in seconds per asset (0 = disabled).
+    RollingWindowDuration(Address),
+    /// Maximum aggregate settled amount within rolling window per asset (0 = unlimited).
+    RollingWindowCap(Address),
+    /// Whether rolling-window cap has been triggered per asset.
+    RollingWindowTriggered(Address),
+    /// Earliest timestamp to allow resetting the rolling-window cap per asset.
+    RollingWindowResetEarliestAt(Address),
 
     // Instance tier (rolling-window accumulator, issue #145). Only the current
     // window's bucket is kept (#905).
-    /// Rolling-window bucket: window start timestamp => cumulative settled amount.
-    RollingWindowBucket(u64),
-    /// Latest memoized window start timestamp (for efficiency).
-    LatestWindowStart,
+    /// Rolling-window bucket: (asset, window start timestamp) => cumulative settled amount.
+    RollingWindowBucket(Address, u64),
+    /// Latest memoized window start timestamp per asset (for efficiency).
+    LatestWindowStart(Address),
 
     // Persistent tier (destination assets, issue #1074).
     /// Contract-native (SEP-41) token allowed as a `C...` `dest_asset`. Present
