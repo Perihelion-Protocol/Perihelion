@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { IERC20 } from "./IERC20.sol";
+import { ProtocolConstants } from "./ProtocolConstants.sol";
 import { StellarStrKey } from "./StellarStrKey.sol";
 import {
     Origin,
@@ -80,9 +81,9 @@ interface IERC1271 {
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
-    uint256 public constant FILL_INSTRUCTION_LENGTH = 227;
-    uint256 public constant FILL_CONFIRMED_LENGTH = 90;
-    uint256 public constant CANCEL_INTENT_LENGTH = 35;
+    uint256 public constant FILL_INSTRUCTION_LENGTH = ProtocolConstants.FILL_INSTRUCTION_LENGTH;
+    uint256 public constant FILL_CONFIRMED_LENGTH = ProtocolConstants.FILL_CONFIRMED_LENGTH;
+    uint256 public constant CANCEL_INTENT_LENGTH = ProtocolConstants.CANCEL_INTENT_LENGTH;
 
     struct Intent {
         address user;
@@ -143,23 +144,24 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Cancel reason codes (shared taxonomy with the Soroban side) --------
 
     /// @dev Known cancel reason codes, mirroring the Soroban side.
-    uint8 private constant CANCEL_REASON_EXPIRED = 0x00;
-    uint8 private constant CANCEL_REASON_ADMIN = 0x01;
-    uint8 private constant CANCEL_REASON_INVALID = 0x02;
+    uint8 private constant CANCEL_REASON_EXPIRED = ProtocolConstants.CANCEL_REASON_EXPIRED;
+    uint8 private constant CANCEL_REASON_ADMIN = ProtocolConstants.CANCEL_REASON_ADMIN;
+    uint8 private constant CANCEL_REASON_INVALID = ProtocolConstants.CANCEL_REASON_INVALID;
     /// @dev Local refund fallback: timed out waiting for cross-chain confirmation.
     ///      This value (0xFF) is EVM-only; it does not appear in Soroban messages.
-    uint8 private constant CANCEL_REASON_LOCAL_TIMEOUT = 0xFF;
+    uint8 private constant CANCEL_REASON_LOCAL_TIMEOUT =
+        ProtocolConstants.CANCEL_REASON_LOCAL_TIMEOUT;
     uint8 private constant IGNORE_UNKNOWN_LOCK = 0x01;
     uint8 private constant IGNORE_ALREADY_FINALIZED = 0x02;
 
-    bytes1 private constant PROTOCOL_VERSION = 0x01;
-    bytes1 private constant MSG_FILL_INSTRUCTION = 0x01;
-    bytes1 private constant MSG_FILL_CONFIRMED = 0x02;
-    bytes1 private constant MSG_CANCEL_INTENT = 0x03;
+    bytes1 private constant PROTOCOL_VERSION = ProtocolConstants.PROTOCOL_VERSION;
+    bytes1 private constant MSG_FILL_INSTRUCTION = ProtocolConstants.MSG_FILL_INSTRUCTION;
+    bytes1 private constant MSG_FILL_CONFIRMED = ProtocolConstants.MSG_FILL_CONFIRMED;
+    bytes1 private constant MSG_CANCEL_INTENT = ProtocolConstants.MSG_CANCEL_INTENT;
 
     /// @notice Upper bound on `confirmationGrace`, so a misconfigured admin can
     ///         never strand a user's local refund indefinitely.
-    uint256 public constant MAX_CONFIRMATION_GRACE = 7 days;
+    uint256 public constant MAX_CONFIRMATION_GRACE = ProtocolConstants.MAX_CONFIRMATION_GRACE;
     /// @notice Documented latency budget for a FillConfirmed to travel from Stellar
     ///         to this contract: LayerZero DVN verification plus executor delivery.
     ///         Sized against the published DVN/executor SLAs with headroom.
@@ -177,7 +179,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         with a strictly positive latency margin. This relation is asserted
     ///         by a cross-language test that reads both constants; changing either
     ///         without the other fails CI.
-    uint256 public constant CROSS_CHAIN_LATENCY_BUDGET = 20 minutes;
+    uint256 public constant CROSS_CHAIN_LATENCY_BUDGET =
+        ProtocolConstants.CROSS_CHAIN_LATENCY_BUDGET;
 
     /// @notice Lower bound on `confirmationGrace`. Must exceed worst-case cross-chain
     ///         settlement latency (LayerZero relay + Stellar finality) so that
@@ -188,7 +191,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         Derived from the Soroban dispatch cutoff plus the latency budget:
     ///         `MIN_DISPATCH_WINDOW (30 minutes) + CROSS_CHAIN_LATENCY_BUDGET (20 minutes)`.
     ///         See the inequality documented on {CROSS_CHAIN_LATENCY_BUDGET}.
-    uint256 public constant MIN_CONFIRMATION_GRACE = 50 minutes;
+    uint256 public constant MIN_CONFIRMATION_GRACE = ProtocolConstants.MIN_CONFIRMATION_GRACE;
 
     /// @notice Duration a guardian-initiated pause auto-expires without owner
     ///         ratification, and the matching cooldown before the guardian may
@@ -202,11 +205,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         (G.../C...) is exactly 56 characters; longer values are invalid.
     ///         Enforced pre-dispatch so an oversized string cannot inflate the
     ///         LayerZero fee or cause a decode failure on the Soroban side.
-    uint256 public constant MAX_DESTINATION_LEN = 56;
+    uint256 public constant MAX_DESTINATION_LEN = ProtocolConstants.MAX_DESTINATION_LEN;
     /// @notice Maximum byte length of `Intent.destAsset`. The longest valid form
     ///         is `<CODE>:<ISSUER>` (12 + 1 + 56 = 69 bytes); a `C...` token
     ///         contract strkey is 56 and `"native"` is 6.
-    uint256 public constant MAX_DEST_ASSET_LEN = 69;
+    uint256 public constant MAX_DEST_ASSET_LEN = ProtocolConstants.MAX_DEST_ASSET_LEN;
 
     // --- Immutable / config --------------------------------------------------
 
@@ -1314,8 +1317,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             intentHash, // 32 bytes offset 2
             uint32(0), // 4  bytes offset 34: reserved, always zero; the Soroban
                 //    decoder ignores it and takes the origin eid from transport
-            _padRight(bytes(intent.destination), 56), // 56 bytes offset 38
-            _padRight(bytes(intent.destAsset), 69), // 69 bytes offset 94
+            _padRight(bytes(intent.destination), MAX_DESTINATION_LEN), // 56 bytes offset 38
+            _padRight(bytes(intent.destAsset), MAX_DEST_ASSET_LEN), // 69 bytes offset 94
             uint128(intent.minDestAmount), // 16 bytes offset 163
             uint64(intent.deadline), // 8  bytes offset 179
             // Encode the canonical locking solver, not the user preference. This field

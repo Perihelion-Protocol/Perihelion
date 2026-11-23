@@ -1753,17 +1753,17 @@ contract PerihelionEscrowTest is Test {
     ///         so this test fails if either side drifts without the other.
     function test_MinConfirmationGraceCoversDispatchWindowPlusLatency() public view {
         uint256 minDispatchWindow = _sorobanConst("MIN_DISPATCH_WINDOW");
-        uint256 latencyBudget = _sorobanConst("LATENCY_BUDGET");
+        uint256 latencyBudget = _sorobanConst("CROSS_CHAIN_LATENCY_BUDGET");
 
         // Sanity: the Soroban constants must be non-zero and the budget positive.
         assertGt(minDispatchWindow, 0, "MIN_DISPATCH_WINDOW must be > 0");
-        assertGt(latencyBudget, 0, "LATENCY_BUDGET must be > 0");
+        assertGt(latencyBudget, 0, "CROSS_CHAIN_LATENCY_BUDGET must be > 0");
 
         uint256 minGrace = escrow.MIN_CONFIRMATION_GRACE();
         assertGe(
             minGrace,
             minDispatchWindow + latencyBudget,
-            "MIN_CONFIRMATION_GRACE must cover MIN_DISPATCH_WINDOW + LATENCY_BUDGET"
+            "MIN_CONFIRMATION_GRACE must cover MIN_DISPATCH_WINDOW + CROSS_CHAIN_LATENCY_BUDGET"
         );
 
         // The default grace must also satisfy the inequality.
@@ -1773,7 +1773,7 @@ contract PerihelionEscrowTest is Test {
     /// @dev Parse `pub const <name>: u64 = <value>;` from the Soroban settlement
     ///      source. Reverts the test if the constant is missing or unparsable.
     function _sorobanConst(string memory name) internal view returns (uint256) {
-        string memory path = "contracts/soroban/settlement/src/lib.rs";
+        string memory path = "../soroban/settlement/src/constants.rs";
         string memory src = vm.readFile(path);
         bytes memory haystack = bytes(src);
         bytes memory needle = bytes(string.concat("pub const ", name, ": u64 = "));
@@ -1786,6 +1786,10 @@ contract PerihelionEscrowTest is Test {
         uint256 digits;
         while (start < haystack.length) {
             bytes1 c = haystack[start];
+            if (c == bytes1("_")) {
+                start++;
+                continue;
+            }
             if (c < bytes1("0") || c > bytes1("9")) break;
             value = value * 10 + (uint8(c) - uint8(bytes1("0")));
             digits++;
@@ -1837,7 +1841,7 @@ contract PerihelionEscrowTest is Test {
         PerihelionEscrow.Intent memory intent = _intent();
 
         uint256 minDispatchWindow = _sorobanConst("MIN_DISPATCH_WINDOW");
-        uint256 latencyBudget = _sorobanConst("LATENCY_BUDGET");
+        uint256 latencyBudget = _sorobanConst("CROSS_CHAIN_LATENCY_BUDGET");
 
         // Configure the minimum grace and land the confirm at the latest
         // possible dispatch time plus the full latency budget.

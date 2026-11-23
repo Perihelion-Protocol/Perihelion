@@ -18,8 +18,16 @@ Soroban settlement contract, and the day-to-day admin procedures.
 | ------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | **owner** (EVM)     | `PerihelionTimelock` (M-of-N + delay) | All config: `setPeer`, `setConfirmationGrace`, `setGuardian`, `setPaused` (unpause), two-step ownership |
 | **guardian** (EVM)  | A hot key or small Safe               | `pause()` only — instant emergency halt. Cannot unpause or reconfigure                                  |
-| **admin** (Soroban) | A Stellar multisig account            | `set_endpoint`, `set_peer`, `set_admin`, `set_paused`                                                   |
+| **admin** (Soroban) | A Stellar multisig account            | `propose_endpoint` / `confirm_endpoint`, `propose_peer` / `confirm_peer`, `set_admin` / `accept_admin`, `set_paused` |
 | **endpoint**        | LayerZero V2 endpoint                 | Sole caller of `lzReceive` / `lz_receive`                                                               |
+
+The Soroban admin is deliberately constrained: endpoint and peer changes are
+two-step (`propose_*` then `confirm_*` after the mandatory delay), and the admin
+must never be the endpoint contract — the constructor rejects
+`admin == endpoint` (`AdminEndpointCollision`), `set_admin` rejects a new admin
+equal to the current endpoint, and `accept_admin` re-checks the invariant in
+case the endpoint changed in between. Keep the admin a distinct multisig
+account; collapsing it into the endpoint would merge two trust domains.
 
 The asymmetry is deliberate: the **owner is slow** (timelocked, multi-party) so
 users get a public window before any config change takes effect, while the
@@ -253,16 +261,41 @@ stellar contract deploy --wasm target/wasm32-unknown-unknown/release/perihelion_
 
 ## 6. Wire peers & verify
 
-Register each side as the other's trusted peer (32-byte LayerZero addresses):
+Register each side as the other's trusted peer (32-byte LayerZero addresses).
+
+**Soroban peer bootstrap (first peer for a new EID).** There is no `set_peer`
+call. Peers are set through a propose/confirm pair, and the delay rules differ
+between bootstrap and rotation:
+
+- **Bootstrap** — when `Peer(eid)` has never been set and no intents have ever
+  been registered for that EID, the first peer can be registered in a single
+  ledger: `propose_peer` accepts `delay = 0` and `confirm_peer` applies it
+  immediately, emitting the usual `peer_set` event.
+- **Rotation** — once a peer exists (or any intent has been registered for the
+  EID), `propose_peer` requires `delay >= MIN_PEER_CHANGE_DELAY` (86 400 s, one
+  day). The new peer only takes effect after `confirm_peer` is called once the
+  delay has elapsed.
 
 ```bash
-# Soroban: trust the EVM escrow on the source EID
-stellar contract invoke --id $SETTLEMENT -- set_peer --eid $EVM_EID --peer <escrow-as-32-bytes>
+# Soroban bootstrap: trust the EVM escrow on the source EID in one ledger.
+stellar contract invoke --id $SETTLEMENT -- propose_peer \
+  --eid $EVM_EID --peer <escrow-as-32-bytes> --delay 0
+stellar contract invoke --id $SETTLEMENT -- confirm_peer --eid $EVM_EID
+
+# Soroban rotation: propose with the full delay, then confirm after it elapses.
+stellar contract invoke --id $SETTLEMENT -- propose_peer \
+  --eid $EVM_EID --peer <new-escrow-as-32-bytes> --delay 86400
+# ...wait out the delay...
+stellar contract invoke --id $SETTLEMENT -- confirm_peer --eid $EVM_EID
 
 # EVM: trust the Soroban settlement (via the timelock if ownership already moved,
 # otherwise the deployer before handover).
 cast send $ESCROW "setPeer(bytes32)" <settlement-as-32-bytes> ...
 ```
+
+The same two-step flow applies to the endpoint: `propose_endpoint` followed by
+`confirm_endpoint` after the delay. The proposed endpoint must not equal the
+current admin.
 
 Configure the LayerZero send/receive libraries and the DVN set per chain
 (LayerZero-specific; out of scope here).
@@ -276,7 +309,8 @@ Configure the LayerZero send/receive libraries and the DVN set per chain
 - [ ] `escrow.stellarPeer()` and `escrow.stellarEid()` correct
 - [ ] `escrow.paused() == false`
 - [ ] `timelock.threshold()` / `delay()` / `owners()` as intended
-- [ ] Soroban `is_paused() == false`, peer registered for the EVM EID
+- [ ] Soroban `is_paused() == false`, peer registered for the EVM EID (bootstrap or confirmed rotation)
+- [ ] Soroban admin is not the endpoint contract (invariant enforced on-chain)
 - [ ] LayerZero DVN set and libraries configured both directions
 - [ ] One small end-to-end test transfer settles, and a deliberately-expired one refunds
 - [ ] `make bytecode-check` passes on the exact commit being deployed
@@ -562,6 +596,14 @@ Use the timelock four-step flow from §4.3 with the appropriate calldata, e.g.
 `cast calldata "setConfirmationGrace(uint256)" 7200`. The change is public the
 moment it is proposed and only takes effect after the delay.
 
+On Soroban, peer rotations and endpoint changes follow the same
+propose/confirm pattern: `propose_peer` / `propose_endpoint` with the full
+delay, then `confirm_peer` / `confirm_endpoint` once it has elapsed. Only the
+very first peer for a brand-new EID may be bootstrapped with `delay = 0`.
+Changing the admin is also two-step (`set_admin` then `accept_admin` from the
+new admin); `set_admin` rejects the endpoint address and `accept_admin`
+re-checks the invariant.
+
 **Always use `value == 0` for these ops.** `execute` is `payable` and forwards
 `value` verbatim to the target, but none of the escrow's owner-only setters
 (`setPeer`, `setConfirmationGrace`, `setGuardian`, `setPaused`,
@@ -602,7 +644,7 @@ address and whose calldata is the config call, then run the standard flow.
 
 | Situation                         | First action                                                            | Follow-up                                                |
 | --------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------- |
-| Suspected exploit / bad messages  | Guardian `pause()` (EVM) + admin `set_paused` (Soroban)                 | Investigate; rotate peer/endpoint via timelock           |
+| Suspected exploit / bad messages  | Guardian `pause()` (EVM) + admin `set_paused` (Soroban)                 | Investigate; rotate peer/endpoint via timelock (EVM) or propose/confirm (Soroban) |
 | Compromised guardian key          | Timelock `setGuardian(new)`                                             | Treat protocol as still safe (guardian can't move funds) |
 | Compromised single timelock owner | Timelock `removeOwner` + `addOwner` (threshold protects you below M)    | Audit all pending operations, `cancel` any unknown ones  |
 | Stuck/expired intent              | Anyone calls `cancelExpired` / `cancel_expired_intent` after the window | None — permissionless                                    |

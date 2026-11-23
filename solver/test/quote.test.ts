@@ -5,7 +5,15 @@ import { test, describe } from "node:test";
 import { buildIntent } from "@perihelion/sdk";
 import { zeroAddress } from "viem";
 import { loadConfig } from "../src/config.js";
-import { computeProceeds, evaluate, isSolverEligible, RATE_SCALE, type EvaluateDeps, type PricingDeps } from "../src/quote.js";
+import {
+  computeProceeds,
+  createDecimalsLookup,
+  evaluate,
+  isSolverEligible,
+  RATE_SCALE,
+  type EvaluateDeps,
+  type PricingDeps,
+} from "../src/quote.js";
 import { InFlightTracker } from "../src/inventory.js";
 const config = loadConfig({
   PERIHELION_SOLVER_ADDRESS: "0x3333333333333333333333333333333333333333",
@@ -160,16 +168,50 @@ test("fills exactly at the configured margin boundary", async () => {
 
 // ─── decimals must never be guessed (#310) ───────────────────────────────────
 
-test("evaluate: unknown EVM asset decimals produce a non-terminal skip, not a guess", async () => {
+test("evaluate: unknown EVM asset decimals are skipped terminally, not guessed", async () => {
   // No decimalsLookup override -> defaultDecimalsLookup must refuse to guess
-  // for an 0x-prefixed asset instead of assuming 6dp.
+  // for an 0x-prefixed asset instead of assuming 6dp. Unresolvable assets are
+  // durable for this configuration, so the skip is terminal (unsupported_asset).
   const decision = await evaluate(intent(), config, {
     priceOracle: async () => RATE_SCALE,
     feeEstimator: async () => 0n,
   });
   assert.equal(decision.fill, false);
-  assert.equal(decision.terminal, false);
+  assert.equal(decision.code, "unsupported_asset");
+  assert.equal(decision.terminal, true);
   assert.match(decision.reason, /decimals not configured/);
+});
+
+// ─── Soroban SEP-41 contract tokens (C…) ─────────────────────────────────────
+
+const SOROBAN_TOKEN = "C" + "A".repeat(55);
+const sorobanConfig = {
+  ...config,
+  supportedDestAssets: [...config.supportedDestAssets, SOROBAN_TOKEN],
+};
+
+test("evaluate: C… contract token with configured decimals fills", async () => {
+  const decimalsLookup = createDecimalsLookup({
+    [SOROBAN_TOKEN]: 7,
+    "0x0000000000000000000000000000000000000002": 6, // intent() source asset
+  });
+  const decision = await evaluate(
+    intent({ destAsset: SOROBAN_TOKEN }),
+    sorobanConfig,
+    { decimalsLookup, priceOracle: async () => RATE_SCALE, feeEstimator: async () => 0n },
+  );
+  assert.equal(decision.fill, true);
+});
+
+test("evaluate: unconfigured C… contract token is skipped terminally as unsupported_asset", async () => {
+  const decision = await evaluate(
+    intent({ destAsset: SOROBAN_TOKEN }),
+    sorobanConfig,
+    { priceOracle: async () => RATE_SCALE, feeEstimator: async () => 0n },
+  );
+  assert.equal(decision.fill, false);
+  assert.equal(decision.code, "unsupported_asset");
+  assert.equal(decision.terminal, true);
 });
 
 test("evaluate: implausible profit is rejected by the sanity bound", async () => {

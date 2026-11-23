@@ -30,12 +30,13 @@
 
 use soroban_sdk::{Address, Bytes, BytesN, Env};
 
-use crate::strkey;
-use crate::types::{
-    CancelInstruction, FillInstruction, CANCEL_INTENT_LENGTH, CANCEL_REASON_ADMIN,
-    CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID, FILL_INSTRUCTION_LENGTH,
-    MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
+use crate::constants::{
+    CANCEL_INTENT_LENGTH, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID,
+    FILL_INSTRUCTION_LENGTH, MAX_DESTINATION_LEN, MAX_DEST_ASSET_LEN, MSG_CANCEL_INTENT,
+    MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
 };
+use crate::strkey;
+use crate::types::{CancelInstruction, FillInstruction};
 
 /// Build an `Address` from a raw 32-byte contract-id payload.
 ///
@@ -349,7 +350,7 @@ fn decode_fill_instruction(
 
     // Extract recipient (offset 38, 56 bytes): ASCII strkey characters right-zero-padded.
     // Strip trailing zeros and decode as a Stellar strkey (G... or C...).
-    let mut recipient_raw = [0u8; 56];
+    let mut recipient_raw = [0u8; MAX_DESTINATION_LEN];
     for (i, byte) in recipient_raw.iter_mut().enumerate() {
         *byte = message
             .get(38 + i as u32)
@@ -361,7 +362,7 @@ fn decode_fill_instruction(
     // right-zero-padded. The field is 69 bytes wide (not 32) so CODE:ISSUER
     // assets survive the wire without truncation — see #270. Strip the padding,
     // check it is one of the canonical forms and keep the identifier bytes.
-    let dest_asset_raw: [u8; crate::asset::MAX_DEST_ASSET_LEN] = read_field(message, 94)?;
+    let dest_asset_raw: [u8; MAX_DEST_ASSET_LEN] = read_field(message, 94)?;
     let dest_asset_id = &dest_asset_raw[..trimmed_len(&dest_asset_raw)];
     if crate::asset::parse(dest_asset_id).is_none() {
         return Err(PerihelionError::MalformedPayload);
@@ -474,7 +475,11 @@ fn strkey_field<const N: usize>(addr: &Address) -> [u8; N] {
 /// (see #271).
 #[cfg(test)]
 pub(crate) fn encode_fill_instruction(env: &Env, fi: &FillInstruction) -> Bytes {
-    encode_fill_instruction_with_dest_asset(env, fi, &strkey_field::<69>(&fi.dest_asset))
+    encode_fill_instruction_with_dest_asset(
+        env,
+        fi,
+        &strkey_field::<MAX_DEST_ASSET_LEN>(&fi.dest_asset),
+    )
 }
 
 /// [`encode_fill_instruction`], but writing `dest_asset_id` (any canonical
@@ -487,10 +492,10 @@ pub(crate) fn encode_fill_instruction_with_dest_asset(
     dest_asset_id: &[u8],
 ) -> Bytes {
     assert!(
-        dest_asset_id.len() <= 69,
+        dest_asset_id.len() <= MAX_DEST_ASSET_LEN,
         "dest_asset does not fit the 69-byte wire field"
     );
-    let mut dest_asset_field = [0u8; 69];
+    let mut dest_asset_field = [0u8; MAX_DEST_ASSET_LEN];
     dest_asset_field[..dest_asset_id.len()].copy_from_slice(dest_asset_id);
     let mut b = Bytes::new(env);
     b.push_back(PROTOCOL_VERSION);
@@ -498,7 +503,10 @@ pub(crate) fn encode_fill_instruction_with_dest_asset(
     b.append(&Bytes::from_array(env, &fi.intent_hash.to_array()));
     // reserved (offset 34): always zero on the wire, see the decoder note above.
     b.append(&Bytes::from_array(env, &[0u8; 4]));
-    b.append(&Bytes::from_array(env, &strkey_field::<56>(&fi.recipient)));
+    b.append(&Bytes::from_array(
+        env,
+        &strkey_field::<MAX_DESTINATION_LEN>(&fi.recipient),
+    ));
     b.append(&Bytes::from_array(env, &dest_asset_field));
     b.append(&Bytes::from_array(
         env,
