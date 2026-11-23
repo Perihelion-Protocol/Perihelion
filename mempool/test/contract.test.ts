@@ -212,7 +212,7 @@ test("POST /intents 400 (invalid signature) response matches the documented Erro
   );
 });
 
-test("GET /intents 200 response matches the documented IntentRecord[] schema, including submittedAt", async () => {
+test("GET /intents 200 response matches the documented IntentRecord[] schema, including createdAt", async () => {
   await submitSignedIntent();
 
   const res = await fetch(`${BASE}/intents`);
@@ -222,7 +222,7 @@ test("GET /intents 200 response matches the documented IntentRecord[] schema, in
 
   assertMatchesSchema(responseSchema("/intents", "get", "200"), body, "GET /intents 200 body");
 
-  // Verify the record includes the expected timestamp field.
+  // The spec names the record timestamp `createdAt` (Unix seconds).
   const record = body.records[0];
   assert.equal(typeof record.createdAt, "number");
 });
@@ -238,7 +238,7 @@ test("GET /intents?status=<invalid> returns the documented 400", async () => {
   );
 });
 
-test("GET /intents supports limit/offset pagination", async () => {
+test("GET /intents supports limit/cursor pagination", async () => {
   // Submit a couple more intents (distinct nonces -> distinct hashes).
   await submitSignedIntent();
   await submitSignedIntent();
