@@ -17,6 +17,7 @@
 //! any token transfer in the same call). See `docs/TECHNICAL-ARCHITECTURE.md`.
 
 mod asset;
+pub mod constants;
 mod endpoint;
 mod error;
 mod messages;
@@ -35,6 +36,7 @@ mod event_shape_spec;
 #[cfg(test)]
 mod ttl_archival;
 
+pub use constants::*;
 pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
@@ -214,43 +216,6 @@ const GRACE_LEDGERS: u32 = 120_960;
 /// Safety invariant: always round TTL *up*, never down.
 const MIN_SECS_PER_LEDGER: u64 = 4;
 
-/// Maximum deadline horizon, in seconds from the current ledger timestamp.
-/// FillInstructions with `deadline > now + MAX_DEADLINE_HORIZON` are rejected
-/// to prevent trivially pinning an entry at MAX_TTL with a far-future deadline.
-/// 7 days = 604_800 s matches `MAX_DEADLINE_HORIZON_SEC` (exported alias) and
-/// `MAX_DEADLINE_HORIZON` in the SDK's `validateIntent` (sdk/src/intent.ts),
-/// which enforces the same ceiling client-side before an intent is ever signed,
-/// and covers any realistic cross-chain settlement window.
-pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
-
-/// Minimum time window (seconds) required after deliver_intent for dispatch_confirmation
-/// to complete. Solvers cannot deliver into a window too short for the confirmation
-/// to land before the deadline. Mirrors EVM's MIN_CONFIRMATION_GRACE (issue #293).
-/// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
-pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
-
-/// Cross-chain latency budget `L` (issue #1067), in seconds.
-///
-/// A FillConfirmed dispatched on Stellar still needs LayerZero DVN verification
-/// and executor delivery before it lands on the EVM escrow. The EVM
-/// `MIN_CONFIRMATION_GRACE` (`contracts/evm/src/PerihelionEscrow.sol`) is the
-/// protocol minimum grace before `cancelExpired` may refund the user, and it
-/// equals `MIN_DISPATCH_WINDOW` (30 minutes). If the Stellar dispatch cutoff were
-/// `deadline + MIN_DISPATCH_WINDOW`, a confirmation dispatched just under the
-/// cutoff could arrive after the EVM refund opened, letting the solver deliver on
-/// Stellar while the user is refunded on EVM.
-///
-/// The dispatch cutoff is therefore `deadline + MIN_DISPATCH_WINDOW - L`, leaving
-/// a positive margin `L` for DVN verification and executor delivery before the
-/// earliest possible EVM refund. 20 minutes = 1_200 s is documented against
-/// LayerZero DVN and executor SLAs.
-///
-/// Invariant (asserted by a cross-language test that reads both contracts):
-///   `MIN_DISPATCH_WINDOW == EVM MIN_CONFIRMATION_GRACE`
-///   `CROSS_CHAIN_LATENCY_BUDGET > 0`
-///   `CROSS_CHAIN_LATENCY_BUDGET < MIN_DISPATCH_WINDOW`
-pub const CROSS_CHAIN_LATENCY_BUDGET: u64 = 1_200;
-
 /// Latest Stellar timestamp at which `dispatch_confirmation` may still dispatch a
 /// FillConfirmed for an intent with `deadline` (issue #1067). This is
 /// `deadline + MIN_DISPATCH_WINDOW - CROSS_CHAIN_LATENCY_BUDGET`, i.e. the EVM
@@ -261,13 +226,6 @@ pub const fn dispatch_cutoff(deadline: u64) -> u64 {
         .saturating_add(MIN_DISPATCH_WINDOW)
         .saturating_sub(CROSS_CHAIN_LATENCY_BUDGET)
 }
-/// Extra safety margin (seconds) required on top of `MIN_DISPATCH_WINDOW` for
-/// the split `deliver_intent` → `dispatch_confirmation` path (issue #1078).
-/// `deliver_intent` refuses to run unless the intent's deadline is at least
-/// `MIN_DISPATCH_WINDOW + SAFETY_MARGIN` away, leaving headroom for the
-/// confirmation transaction to land (fee bumps, retries, RPC hiccups) before
-/// the source escrow's refund boundary. 10 minutes = 600 s.
-pub const SAFETY_MARGIN: u64 = 600;
 /// Default executor `lzReceive` gas limit encoded into outbound Type-3 options
 /// (issue #1065). Sized for the EVM escrow's `_onFillConfirmed` / `_onCancelIntent`
 /// handlers, which include an ERC-20 transfer plus bookkeeping. 200_000 leaves a

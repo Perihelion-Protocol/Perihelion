@@ -2,25 +2,11 @@
 
 use soroban_sdk::{contracttype, Address, Bytes, BytesN};
 
-/// Wire protocol version for all LayerZero payloads.
-pub const PROTOCOL_VERSION: u8 = 0x01;
-
-/// Message type discriminants (first byte after the version byte).
-pub const MSG_FILL_INSTRUCTION: u8 = 0x01;
-pub const MSG_FILL_CONFIRMED: u8 = 0x02;
-pub const MSG_CANCEL_INTENT: u8 = 0x03;
-
-/// Fixed wire length of a FillInstruction payload.
-pub const FILL_INSTRUCTION_LENGTH: u32 = 227;
-/// Fixed wire length of FillConfirmed (version + type + hash + solver + amount + ledger).
-pub const FILL_CONFIRMED_LENGTH: u32 = 90;
-/// Fixed wire length of CancelIntent (version + type + hash + reason).
-pub const CANCEL_INTENT_LENGTH: u32 = 35;
-
-/// Cancellation reason codes carried in a CancelIntent message.
-pub const CANCEL_REASON_EXPIRED: u8 = 0x00;
-pub const CANCEL_REASON_ADMIN: u8 = 0x01;
-pub const CANCEL_REASON_INVALID: u8 = 0x02;
+pub use crate::constants::{
+    CANCEL_INTENT_LENGTH, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID,
+    FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED,
+    MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
+};
 
 /// Deterministic policy rejection codes emitted in `fill_instruction_rejected`
 /// (issues #1063, #1064). These are terminal: the transport nonce is consumed

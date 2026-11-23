@@ -27,6 +27,8 @@
     "clean": "npm run clean --workspaces --if-present",
     "fmt": "prettier --write \"{node-common,sdk,relayer,solver,mempool,test}/{src,test}/**/*.ts\" eslint.config.mjs",
     "fmt:check": "prettier --check \"{node-common,sdk,relayer,solver,mempool,test}/{src,test}/**/*.ts\" eslint.config.mjs",
+    "constants:gen": "node scripts/gen-protocol-constants.mjs",
+    "constants:check": "node scripts/gen-protocol-constants.mjs --check",
     "prepare": "lefthook install"
   },
   "engines": {

@@ -2,15 +2,21 @@
 
 /** Types describing LayerZero messages on the Perihelion Stellar ↔ EVM path. */
 
-import type { Hex } from "@perihelion/sdk";
+import {
+  CANCEL_INTENT_LENGTH,
+  CANCEL_REASON_ADMIN,
+  CANCEL_REASON_EXPIRED,
+  CANCEL_REASON_INVALID,
+  FILL_CONFIRMED_LENGTH,
+  FILL_INSTRUCTION_LENGTH,
+  type Hex,
+} from "@perihelion/sdk";
 
 /** LayerZero endpoint identifiers for the chains Perihelion bridges. */
 export type EndpointId = number;
 
 /** Canonical Perihelion wire-message widths, shared with the Soroban/EVM codecs. */
-export const FILL_INSTRUCTION_LENGTH = 227;
-export const FILL_CONFIRMED_LENGTH = 90;
-export const CANCEL_INTENT_LENGTH = 35;
+export { FILL_INSTRUCTION_LENGTH, FILL_CONFIRMED_LENGTH, CANCEL_INTENT_LENGTH };
 
 /**
  * Discriminated message type carried in every bridge message.
@@ -31,12 +37,11 @@ export type MessageType = "FillInstruction" | "FillConfirmed" | "CancelIntent";
  * - `1` — ADMIN: an operator cancelled the intent.
  * - `2` — INVALID: the intent failed validation.
  */
-export type CancelReason = 0 | 1 | 2;
+export type CancelReason =
+  typeof CANCEL_REASON_EXPIRED | typeof CANCEL_REASON_ADMIN | typeof CANCEL_REASON_INVALID;
 
 /** Named aliases for the {@link CancelReason} codes. */
-export const CANCEL_REASON_EXPIRED: CancelReason = 0;
-export const CANCEL_REASON_ADMIN: CancelReason = 1;
-export const CANCEL_REASON_INVALID: CancelReason = 2;
+export { CANCEL_REASON_EXPIRED, CANCEL_REASON_ADMIN, CANCEL_REASON_INVALID };
 
 /**
  * A cross-chain message carrying proof that a solver locked source funds for an

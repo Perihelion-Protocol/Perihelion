@@ -1,0 +1,27 @@
+{
+  "description": "Single source of truth for Perihelion cross-chain timing, wire-format lengths, message discriminants, and cancel reason codes. Regenerate language bindings with `node scripts/gen-protocol-constants.mjs`.",
+  "timing": {
+    "MIN_DISPATCH_WINDOW": 1800,
+    "CROSS_CHAIN_LATENCY_BUDGET": 1200,
+    "MIN_CONFIRMATION_GRACE": 3000,
+    "MAX_CONFIRMATION_GRACE": 604800,
+    "MIN_FILL_HEADROOM_SECS": 1920,
+    "MAX_DEADLINE_HORIZON": 604800,
+    "SAFETY_MARGIN": 600
+  },
+  "wire": {
+    "PROTOCOL_VERSION": 1,
+    "MSG_FILL_INSTRUCTION": 1,
+    "MSG_FILL_CONFIRMED": 2,
+    "MSG_CANCEL_INTENT": 3,
+    "FILL_INSTRUCTION_LENGTH": 227,
+    "FILL_CONFIRMED_LENGTH": 90,
+    "CANCEL_INTENT_LENGTH": 35,
+    "MAX_DESTINATION_LEN": 56,
+    "MAX_DEST_ASSET_LEN": 69,
+    "CANCEL_REASON_EXPIRED": 0,
+    "CANCEL_REASON_ADMIN": 1,
+    "CANCEL_REASON_INVALID": 2,
+    "CANCEL_REASON_LOCAL_TIMEOUT": 255
+  }
+}
