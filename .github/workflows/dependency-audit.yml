@@ -93,5 +93,16 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
 
+      # Try to resolve the advisories by bumping soroban-sdk within the 22.x/23.x
+      # line (respecting rust-version = 1.88) before falling back to the
+      # time-boxed ignores in deny.toml (#1129).
+      - name: Refresh soroban-sdk within the 22.x/23.x line
+        working-directory: contracts/soroban
+        run: |
+          cargo update -p soroban-sdk --precise 22.0.11 || true
+          cargo update -p soroban-sdk-macros || true
+          cargo update -p stellar-xdr || true
+          cargo update -p soroban-env-common || true
+
       - name: Run cargo-deny (advisories, licences, bans, sources)
         run: cargo deny --manifest-path contracts/soroban/Cargo.toml --config deny.toml check advisories licenses bans sources
