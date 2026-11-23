@@ -65,20 +65,68 @@ const KNOWN_DECIMALS: Record<string, number> = {
   "native": 7,
 };
 
-/** Fallback decimal lookup: known table → 7dp for Stellar assets → error. */
+/**
+ * Thrown when an asset's decimals cannot be resolved. This is a durable
+ * condition for the current configuration (retrying the same intent will
+ * fail the same way), so {@link evaluate} classifies it as a terminal
+ * `unsupported_asset` skip rather than a transient `pricing_error`.
+ */
+export class UnsupportedAssetError extends Error {
+  readonly assetId: string;
+  constructor(assetId: string, message: string) {
+    super(message);
+    this.name = "UnsupportedAssetError";
+    this.assetId = assetId;
+  }
+}
+
+/** Soroban contract id (SEP-41 token), e.g. `C…` strkey (56 chars). */
+const SOROBAN_CONTRACT_ID = /^C[A-Z2-7]{55}$/;
+
+/**
+ * Fallback decimal lookup: known table → 7dp for Stellar assets → error.
+ * Soroban contract tokens (`C…`) are not resolved here because that needs an
+ * RPC simulation of `decimals()`; supply them via {@link createDecimalsLookup}
+ * or a custom {@link DecimalsLookup}. Unresolvable assets throw
+ * {@link UnsupportedAssetError}.
+ */
 export const defaultDecimalsLookup: DecimalsLookup = (assetId: string): number => {
   if (KNOWN_DECIMALS[assetId] !== undefined) return KNOWN_DECIMALS[assetId];
   // Stellar issued asset: "CODE:ISSUER" uses 7dp.
   if (assetId.includes(":")) return 7;
+  if (SOROBAN_CONTRACT_ID.test(assetId)) {
+    throw new UnsupportedAssetError(
+      assetId,
+      `[Perihelion] decimals not configured for Soroban contract token "${assetId}". ` +
+      `Configure its decimals in the solver's decimals table.`,
+    );
+  }
   // EVM token address (0x...): decimals vary by token (6dp stablecoins, 18dp
   // WETH/DAI, etc.) and cannot be guessed safely — mispricing here moves real
   // money. Callers must supply a DecimalsLookup (e.g. an on-chain
   // erc20.decimals() reader) for EVM assets.
-  throw new Error(
+  throw new UnsupportedAssetError(
+    assetId,
     `[Perihelion] decimals not configured for asset "${assetId}". ` +
     `Provide a DecimalsLookup that returns the correct precision.`,
   );
 };
+
+/**
+ * Build a {@link DecimalsLookup} from an operator-configured table (asset id →
+ * decimals), falling back to {@link defaultDecimalsLookup} for anything not in
+ * the table. Use this to price `C…` SEP-41 tokens without an RPC lookup.
+ */
+export function createDecimalsLookup(
+  configured: Readonly<Record<string, number>>,
+  fallback: DecimalsLookup = defaultDecimalsLookup,
+): DecimalsLookup {
+  return (assetId: string) => {
+    const dp = configured[assetId];
+    if (dp !== undefined) return dp;
+    return fallback(assetId);
+  };
+}
 
 /** 1:1 stub oracle — suitable only for same-value stablecoin corridors. */
 export const defaultPriceOracle: PriceOracle = async () => RATE_SCALE;
@@ -302,6 +350,11 @@ export async function evaluate(
     proceeds = await computeProceeds(intent, deps);
     fees = await (deps.feeEstimator ?? defaultFeeEstimator)(intent);
   } catch (err) {
+    // An asset whose decimals cannot be resolved will never price, so skip it
+    // terminally instead of retrying it every tick.
+    if (err instanceof UnsupportedAssetError) {
+      return { fill: false, code: "unsupported_asset", reason: err.message, terminal: true };
+    }
     return { fill: false, code: "pricing_error", reason: `pricing error: ${String(err)}`, terminal: false };
   }
 
