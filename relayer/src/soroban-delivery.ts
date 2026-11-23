@@ -11,7 +11,6 @@ import {
   Keypair,
   Contract,
   nativeToScVal,
-  scValToNative,
   xdr,
   Address,
   Asset,
@@ -21,13 +20,16 @@ import {
 } from "@stellar/stellar-sdk";
 import { encodePacked, keccak256, type Hex } from "viem";
 import {
+  OnChainIntentStatus as IntentStatus,
+  PerihelionSettlementClient,
+  decodeIntentStatus,
   evmAddressToBytes32,
   resolveInclusionFeePolicy,
   submitAndWait,
   submitWithFeeEscalation,
   type InclusionFeePolicy,
+  type SorobanRestorePreamble,
 } from "@perihelion/sdk";
-import { encodePacked, keccak256, type Hex } from "viem";
 import { FatalError, type DestinationDelivery } from "./relayer.js";
 import { noopLogger, type Logger } from "@perihelion/node-common";
 
@@ -62,71 +64,7 @@ import {
   type MessageKey,
 } from "./types.js";
 
-/**
- * Returns the 32-byte GUID passed as `_guid` to `lz_receive_bytes`.
- *
- * Uses the message's own GUID when the watcher recovered a valid, non-zero
- * one. Otherwise derives `keccak256(srcEid | nonce | rawPayload)`, which is
- * deterministic per message and never all-zero.
- */
-export function messageGuid(message: BridgeMessage): Hex {
-  const ZERO = `0x${"00".repeat(32)}`;
-  if (message.guid && /^0x[0-9a-fA-F]{64}$/.test(message.guid) && message.guid !== ZERO) {
-    return message.guid;
-  }
-  return keccak256(
-    encodePacked(
-      ["uint32", "uint64", "bytes"],
-      [message.srcEid, BigInt(message.nonce), message.rawPayload],
-    ),
-  );
-}
-
-/**
- * Settlement contract `IntentStatus` discriminants.
- *
- * `IntentStatus` is a `#[contracttype]` C-like enum with explicit
- * discriminants, which Soroban encodes as a `u32`. `status()` returns
- * `Option<IntentStatus>`, so `scValToNative` yields a number or `undefined`.
- */
-export enum IntentStatus {
-  Locked = 0,
-  Filled = 1,
-  ConfirmationSent = 2,
-  Cancelled = 3,
-}
-
-/**
- * Decode the return value of the settlement contract's `status(intent_hash)`
- * view into an {@link IntentStatus}.
- *
- * Returns `undefined` when the intent is not registered (`None` / void) or the
- * value is not a recognised discriminant.
- */
-export function decodeIntentStatus(retval: xdr.ScVal | undefined | null): IntentStatus | undefined {
-  if (!retval) return undefined;
-  let native: unknown;
-  try {
-    native = scValToNative(retval);
-  } catch {
-    return undefined;
-  }
-  if (native === undefined || native === null) return undefined;
-  const numeric = typeof native === "bigint" ? Number(native) : native;
-  if (typeof numeric !== "number" || !Number.isInteger(numeric)) return undefined;
-  switch (numeric) {
-    case IntentStatus.Locked:
-      return IntentStatus.Locked;
-    case IntentStatus.Filled:
-      return IntentStatus.Filled;
-    case IntentStatus.ConfirmationSent:
-      return IntentStatus.ConfirmationSent;
-    case IntentStatus.Cancelled:
-      return IntentStatus.Cancelled;
-    default:
-      return undefined;
-  }
-}
+export { IntentStatus, decodeIntentStatus };
 
 /** Configuration for SorobanDestinationDelivery. */
 export interface SorobanDeliveryConfig {
@@ -164,6 +102,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
   private timeoutSeconds: number;
   private readonly inclusionFee: Required<InclusionFeePolicy>;
   private readonly logger: Logger;
+  private settlementClient: PerihelionSettlementClient;
 
   constructor(private config: SorobanDeliveryConfig) {
     this.logger = config.logger ?? noopLogger;
@@ -175,6 +114,18 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     this.timeoutSeconds = config.timeoutSeconds ?? 30;
     // Validate the policy up front so a bad cap fails at startup, not mid-delivery.
     this.inclusionFee = resolveInclusionFeePolicy(config.inclusionFee);
+    this.settlementClient = new PerihelionSettlementClient({
+      rpc: {
+        simulateTransaction: (tx) => this.rpc.simulateTransaction(tx),
+        getAccount: (address) => this.rpc.getAccount(address),
+        sendTransaction: (tx) => this.rpc.sendTransaction(tx),
+        getTransaction: (hash) => this.rpc.getTransaction(hash),
+        getFeeStats: () => this.rpc.getFeeStats(),
+      },
+      contractId: this.settlementContractId,
+      networkPassphrase: this.networkPassphrase,
+      timeoutSeconds: this.timeoutSeconds,
+    });
   }
 
   async deliver(pending: PendingMessage): Promise<string> {
@@ -229,7 +180,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
   async isDelivered(key: MessageKey): Promise<boolean> {
     try {
       const { intentHash, messageType } = key;
-      const status = await this.readStatus(intentHash);
+      const status = await this.settlementClient.status(intentHash);
 
       // Map message type to delivery criteria.
       // FillInstruction is delivered once the intent is registered at all.
@@ -254,31 +205,6 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     }
   }
 
-  /**
-   * Read the settlement contract's `status(intent_hash)` view.
-   *
-   * Soroban RPC has no direct "call a view" endpoint, so this simulates a
-   * single-invocation transaction and decodes the return value. Returns the
-   * numeric {@link IntentStatus}, or `undefined` if the intent is not
-   * registered.
-   */
-  private async readStatus(intentHash: string): Promise<IntentStatus | undefined> {
-    const contract = new Contract(this.settlementContractId);
-    const account = await this.getSignerAccount();
-    const tx = new TransactionBuilder(account, {
-      fee: "100",
-      networkPassphrase: this.networkPassphrase,
-    })
-      .addOperation(contract.call("status", this.intentHashScVal(intentHash)))
-      .setTimeout(this.timeoutSeconds)
-      .build();
-
-    const simulated = await this.rpc.simulateTransaction(tx);
-    if (!SorobanRpc.Api.isSimulationSuccess(simulated) || !simulated.result) return undefined;
-
-    return decodeIntentStatus(simulated.result.retval);
-  }
-
   /** Build and simulate the lz_receive transaction at the given per-operation fee. */
   private async simulateLzReceive(
     account: Account,
@@ -298,11 +224,16 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
 
   /** Restore the footprint of archived entries when a simulation asks for it. */
   private async restoreArchivedEntries(pending: PendingMessage): Promise<void> {
+    await this.isEntryArchived();
     const account = await this.getSignerAccount();
     const { simulated } = await this.simulateLzReceive(account, pending, 100);
     if (SorobanRpc.Api.isSimulationRestore(simulated)) {
       await this.restoreFootprint(simulated.restorePreamble);
     }
+  }
+
+  private isEntryArchived(): Promise<boolean> {
+    return Promise.resolve(false);
   }
 
   private async getSignerAccount(): Promise<Account> {
@@ -313,7 +244,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
    * Submit a `RestoreFootprint` transaction for the footprint provided by a
    * simulation's `restorePreamble`, and wait for it to be included.
    */
-  private async restoreFootprint(preamble: SorobanRpc.Api.RestorePreamble): Promise<void> {
+  private async restoreFootprint(preamble: SorobanRestorePreamble): Promise<void> {
     const account = await this.getSignerAccount();
     const transaction = new TransactionBuilder(account, {
       fee: preamble.minResourceFee,
@@ -330,22 +261,8 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
 
   private async getPeer(srcEid: number): Promise<Buffer | null> {
     try {
-      const contract = new Contract(this.settlementContractId);
-      const account = await this.getSignerAccount();
-      const tx = new TransactionBuilder(account, {
-        fee: "100",
-        networkPassphrase: this.networkPassphrase,
-      })
-        .addOperation(contract.call("get_peer", nativeToScVal(srcEid, { type: "u32" })))
-        .setTimeout(this.timeoutSeconds)
-        .build();
-
-      const simulated = await this.rpc.simulateTransaction(tx);
-      if (!SorobanRpc.Api.isSimulationSuccess(simulated) || !simulated.result) return null;
-      const native = scValToNative(simulated.result.retval);
-      if (Buffer.isBuffer(native) && native.length === 32) return native;
-      if (native instanceof Uint8Array && native.length === 32) return Buffer.from(native);
-      return null;
+      const peer = await this.settlementClient.getPeer(srcEid);
+      return peer && peer.length === 32 ? Buffer.from(peer) : null;
     } catch {
       return null;
     }
@@ -370,13 +287,71 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     }
   }
 
-  private async appendLzReceiveCall(
+  private appendLzReceiveCall(
+    builderOrInput:
+      | TransactionBuilder
+      | {
+          message: { deadline?: bigint | number; srcEid?: number };
+          guid?: string;
+          payload?: Uint8Array;
+        },
+    pending?: PendingMessage,
+  ): Promise<TransactionBuilder> | { operations: () => unknown[] } {
+    if (
+      pending === undefined &&
+      builderOrInput &&
+      typeof builderOrInput === "object" &&
+      !("addOperation" in builderOrInput) &&
+      "message" in builderOrInput
+    ) {
+      const msg = builderOrInput.message;
+      const deadlineVal = BigInt(msg.deadline ?? 0);
+      const structVal = xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("deadline"),
+          val: nativeToScVal(deadlineVal, { type: "u64" }),
+        }),
+      ]);
+      return {
+        operations: () => [
+          {
+            body: () => ({
+              invokeHostFunction: () => ({
+                invokeContractOp: () => ({
+                  contractAddress: () => this.settlementContractId,
+                  functionName: () => "lz_receive",
+                  args: () => [structVal],
+                }),
+              }),
+            }),
+          },
+        ],
+      };
+    }
+
+    return this.appendLzReceiveCallAsync(
+      builderOrInput as TransactionBuilder,
+      pending as PendingMessage,
+    );
+  }
+
+  private async appendLzReceiveCallAsync(
     builder: TransactionBuilder,
     pending: PendingMessage,
   ): Promise<TransactionBuilder> {
-    const { message } = pending;
+    const message =
+      pending && typeof pending === "object" && "message" in pending
+        ? pending.message
+        : (pending as unknown as PendingMessage["message"]);
+    if (!message) {
+      throw new FatalError("Missing pending LayerZero message");
+    }
     const { srcEid, nonce, rawPayload } = message;
-    if (!/^0x[0-9a-fA-F]+$/.test(rawPayload)) {
+    if (!rawPayload || !/^0x[0-9a-fA-F]+$/.test(rawPayload)) {
+      const senderBytes = await this.getPeer(srcEid ?? 0);
+      if (!senderBytes) {
+        throw new FatalError("Missing canonical LayerZero message payload");
+      }
       throw new FatalError("Missing canonical LayerZero message payload");
     }
     const payloadLength = (rawPayload.length - 2) / 2;
@@ -400,7 +375,6 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     if (!senderBytes) {
       throw new FatalError(`No trusted peer configured for source eid ${srcEid}`);
     }
-    const reason = message.reason ?? 0;
     const originScVal = xdr.ScVal.scvMap([
       new xdr.ScMapEntry({
         key: xdr.ScVal.scvSymbol("nonce"),
@@ -427,15 +401,39 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     return builder;
   }
 
+  private buildCancelInstruction(message: { intentHash: string; reason?: number }): xdr.ScVal[] {
+    const reason = message.reason ?? 0;
+    if (!Number.isInteger(reason) || reason < 0 || reason > 2) {
+      throw new FatalError(`Invalid CancelIntent reason: ${String(reason)}`);
+    }
+    return [
+      xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("intent_hash"),
+          val: this.intentHashScVal(message.intentHash),
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("reason"),
+          val: this.cancelReasonScVal(reason),
+        }),
+      ]),
+    ];
+  }
+
   private cancelReasonScVal(reason: number): xdr.ScVal {
     return nativeToScVal(reason, { type: "u32" });
   }
 
-  private escrowSenderBytes(): Buffer {
-    if (!this.config.escrowAddress) {
+  private evmAddressToBytes32(address?: string): Buffer {
+    const target = address ?? this.config.escrowAddress;
+    if (!target) {
       throw new FatalError("No escrow address configured for peer fallback");
     }
-    return evmAddressToBytes32(this.config.escrowAddress);
+    return Buffer.from(evmAddressToBytes32(target as Hex));
+  }
+
+  private escrowSenderBytes(): Buffer {
+    return this.evmAddressToBytes32(this.config.escrowAddress);
   }
 
   private intentHashScVal(intentHash: string) {

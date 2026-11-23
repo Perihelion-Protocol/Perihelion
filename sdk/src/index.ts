@@ -36,6 +36,21 @@ export * from "./errors.js";
 export * from "./client.js";
 export * from "./units.js";
 export * from "./stellar.js";
+export {
+  PerihelionSettlementClient,
+  SETTLEMENT_CONTRACT_SPEC,
+  CONTRACT_SPEC_ENTRIES,
+  SETTLEMENT_ERROR_CODES,
+  decodeSettlementIntentRecord,
+  decodeSettlementError,
+  type SettlementIntentRecord,
+  type SorobanRpcClient,
+  type SettlementClientOptions,
+  type BuildCancelExpiredTxOptions,
+  type SubmitCancelExpiredOptions,
+  type SettlementMethodSpec,
+  type SettlementErrorName,
+} from "./stellar.js";
 export * from "./validate.js";
 export * from "./escrow-abi.js";
 export * from "./escrow-client.js";

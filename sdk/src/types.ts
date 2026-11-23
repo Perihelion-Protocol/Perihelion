@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+import { scValToNative, type xdr } from "@stellar/stellar-sdk";
+
 /**
  * Core protocol types shared across the Perihelion SDK, solver, and relayer.
  *
@@ -80,6 +82,35 @@ export enum OnChainIntentStatus {
   Cancelled = 3,
 }
 
+/** Canonical variant label for an {@link OnChainIntentStatus}. */
+export type OnChainIntentStatusName = "Locked" | "Filled" | "ConfirmationSent" | "Cancelled";
+
+const INTENT_STATUS_NAMES: Readonly<Record<OnChainIntentStatus, OnChainIntentStatusName>> =
+  Object.freeze({
+    [OnChainIntentStatus.Locked]: "Locked",
+    [OnChainIntentStatus.Filled]: "Filled",
+    [OnChainIntentStatus.ConfirmationSent]: "ConfirmationSent",
+    [OnChainIntentStatus.Cancelled]: "Cancelled",
+  });
+
+const INTENT_STATUS_BY_NAME: Readonly<Record<string, OnChainIntentStatus>> = Object.freeze({
+  Locked: OnChainIntentStatus.Locked,
+  Filled: OnChainIntentStatus.Filled,
+  ConfirmationSent: OnChainIntentStatus.ConfirmationSent,
+  Cancelled: OnChainIntentStatus.Cancelled,
+});
+
+/**
+ * Convert an {@link OnChainIntentStatus} discriminant to its variant name,
+ * or `undefined` when `status` is `undefined`.
+ */
+export function intentStatusName(
+  status: OnChainIntentStatus | undefined,
+): OnChainIntentStatusName | undefined {
+  if (status === undefined) return undefined;
+  return INTENT_STATUS_NAMES[status];
+}
+
 /**
  * Decode the `ScVal` returned by the settlement contract's `status` view into
  * an {@link OnChainIntentStatus}.
@@ -91,18 +122,25 @@ export enum OnChainIntentStatus {
 export function decodeIntentStatus(scVal: unknown): OnChainIntentStatus | undefined {
   const native = toNativeStatus(scVal);
   if (native === undefined || native === null) return undefined;
-  if (typeof native !== "number" || !Number.isInteger(native)) {
-    throw new Error(`Unexpected IntentStatus value: ${String(native)}`);
+  if (typeof native === "string") {
+    if (Object.prototype.hasOwnProperty.call(INTENT_STATUS_BY_NAME, native)) {
+      return INTENT_STATUS_BY_NAME[native];
+    }
+    throw new Error(`Unknown IntentStatus variant: ${native}`);
   }
-  switch (native) {
-    case OnChainIntentStatus.Locked:
-    case OnChainIntentStatus.Filled:
-    case OnChainIntentStatus.ConfirmationSent:
-    case OnChainIntentStatus.Cancelled:
-      return native;
-    default:
-      throw new Error(`Unknown IntentStatus discriminant: ${native}`);
+  const numeric = typeof native === "bigint" ? Number(native) : native;
+  if (typeof numeric !== "number" || !Number.isInteger(numeric)) {
+    const label =
+      typeof native === "number" || typeof native === "boolean" || typeof native === "symbol"
+        ? String(native)
+        : "[object Object]";
+    throw new Error(`Unexpected IntentStatus value: ${label}`);
   }
+  if (numeric === 0) return OnChainIntentStatus.Locked;
+  if (numeric === 1) return OnChainIntentStatus.Filled;
+  if (numeric === 2) return OnChainIntentStatus.ConfirmationSent;
+  if (numeric === 3) return OnChainIntentStatus.Cancelled;
+  throw new Error(`Unknown IntentStatus discriminant: ${numeric}`);
 }
 
 /**
@@ -115,20 +153,86 @@ export function isSettledStatus(status: OnChainIntentStatus | undefined): boolea
 
 /**
  * Normalise an `ScVal`-like value to the native representation produced by
- * `scValToNative`. Handles raw `ScVal` objects (`{ switch: { name }, u32 }`)
- * as well as already-converted numbers/`undefined`.
+ * `scValToNative`. Handles real `@stellar/stellar-sdk` `xdr.ScVal` instances,
+ * mock `ScVal` objects (`{ switch: { name }, u32 }`), variant strings, bigints,
+ * and already-converted numbers/`undefined`.
  */
 function toNativeStatus(scVal: unknown): unknown {
   if (scVal === undefined || scVal === null) return undefined;
   if (typeof scVal === "number") return scVal;
+  if (typeof scVal === "bigint") return Number(scVal);
+  if (typeof scVal === "string") return scVal;
   if (typeof scVal === "object") {
-    const obj = scVal as { switch?: { name?: string }; u32?: unknown; value?: unknown };
-    const name = obj.switch?.name;
+    const candidate = scVal as {
+      switch?: unknown;
+      u32?: unknown;
+      i32?: unknown;
+      sym?: unknown;
+      vec?: unknown;
+      value?: unknown;
+    };
+
+    if (typeof candidate.switch === "function") {
+      const realScVal = scVal as xdr.ScVal;
+      const sw = realScVal.switch().name;
+      if (sw === "scvVoid") return undefined;
+      if (sw === "scvU32") return realScVal.u32();
+      if (sw === "scvI32") return realScVal.i32();
+      if (sw === "scvSymbol") return realScVal.sym().toString();
+      if (sw === "scvVec") {
+        const vec = realScVal.vec();
+        if (vec && vec.length === 1) {
+          return toNativeStatus(vec[0]);
+        }
+      }
+      const converted = scValToNative(realScVal) as unknown;
+      if (Array.isArray(converted) && converted.length === 1) {
+        return toNativeStatus(converted[0]);
+      }
+      return typeof converted === "bigint" ? Number(converted) : converted;
+    }
+
+    const swObj =
+      typeof candidate.switch === "object" && candidate.switch !== null
+        ? (candidate.switch as { name?: string })
+        : undefined;
+    const name = swObj?.name;
     if (name === "scvVoid") return undefined;
-    if (name === "scvU32") return obj.u32;
-    if (name === "scvU64" || name === "scvI64") return obj.value;
+    if (name === "scvU32") {
+      return typeof candidate.u32 === "function"
+        ? (candidate.u32 as () => unknown)()
+        : candidate.u32;
+    }
+    if (name === "scvI32") {
+      return typeof candidate.i32 === "function"
+        ? (candidate.i32 as () => unknown)()
+        : candidate.i32;
+    }
+    if (name === "scvSymbol") {
+      const symVal =
+        typeof candidate.sym === "function" ? (candidate.sym as () => unknown)() : candidate.sym;
+      if (typeof symVal === "string") return symVal;
+      if (symVal instanceof Uint8Array || Buffer.isBuffer(symVal)) {
+        return Buffer.from(symVal).toString("utf8");
+      }
+      return undefined;
+    }
+    if (name === "scvU64" || name === "scvI64") {
+      const raw =
+        typeof candidate.value === "function"
+          ? (candidate.value as () => unknown)()
+          : candidate.value;
+      return typeof raw === "bigint" ? Number(raw) : raw;
+    }
     // Already-converted native value wrapped in an object.
-    if ("value" in obj && typeof obj.value === "number") return obj.value;
+    if ("value" in candidate) {
+      const raw =
+        typeof candidate.value === "function"
+          ? (candidate.value as () => unknown)()
+          : candidate.value;
+      if (typeof raw === "number") return raw;
+      if (typeof raw === "bigint") return Number(raw);
+    }
   }
   return scVal;
 }
