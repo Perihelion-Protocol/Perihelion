@@ -70,6 +70,7 @@ import {
   createPublicClient,
   http,
   decodeAbiParameters,
+  decodeEventLog,
   parseAbiParameters,
   type PublicClient,
   type Log,
@@ -189,11 +190,6 @@ const PACKET_SENT_EVENT_ABI = [
     ],
   },
 ] as const;
-
-/** ABI parameters for decoding `PacketSent` non-indexed data. */
-const PACKET_SENT_DATA_PARAMS = parseAbiParameters(
-  "bytes encodedPayload, bytes options, address sendLibrary",
-);
 
 /** Offset of the nonce field within the encoded LayerZero packet header. */
 const PACKET_NONCE_OFFSET = 1;
@@ -574,11 +570,15 @@ export class EVMSourceWatcher implements SourceWatcher {
     const endpoint = this.config.endpointAddress!.toLowerCase();
     for (const receiptLog of receipt.logs) {
       if (receiptLog.address.toLowerCase() !== endpoint) continue;
-      // topics[0] is the PacketSent event signature; all fields are non-indexed.
       if (!receiptLog.topics || receiptLog.topics.length < 1) continue;
       try {
-        const [encodedPayload] = decodeAbiParameters(PACKET_SENT_DATA_PARAMS, receiptLog.data);
-        const nonce = decodePacketNonce(encodedPayload);
+        // decodeEventLog throws unless topics[0] is the PacketSent signature.
+        const decoded = decodeEventLog({
+          abi: PACKET_SENT_EVENT_ABI,
+          data: receiptLog.data,
+          topics: receiptLog.topics as [Hex, ...Hex[]],
+        });
+        const nonce = decodePacketNonce(decoded.args.encodedPayload);
         if (nonce !== null) return nonce;
       } catch {
         // Not a PacketSent log or malformed payload; keep scanning.
