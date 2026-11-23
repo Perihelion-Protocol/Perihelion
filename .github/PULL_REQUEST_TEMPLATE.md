@@ -26,6 +26,7 @@ Closes #
 ## Checklist
 
 - [ ] Tests added/updated and passing (`npm test` / `cargo test` / `forge test`)
+- [ ] Regression test added or referenced that would catch a regression of this fix
 - [ ] Docs updated if interfaces or on-chain formats changed
 - [ ] CI is green
 - [ ] Reviewed against the [design invariants](../docs/TECHNICAL-ARCHITECTURE.md#0-design-invariants-read-first) (I1–I5) — this change cannot violate any of them
