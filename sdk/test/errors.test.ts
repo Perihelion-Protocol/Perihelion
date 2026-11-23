@@ -11,6 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { keccak256, toUtf8Bytes } from "ethers";
 
 import {
   PerihelionError,
@@ -249,11 +250,6 @@ test("MempoolResponseError forwards cause option", () => {
 
 /** Compute the 4-byte selector for an error signature, e.g. "NoPendingOwner()". */
 function selector(signature: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { keccak256, toUtf8Bytes } = require("ethers") as {
-    keccak256: (data: Uint8Array) => string;
-    toUtf8Bytes: (s: string) => Uint8Array;
-  };
   return keccak256(toUtf8Bytes(signature)).slice(0, 10).toLowerCase();
 }
 
