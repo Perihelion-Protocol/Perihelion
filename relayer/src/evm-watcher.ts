@@ -76,13 +76,14 @@ import {
   type Log,
   type Hex,
 } from "viem";
-import type { SourceWatcher } from "./relayer.js";
 import { noopLogger, type Logger } from "@perihelion/node-common";
 import {
   FILL_INSTRUCTION_LENGTH,
   type BridgeMessage,
-  type PendingMessage,
   type EndpointId,
+  type EvmRefundObservation,
+  type PendingMessage,
+  type SourceWatcher,
 } from "./types.js";
 
 /** Build the exact canonical EVM FillInstruction payload used by the escrow. */

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+import { noopLogger, type Logger } from "@perihelion/node-common";
 import { isValidEd25519SecretSeed } from "./strkey.js";
-
-/** Relayer runtime configuration, loaded from environment variables. */
 
 /** Relayer runtime configuration, loaded from environment variables. */
 export interface RelayerConfig {
@@ -80,6 +79,42 @@ export const PUBNET_PASSPHRASE = "Public Global Stellar Network ; September 2015
 
 /** Accepted truthy values for boolean environment flags. */
 const TRUTHY_RE = /^(1|true|yes|on)$/i;
+
+/** Largest LayerZero endpoint id: endpoint ids are uint32 on-chain. */
+const MAX_ENDPOINT_ID = 0xffff_ffff;
+
+/**
+ * Parse a base-10 integer from an environment value. Only ASCII digits are
+ * accepted, so fractions ("1.5"), exponents ("1e3"), signs and empty strings
+ * are rejected. Returns undefined when the value is not an integer in
+ * [min, max].
+ */
+function parseIntegerInRange(raw: string, min: number, max: number): number | undefined {
+  if (!/^\d+$/.test(raw)) return undefined;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : undefined;
+}
+
+/**
+ * Read an optional integer setting. Falls back to `fallback` when unset and
+ * records an error naming the variable when the value is malformed.
+ */
+function readIntegerEnv(
+  errors: string[],
+  name: string,
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (raw === undefined) return fallback;
+  const value = parseIntegerInRange(raw, min, max);
+  if (value === undefined) {
+    errors.push(`${name} must be an integer between ${min} and ${max}, got: "${raw}"`);
+    return fallback;
+  }
+  return value;
+}
 
 /** 0x-prefixed 20-byte EVM address. */
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
