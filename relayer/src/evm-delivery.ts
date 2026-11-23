@@ -204,10 +204,10 @@ export class EvmDestinationDelivery implements DestinationDelivery {
     return type === "FillConfirmed" || type === "CancelIntent";
   }
 
-  private async deliverViaMockEndpoint(payload: Hex): Promise<Hash> {
+  private async deliverViaEndpoint(payload: Hex): Promise<Hash> {
     const { request } = await this.publicClient.simulateContract({
       account: this.account,
-      address: this.config.mockEndpointAddress!,
+      address: this.config.mockEndpointAddress,
       abi: MOCK_ENDPOINT_ABI,
       functionName: "deliver",
       args: [this.config.dstEid ?? 0, this.config.escrowAddress, payload],
@@ -252,6 +252,7 @@ export class EvmDestinationDelivery implements DestinationDelivery {
     return this.payloadHash(message);
   }
 
+  /** keccak256 over the raw payload bytes, as a 32-byte hex value. */
   private payloadHash(message: Message): Hex {
     return messageGuid(message.type, this.bodyOf(message));
   }

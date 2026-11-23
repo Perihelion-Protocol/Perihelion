@@ -19,6 +19,7 @@ import {
   type Account,
   type Transaction,
 } from "@stellar/stellar-sdk";
+import { encodePacked, keccak256, type Hex } from "viem";
 import {
   evmAddressToBytes32,
   resolveInclusionFeePolicy,
@@ -56,9 +57,30 @@ export function deliveryGuid(message: {
 import {
   CANCEL_INTENT_LENGTH,
   FILL_INSTRUCTION_LENGTH,
+  type BridgeMessage,
   type PendingMessage,
   type MessageKey,
 } from "./types.js";
+
+/**
+ * Returns the 32-byte GUID passed as `_guid` to `lz_receive_bytes`.
+ *
+ * Uses the message's own GUID when the watcher recovered a valid, non-zero
+ * one. Otherwise derives `keccak256(srcEid | nonce | rawPayload)`, which is
+ * deterministic per message and never all-zero.
+ */
+export function messageGuid(message: BridgeMessage): Hex {
+  const ZERO = `0x${"00".repeat(32)}`;
+  if (message.guid && /^0x[0-9a-fA-F]{64}$/.test(message.guid) && message.guid !== ZERO) {
+    return message.guid;
+  }
+  return keccak256(
+    encodePacked(
+      ["uint32", "uint64", "bytes"],
+      [message.srcEid, BigInt(message.nonce), message.rawPayload],
+    ),
+  );
+}
 
 /**
  * Settlement contract `IntentStatus` discriminants.

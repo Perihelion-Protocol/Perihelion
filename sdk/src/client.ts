@@ -528,73 +528,64 @@ export class PerihelionClient {
   }
 
   /**
-   * **Off-chain hint only** — estimate from a mempool record whether the
-   * intent looks refundable via `cancelExpired` (issue #175).
+   * **Off-chain hint only, deprecated.** Estimates from a mempool record
+   * whether the intent looks refundable via `cancelExpired` (issue #175).
    *
-   * Do not use this to decide whether to call `cancelExpired`. Mempool
-   * statuses are best-effort reports from relayers and solvers, and the status
-   * endpoint is unauthenticated unless the operator configures a token. A wrong
-   * or malicious `settled` report hides a refundable lock, and a stale
-   * `pending` after an on-chain release suggests a call that will revert. Use
-   * {@link PerihelionEscrowClient.isRefundable} (or
-   * {@link PerihelionEscrowClient.refundStatus}), which reads the escrow's
-   * `locks` record, `confirmationGrace` and block time and mirrors
-   * `cancelExpired`'s checks exactly.
+   * @deprecated Use {@link PerihelionEscrowClient.refundStatus} for the
+   * decision to call `cancelExpired`. It reads the escrow's `locks` record,
+   * `confirmationGrace` and `block.timestamp` at one block and returns the
+   * exact revert reason. This method reads the mempool, which is best-effort
+   * and unauthenticated, and it compares against the local clock. It remains
+   * only as a cheap pre-filter for lists of records (e.g. in a UI).
    *
-   * This hint returns `true` when both conditions hold:
-   * 1. The mempool status is still `'pending'`. Every other
-   *    {@link MempoolIntentStatus} is treated as not refundable: `filled`
-   *    means the intent was delivered on the destination chain and is awaiting
-   *    source-chain release, `settled` and `refunded` are terminal, and
-   *    `expired` indicates the record has diverged from the refund path.
-   * 2. Its deadline has passed **and** the confirmation grace period has elapsed.
+   * Migration: `client.isRefundable(record, graceMs)` becomes
+   * `client.isRefundable(record, graceSeconds)`, with the grace read from
+   * {@link PerihelionEscrowClient.confirmationGrace} in seconds (no `* 1_000`).
+   * To decide, call `escrowClient.refundStatus(hash)` instead.
    *
-   * It is useful for cheaply filtering a list of records (e.g. in a UI) before
-   * confirming each candidate on-chain.
+   * Returns `true` only when the mempool status is still `'pending'` and the
+   * intent's deadline plus the grace period has passed. Every other
+   * {@link MempoolIntentStatus} is treated as not refundable: `filled` is
+   * awaiting source-chain release, `settled` and `refunded` are terminal, and
+   * `expired` means the record has diverged from the refund path.
    *
    * ```ts
    * const record = await client.waitForSettlement(hash);
    * const grace = await escrowClient.confirmationGrace(); // bigint seconds
-   * if (client.isRefundable(record, Number(grace) * 1_000)) {
+   * if (client.isRefundable(record, Number(grace))) {
    *   // Hint only: confirm on-chain before sending the transaction.
-   *   if (await escrowClient.isRefundable(hash)) await escrowClient.cancelExpired(hash);
+   *   const status = await escrowClient.refundStatus(hash);
+   *   if (status.refundable) await escrowClient.cancelExpired(hash);
    * }
    * ```
    *
    * @param record The intent record to check.
-   * @param confirmationGraceMs Confirmation grace period in **milliseconds**.
-   *   This **must** be read from the live contract via
-   *   {@link PerihelionEscrowClient.confirmationGrace} and converted to ms —
-   *   the value is timelock-governed and can change after deployment.
-   *   There is deliberately no default; passing a stale constant will produce
-   *   an incorrect verdict.
-   * @param now Current time in unix seconds. Defaults to the local clock, but
-   *   pass chain time here when available to avoid client-clock disagreements
-   *   with the on-chain `block.timestamp` check that `cancelExpired` performs.
+   * @param confirmationGraceSeconds Confirmation grace period in **seconds**,
+   *   the same unit as the on-chain `confirmationGrace()` and `deadline`. Read
+   *   it from the live contract; it is timelock-governed and can change after
+   *   deployment. There is deliberately no default.
+   * @param now Current time in unix seconds. Defaults to the local clock.
    * @param clockSkew Seconds to bias toward "not yet refundable" near the
-   *   boundary, mirroring {@link isExpired}'s `clockSkew` parameter. Useful
-   *   when `now` comes from a client clock that may run fast.
-   *   Default: `0`.
+   *   boundary, mirroring {@link isExpired}'s `clockSkew` parameter. Default: `0`.
    * @returns `true` if the mempool record suggests the intent is refundable.
    *
-   * @see {PerihelionEscrowClient.isRefundable} for the authoritative on-chain check.
+   * @see {PerihelionEscrowClient.refundStatus} for the authoritative on-chain check.
    * @see {PerihelionEscrowClient.confirmationGrace} to read the live grace period.
    */
   isRefundable(
     record: IntentRecord,
-    confirmationGraceMs: number,
+    confirmationGraceSeconds: number,
     now: number = Math.floor(Date.now() / 1_000),
     clockSkew = 0,
   ): boolean {
-    // Condition 3: only 'pending' intents are candidates — no settlement is
-    // in progress or has already completed. This excludes 'filled', which has
-    // been delivered on the destination chain and is awaiting source-chain
-    // release and must not be treated as refundable purely on elapsed time.
+    // Only 'pending' intents are candidates. 'filled' has been delivered on the
+    // destination chain and awaits source-chain release, so it must not be
+    // treated as refundable purely on elapsed time.
     if (record.status !== "pending") {
       return false;
     }
-    // Conditions 1 & 2: deadline + grace must have passed (unix seconds).
-    const deadlineWithGrace = record.intent.deadline + Math.floor(confirmationGraceMs / 1_000);
+    // Deadline + grace must have passed. All values are unix seconds.
+    const deadlineWithGrace = record.intent.deadline + Math.floor(confirmationGraceSeconds);
     return now - clockSkew >= deadlineWithGrace;
   }
 
