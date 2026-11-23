@@ -166,7 +166,7 @@ test("#932 verifyIntent accepts an ERC-1271 contract-wallet signature", async ()
   });
 
   const signature = "0xdeadbeef" as `0x${string}`;
-  assert.equal(await verifyIntent(intent, signature, DOMAIN, { publicClient }), true);
+  assert.equal(await verifyIntent(intent, signature, DOMAIN, { client: publicClient }), true);
 
   // The SDK must call isValidSignature(digest, signature) on the intent.user.
   assert.ok(readArgs, "expected readContract to be called for a contract user");
@@ -183,7 +183,7 @@ test("#932 verifyIntent rejects an invalid ERC-1271 signature", async () => {
   });
 
   assert.equal(
-    await verifyIntent(intent, "0xdeadbeef" as `0x${string}`, DOMAIN, { publicClient }),
+    await verifyIntent(intent, "0xdeadbeef" as `0x${string}`, DOMAIN, { client: publicClient }),
     false,
   );
 });
@@ -198,7 +198,7 @@ test("#932 verifyIntent rejects an ERC-1271 signature when the wallet call rever
   } as unknown as PublicClient;
 
   assert.equal(
-    await verifyIntent(intent, "0xdeadbeef" as `0x${string}`, DOMAIN, { publicClient }),
+    await verifyIntent(intent, "0xdeadbeef" as `0x${string}`, DOMAIN, { client: publicClient }),
     false,
   );
 });
@@ -222,7 +222,7 @@ test("#932 verifyIntent keeps the ECDSA path for EOA users (no contract call)", 
     },
   } as unknown as PublicClient;
 
-  assert.equal(await verifyIntent(intent, signed.signature, DOMAIN, { publicClient }), true);
+  assert.equal(await verifyIntent(intent, signed.signature, DOMAIN, { client: publicClient }), true);
   assert.equal(readCalled, false, "ECDSA path must not invoke isValidSignature");
 });
 
@@ -238,10 +238,10 @@ test("#932 verifyIntent agrees with the contract harness for ERC-1271 wallets", 
   const invalidClient = stubPublicClient({ code: "0x6001600155", magic: ERC1271_INVALID });
 
   const sdkValid = await verifyIntent(intent, "0xdeadbeef" as `0x${string}`, DOMAIN, {
-    publicClient: validClient,
+    client: validClient,
   });
   const sdkInvalid = await verifyIntent(intent, "0xdeadbeef" as `0x${string}`, DOMAIN, {
-    publicClient: invalidClient,
+    client: invalidClient,
   });
 
   assert.equal(sdkValid, contractHarness(true, ERC1271_MAGIC));
