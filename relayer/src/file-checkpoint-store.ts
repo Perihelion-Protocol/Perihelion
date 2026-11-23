@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 
 /** Default file-backed {@link CheckpointStore}. */
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import type { Logger } from "@perihelion/node-common";
 import type { CheckpointStore } from "./checkpoint.js";
+import { nonceKey } from "./checkpoint.js";
+import { quarantineCorruptFile, writeFileDurably } from "./durable-file.js";
 
 /** On-disk shape: the scan cursor plus the last nonce emitted per path. */
 interface CheckpointState {

@@ -13,6 +13,8 @@ import type { NonceCounter } from "./evm-watcher.js";
  * fsync'd file or a transactional DB write — since the value is the sole
  * record of relay progress.
  */
+import type { NonceCounter } from "./evm-watcher.js";
+
 export interface CheckpointStore {
   /** Load the last persisted cursor, or `undefined` if none exists yet. */
   load(): Promise<number | undefined>;

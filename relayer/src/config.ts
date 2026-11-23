@@ -320,18 +320,26 @@ export function loadConfig(
     );
   }
 
-  // --- Relayer mode (defaults to the development-only stand-in) ---
+  // --- Relayer mode ---
+  // Unset defaults to "dev", the impersonating stand-in. "executor" is the
+  // intended production design but is not implemented, so it is rejected
+  // rather than silently running the same impersonating code.
   const rawRelayerMode = (env.PERIHELION_RELAYER_MODE ?? "dev").trim().toLowerCase();
   let relayerMode: RelayerMode = "dev";
-  if (rawRelayerMode === "dev" || rawRelayerMode === "executor") {
-    relayerMode = rawRelayerMode;
+  if (rawRelayerMode === "executor") {
+    errors.push(
+      "PERIHELION_RELAYER_MODE=executor is not implemented yet; use the default dev mode " +
+        "or remove PERIHELION_RELAYER_MODE",
+    );
+  } else if (rawRelayerMode === "dev") {
+    relayerMode = "dev";
   } else {
     errors.push(
       `PERIHELION_RELAYER_MODE must be "dev" or "executor", got: "${env.PERIHELION_RELAYER_MODE}"`,
     );
   }
 
-  // --- Explicit override for endpoint impersonation on a public network ---
+  // --- The single override for endpoint impersonation on Pubnet ---
   const allowEndpointImpersonation = TRUTHY_RE.test(
     (env.PERIHELION_ALLOW_ENDPOINT_IMPERSONATION ?? "").trim(),
   );
@@ -345,8 +353,7 @@ export function loadConfig(
     errors.push(
       "PERIHELION_RELAYER_MODE=dev impersonates the settlement contract's Endpoint and is " +
         "development-only; refusing to start against Pubnet. Set " +
-        "PERIHELION_ALLOW_ENDPOINT_IMPERSONATION=true to override (unsafe), or use a real " +
-        "LayerZero endpoint/adapter (PERIHELION_RELAYER_MODE=executor).",
+        "PERIHELION_ALLOW_ENDPOINT_IMPERSONATION=true to override (unsafe).",
     );
   }
 
