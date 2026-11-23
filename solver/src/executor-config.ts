@@ -3,6 +3,10 @@
 /** Load executor configuration from environment variables. */
 
 import type { ExecutorConfig } from "./executor.js";
+import {
+  DEFAULT_REGISTRATION_POLL_INTERVAL_MS,
+} from "./executor.js";
+import { MIN_FILL_HEADROOM_SECS } from "@perihelion/sdk";
 import { getAddress, isAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -139,6 +143,44 @@ export function loadExecutorConfig(
     inclusionFee = inclusionFeePolicyFromEnv(env);
   } catch (err) {
     errors.push(err instanceof Error ? err.message : String(err));
+  }
+
+  // Executor tuning knobs. Each falls back to the executor's built-in default
+  // when unset; invalid values are reported with the other configuration errors.
+  const lzFeeBufferBps = parseNonNegativeInteger(
+    env.PERIHELION_LZ_FEE_BUFFER_BPS,
+    0,
+    "PERIHELION_LZ_FEE_BUFFER_BPS",
+    errors,
+  );
+  if (lzFeeBufferBps > 10_000) {
+    errors.push(
+      `PERIHELION_LZ_FEE_BUFFER_BPS must be at most 10000 (100%), got: "${lzFeeBufferBps}"`,
+    );
+  }
+
+  const registrationPollIntervalMs = parseNonNegativeInteger(
+    env.PERIHELION_REGISTRATION_POLL_INTERVAL_MS,
+    DEFAULT_REGISTRATION_POLL_INTERVAL_MS,
+    "PERIHELION_REGISTRATION_POLL_INTERVAL_MS",
+    errors,
+  );
+  if (registrationPollIntervalMs === 0) {
+    errors.push("PERIHELION_REGISTRATION_POLL_INTERVAL_MS must be greater than 0");
+  }
+
+  const minFillHeadroomSecs = parseNonNegativeInteger(
+    env.PERIHELION_MIN_FILL_HEADROOM_SECS,
+    MIN_FILL_HEADROOM_SECS,
+    "PERIHELION_MIN_FILL_HEADROOM_SECS",
+    errors,
+  );
+  if (minFillHeadroomSecs < MIN_FILL_HEADROOM_SECS) {
+    // The settlement contract rejects any fill with less than its dispatch
+    // window remaining, so a smaller headroom only wastes fees on rejections.
+    errors.push(
+      `PERIHELION_MIN_FILL_HEADROOM_SECS must be at least ${MIN_FILL_HEADROOM_SECS} (the contract's minimum dispatch window), got: "${minFillHeadroomSecs}"`,
+    );
   }
 
   // The solver address used for eligibility checks must match the key that

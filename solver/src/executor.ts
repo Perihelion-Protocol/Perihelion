@@ -136,6 +136,24 @@ export interface ExecutorConfig {
    */
   readonly lzFeeBufferStroops?: bigint;
   /**
+   * Additional safety buffer as basis points of the quoted LayerZero fee for
+   * the FillConfirmed message (e.g. 500 = 5%). Applied on top of
+   * {@link lzFeeBufferStroops}. Defaults to 0.
+   */
+  readonly lzFeeBufferBps?: number;
+  /**
+   * How often to poll the settlement contract's `status` while waiting for
+   * registration, in ms. Defaults to {@link DEFAULT_REGISTRATION_POLL_INTERVAL_MS}.
+   */
+  readonly registrationPollIntervalMs?: number;
+  /**
+   * Minimum time (in seconds) that must remain before the intent deadline for
+   * the executor to keep waiting for registration or submit `fill_intent`. The
+   * settlement contract rejects fills inside its dispatch window, so this can
+   * never be lower than the SDK's {@link MIN_FILL_HEADROOM_SECS}. Defaults to it.
+   */
+  readonly minFillHeadroomSecs?: number;
+  /**
    * Operator policy for the Soroban inclusion-fee bid on `fill_intent`: the
    * `getFeeStats` percentile to follow, the floor, and the hard cap.
    */
@@ -209,15 +227,14 @@ export interface FillFees {
 const SOROBAN_MAX_POLL_ATTEMPTS = 30;
 const SOROBAN_POLL_INTERVAL_MS = 2_000;
 
+/** Default for how often to poll the settlement contract's `status` view, in ms. */
+export const DEFAULT_REGISTRATION_POLL_INTERVAL_MS = 2_000;
+
 /**
  * Minimum headroom (in seconds) that must remain before the intent deadline
- * for the executor to attempt a fill. Registration polling stops once the
- * deadline minus this headroom is reached. Re-exported from `@perihelion/sdk`.
+ * for the executor to attempt a fill. Re-exported from `@perihelion/sdk`.
  */
 export { MIN_FILL_HEADROOM_SECS };
-
-/** How often to poll the settlement contract's `status` view, in ms. */
-const REGISTRATION_POLL_INTERVAL_MS = 2_000;
 
 /**
  * Execute a fill by orchestrating EVM lock and Soroban fill_intent.
@@ -241,6 +258,9 @@ export class Executor {
   private readonly sourceChainId: number;
   private readonly stellarNetwork: string;
   private readonly lzFeeBufferStroops: bigint;
+  private readonly lzFeeBufferBps: bigint;
+  private readonly registrationPollIntervalMs: number;
+  private readonly minFillHeadroomSecs: number;
   private readonly inclusionFee: Required<InclusionFeePolicy>;
   private readonly sourceConfirmations: number;
   private readonly persistStage?: (intentHash: Hex, stage: FillStage) => void | Promise<void>;
@@ -264,6 +284,15 @@ export class Executor {
     // Validate the policy up front so a bad cap fails at startup, not mid-fill.
     this.inclusionFee = resolveInclusionFeePolicy(config.inclusionFee);
     this.lzFeeBufferStroops = config.lzFeeBufferStroops ?? 0n;
+    this.lzFeeBufferBps = BigInt(config.lzFeeBufferBps ?? 0);
+    this.registrationPollIntervalMs =
+      config.registrationPollIntervalMs ?? DEFAULT_REGISTRATION_POLL_INTERVAL_MS;
+    this.minFillHeadroomSecs = config.minFillHeadroomSecs ?? MIN_FILL_HEADROOM_SECS;
+    if (this.minFillHeadroomSecs < MIN_FILL_HEADROOM_SECS) {
+      throw new Error(
+        `minFillHeadroomSecs (${this.minFillHeadroomSecs}) must be at least ${MIN_FILL_HEADROOM_SECS}, the settlement contract's dispatch window`,
+      );
+    }
     this.sourceConfirmations = config.sourceConfirmations ?? 1;
     this.logger = logger;
   }
@@ -285,7 +314,7 @@ export class Executor {
    *   2. `wait` — wait for source-chain confirmations, then poll the
    *      settlement contract's `status(hash)` until the FillInstruction has
    *      registered the intent as `Locked`, bounded by the intent deadline
-   *      minus {@link MIN_FILL_HEADROOM_SECS}.
+   *      minus the configured fill headroom.
    *   3. `fill` — call `fill_intent` with the quoted LayerZero fee.
    */
   async fill(signed: SignedIntent): Promise<{
@@ -334,9 +363,9 @@ export class Executor {
         await this.setStage(hash, stage);
       } else {
         const lockResult = await this.lockOnEvm(signed);
-        lockTx = typeof lockResult === "string" ? lockResult : lockResult.txHash;
-        sourceGasWei = typeof lockResult === "object" ? lockResult.gasWei : 0n;
-        lzFeeWei = typeof lockResult === "object" ? lockResult.lzFeeWei : 0n;
+        lockTx = lockResult.txHash;
+        sourceGasWei = lockResult.gasWei;
+        lzFeeWei = lockResult.lzFeeWei;
         this.logger.info("locked on EVM", { hash, lockTx });
         stage = "wait";
         await this.setStage(hash, stage);
@@ -355,9 +384,12 @@ export class Executor {
 
     // ── Stage 3: fill ──────────────────────────────────────────────────────
     if (stage === "fill") {
+      // Re-check headroom at submission time: registration may have completed
+      // close to the deadline, and the contract would reject the fill anyway.
+      this.assertFillHeadroom(signed);
       const fillResult = await this.fillOnSoroban(signed, lockTx ?? "0x");
-      const settlementTx = typeof fillResult === "string" ? fillResult : fillResult.txHash;
-      const stellarFeeStroops = typeof fillResult === "object" ? fillResult.feeStroops : 0n;
+      const settlementTx = fillResult.txHash;
+      const stellarFeeStroops = fillResult.feeStroops;
       this.logger.info("filled on Soroban", { hash, settlementTx, stellarFeeStroops });
       await this.setStage(hash, "done");
 
@@ -372,6 +404,21 @@ export class Executor {
     }
 
     throw new Error(`fill for ${hash} cannot proceed from stage ${stage}`);
+  }
+
+  /**
+   * Throw when the intent deadline is within the configured fill headroom.
+   * The lock already exists at this point, so this is not a definite failure:
+   * the reservation must be kept until the lock is resolved.
+   */
+  private assertFillHeadroom(signed: SignedIntent): void {
+    const deadline = BigInt(signed.intent.deadline);
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    if (now + BigInt(this.minFillHeadroomSecs) >= deadline) {
+      throw new Error(
+        `intent ${signed.hash} deadline is within the ${this.minFillHeadroomSecs}s fill headroom; not submitting fill_intent`,
+      );
+    }
   }
 
   /** Persist the current fill stage and log it. */
@@ -420,13 +467,13 @@ export class Executor {
 
   /**
    * Poll the settlement contract's `status(hash)` until the intent is
-   * registered as `Locked`, bounded by the intent deadline minus
-   * {@link MIN_FILL_HEADROOM_SECS}.
+   * registered as `Locked`, bounded by the intent deadline minus the
+   * configured fill headroom.
    */
   private async waitForRegistration(signed: SignedIntent): Promise<void> {
     const { hash, intent } = signed;
     const deadline = BigInt(intent.deadline);
-    const cutoff = deadline - BigInt(MIN_FILL_HEADROOM_SECS);
+    const cutoff = deadline - BigInt(this.minFillHeadroomSecs);
 
     for (;;) {
       const variant = await this.readStatus(hash);
@@ -442,7 +489,7 @@ export class Executor {
           `intent ${hash} not registered before deadline headroom (status=${variant ?? "unknown"})`,
         );
       }
-      await sleep(REGISTRATION_POLL_INTERVAL_MS);
+      await sleep(this.registrationPollIntervalMs);
     }
   }
 
@@ -526,7 +573,7 @@ export class Executor {
    */
   private async lockOnEvm(
     signed: SignedIntent,
-  ): Promise<Hex | { txHash: Hex; gasWei: bigint; lzFeeWei: bigint }> {
+  ): Promise<{ txHash: Hex; gasWei: bigint; lzFeeWei: bigint }> {
     const { intent, signature } = signed;
 
     const account = privateKeyToAccount(this.evmPrivateKey);
@@ -642,7 +689,8 @@ export class Executor {
     // Quote the LayerZero fee for the FillConfirmed message and add the
     // configured safety buffer.
     const quotedFee = await this.quoteFillConfirmedFee(intent.sourceChainId);
-    const lzFee = quotedFee + this.lzFeeBufferStroops;
+    const lzFee =
+      quotedFee + this.lzFeeBufferStroops + (quotedFee * this.lzFeeBufferBps) / 10_000n;
 
     const args = [
       solverStellar,
