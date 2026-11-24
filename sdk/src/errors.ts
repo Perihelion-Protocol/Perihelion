@@ -254,6 +254,26 @@ export class EnforcedPauseError extends PerihelionContractError {
   }
 }
 
+/**
+ * Thrown when `lock` is called before the escrow's Stellar peer has been
+ * configured. The escrow is not yet wired for cross-chain settlement; the
+ * owner must call `setPeer` before any intent can be locked.
+ */
+export class PeerNotSetError extends PerihelionContractError {
+  constructor(selector?: string, options?: ErrorOptions) {
+    super(
+      "PeerNotSet",
+      selector,
+      undefined,
+      options,
+    );
+    this.message =
+      `[Perihelion] Contract reverted with PeerNotSet` +
+      (selector ? ` (selector ${selector})` : "") +
+      `: the escrow's Stellar peer is not configured yet; the escrow owner must call setPeer before locking intents.`;
+  }
+}
+
 /** Known custom error names emitted by the escrow contract. */
 export type EscrowErrorName =
   | "NoPendingOwner"
@@ -267,6 +287,7 @@ export type EscrowErrorName =
   | "AlreadySettled"
   | "IntentExpired"
   | "Unauthorized"
+  | "PeerNotSet"
   | "ReentrancyGuardReentrantCall";
 
 /**
@@ -286,6 +307,8 @@ export function contractErrorFromName(
       return new NotAContractError(selector, options);
     case "EnforcedPause":
       return new EnforcedPauseError(selector, options);
+    case "PeerNotSet":
+      return new PeerNotSetError(selector, options);
     default:
       return new PerihelionContractError(errorName, selector, args, options);
   }

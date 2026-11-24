@@ -21,6 +21,9 @@ import {
   PerihelionValidationError,
   PerihelionHashMismatchError,
   PerihelionUndeployedChainError,
+  PerihelionContractError,
+  PeerNotSetError,
+  contractErrorFromName,
   IntentValidationError,
 } from "../src/errors.js";
 import { MempoolResponseError } from "../src/validate.js";
@@ -299,4 +302,37 @@ test("SDK does not export or reference PausedError", () => {
   assert.ok(!exported.includes("PausedError"), "PausedError should not be exported");
   const serialized = JSON.stringify(escrowAbi);
   assert.ok(!serialized.includes("PausedError"), "PausedError should not be referenced in the ABI");
+});
+
+// ---------------------------------------------------------------------------
+// PeerNotSet (#1121)
+// ---------------------------------------------------------------------------
+
+test("escrow ABI declares PeerNotSet()", () => {
+  const names = abiErrorNames();
+  assert.ok(names.includes("PeerNotSet"), "ABI should declare PeerNotSet");
+});
+
+test("contractErrorFromName maps PeerNotSet to PeerNotSetError", () => {
+  const sel = selector("PeerNotSet()");
+  const e = contractErrorFromName("PeerNotSet", sel);
+  assert.ok(e instanceof PerihelionContractError, "should be a PerihelionContractError");
+  assert.ok(e instanceof PerihelionError, "should be a PerihelionError");
+  assert.ok(e instanceof PeerNotSetError, "should be a PeerNotSetError");
+  assert.equal(e.name, "PeerNotSetError");
+});
+
+test("PeerNotSetError message mentions the unset peer and setPeer", () => {
+  const sel = selector("PeerNotSet()");
+  const e = contractErrorFromName("PeerNotSet", sel);
+  const msg = e.message.toLowerCase();
+  assert.ok(msg.includes("peer"), "message should mention the peer");
+  assert.ok(
+    msg.includes("setpeer") || msg.includes("not set") || msg.includes("unset"),
+    "message should explain the peer is unset and how to fix it",
+  );
+});
+
+test("PeerNotSet selector differs from ZeroAddress()", () => {
+  assert.notEqual(selector("PeerNotSet()"), selector("ZeroAddress()"));
 });
