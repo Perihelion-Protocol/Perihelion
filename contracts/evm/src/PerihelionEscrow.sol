@@ -286,6 +286,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         and cancelExpired. Allows skim() to compute the genuine on-chain surplus
     ///         and prevents the owner from draining active user deposits.
     mapping(address => uint256) public totalLocked;
+    /// @notice token => recipient => amount owed by a deferred (pull-payment) transfer.
+    ///         When a terminal release/refund transfer fails (e.g. the recipient is
+    ///         blocklisted by USDC/USDT), the amount is credited here instead of
+    ///         reverting, so the lock still finalises and `totalLocked` stays consistent.
+    ///         The recipient withdraws later via {claim}, optionally to a different address.
+    mapping(address => mapping(address => uint256)) public claimable;
     /// @notice Rolling-window bucket tracking per asset and window start.
     ///         Each lock bumps the current window bucket. Windows slide; old buckets are orphaned.
     mapping(address => mapping(uint256 => uint256)) private _rollingWindowBuckets;
@@ -374,6 +380,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event OwnershipTransferCancelled(address indexed previousOwner);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
     event NativeSkimmed(address indexed to, uint256 amount);
+    /// @dev A terminal release/refund transfer failed and was credited to `claimable`
+    ///      instead. The recipient can withdraw later via {claim}.
+    event TransferDeferred(address indexed token, address indexed recipient, uint256 amount);
+    /// @dev A deferred balance was withdrawn via {claim}.
+    event Claimed(address indexed token, address indexed recipient, address indexed to, uint256 amount);
     event RollingWindowCapTriggered(
         address indexed asset, uint256 windowStart, uint256 accumulated
     );
@@ -459,6 +470,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error AmountTooLarge();
     /// @dev The intent was revoked by its user with {cancelIntent} before locking.
     error IntentCancelled();
+    /// @dev {claim} was called with nothing claimable for the caller.
+    error NothingToClaim();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -1099,7 +1112,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         l.released = true; // effect before interaction (race guard)
         totalLocked[l.asset] -= l.amount;
-        _safeTransfer(l.asset, solverEvm, l.amount);
+        _transferOrDefer(l.asset, solverEvm, l.amount);
         emit Released(intentHash, solverEvm, l.amount, fillAmount, fillLedger, l.minDestAmount);
     }
 
@@ -1117,7 +1130,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         l.refunded = true;
         totalLocked[l.asset] -= l.amount;
-        _safeTransfer(l.asset, l.user, l.amount);
+        _transferOrDefer(l.asset, l.user, l.amount);
         emit Refunded(intentHash, l.user, l.amount, reason);
     }
 
@@ -1166,8 +1179,29 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         l.refunded = true;
         totalLocked[l.asset] -= l.amount;
-        _safeTransfer(l.asset, l.user, l.amount);
+        _transferOrDefer(l.asset, l.user, l.amount);
         emit RefundedLocalTimeout(intentHash, l.user, l.amount);
+    }
+
+    // --- Deferred (pull-payment) claims --------------------------------------
+
+    /// @notice Withdraw a balance that was deferred because a terminal release or
+    ///         refund transfer failed (e.g. the recipient was blocklisted by the
+    ///         token issuer). Callable by the credited recipient only.
+    /// @dev The recipient may direct the funds to a different `to` address, which
+    ///      lets a blocklisted party recover value to an address the issuer allows.
+    ///      The claimable balance is zeroed before the transfer (checks-effects-
+    ///      interactions) and the function is `nonReentrant`. `totalLocked` was
+    ///      already decremented when the lock finalised, so claiming does not touch it.
+    /// @param token ERC-20 token to withdraw.
+    /// @param to Recipient of the withdrawal; must be non-zero.
+    function claim(address token, address to) external nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 amount = claimable[token][msg.sender];
+        if (amount == 0) revert NothingToClaim();
+        claimable[token][msg.sender] = 0;
+        _safeTransfer(token, to, amount);
+        emit Claimed(token, msg.sender, to, amount);
     }
 
     // --- Views ---------------------------------------------------------------
@@ -1491,6 +1525,32 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (uint256(s) > SECP256K1_HALF_ORDER) return false;
         address recovered = ecrecover(digest, v, r, s);
         return recovered != address(0) && recovered == signer;
+    }
+
+    /// @dev Attempt a terminal transfer; on failure, credit the recipient's
+    ///      `claimable` balance and emit {TransferDeferred} instead of reverting.
+    ///      This keeps release/refund paths live when the token issuer blocklists
+    ///      the recipient (USDC/USDT). `totalLocked` is decremented by the caller on
+    ///      finalisation, so the deferred amount is no longer counted as locked and
+    ///      remains recoverable via {claim} (not via {skim}, which only sees surplus).
+    function _transferOrDefer(address token, address to, uint256 amount) private {
+        if (_tryTransfer(token, to, amount)) return;
+        claimable[token][to] += amount;
+        emit TransferDeferred(token, to, amount);
+    }
+
+    /// @dev Low-level transfer that returns false instead of reverting on failure.
+    function _tryTransfer(address token, address to, uint256 amount) private returns (bool) {
+        if (token.code.length == 0) return false;
+        (bool ok, bytes memory data) =
+            token.call(abi.encodeWithSelector(IERC20.transfer.selector, to, amount));
+        if (!ok) return false;
+        if (data.length != 0) {
+            // A malformed return value must not revert the terminal path.
+            if (data.length < 32) return false;
+            if (!abi.decode(data, (bool))) return false;
+        }
+        return true;
     }
 
     function _safeTransfer(address token, address to, uint256 amount) private {

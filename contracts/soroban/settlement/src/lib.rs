@@ -1125,7 +1125,18 @@ impl Perihelion {
     /// - `duration`: rolling window size in seconds (0 to disable)
     /// - `cap`: maximum aggregate amount per window (0 to disable)
     ///
+    /// A non-zero `cap` with `duration == 0` is rejected with `InvalidDuration`
+    /// (issue #1118): `enforce_value_caps` skips the rolling check entirely when
+    /// the duration is zero, so storing such a pair would silently disable the
+    /// cap while the event suggested it was active. This matches the EVM
+    /// setter, which rejects the same configuration with `InvalidDuration`.
+    /// `cap == 0` is accepted with any duration (the cap is disabled).
+    ///
     /// Emits `rolling_window_cap_set(token, duration, cap)` event.
+    ///
+    /// # Errors
+    /// - `InvalidAmount` if `cap < 0`
+    /// - `InvalidDuration` if `cap > 0 && duration == 0`
     pub fn set_rolling_window_cap(
         env: Env,
         token: Address,
@@ -1136,6 +1147,11 @@ impl Perihelion {
         Self::require_admin(&env)?.require_auth();
         if cap < 0 {
             return Err(PerihelionError::InvalidAmount);
+        }
+        // Issue #1118: a positive cap with a zero window would be silently
+        // ignored by `enforce_value_caps`, so reject it like the EVM setter.
+        if cap > 0 && duration == 0 {
+            return Err(PerihelionError::InvalidDuration);
         }
         env.storage()
             .instance()

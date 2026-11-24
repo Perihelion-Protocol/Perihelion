@@ -30,6 +30,10 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
     uint256 public totalLocked;
     uint256 public totalReleased;
     uint256 public totalRefunded;
+    // Amounts whose terminal transfer was deferred (credited to claimable).
+    uint256 public totalDeferred;
+    // Amounts actually pulled out of the escrow via `claim`.
+    uint256 public totalClaimed;
 
     uint64 internal nonce;
     uint64 internal lzNonce;
@@ -62,6 +66,17 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
 
     function everHashAt(uint256 i) external view returns (bytes32) {
         return everHashes[i];
+    }
+
+    /// @dev Records a terminal transition. If the escrow deferred the payout
+    ///      (blocklisted recipient), the amount is tracked as deferred instead
+    ///      of as an immediate outflow.
+    function _recordTerminal(address recipient, uint256 amount) internal {
+        if (escrow.claimable(address(token), recipient) >= amount) {
+            totalDeferred += amount;
+        } else {
+            totalReleased += amount;
+        }
     }
 
     function _removeOpen(uint256 idx) internal {
@@ -113,7 +128,7 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
         );
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, lzNonce, message);
 
-        totalReleased += amount;
+        _recordTerminal(solver, amount);
         _removeOpen(idx);
     }
 
@@ -127,7 +142,7 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
         bytes memory message = abi.encodePacked(V, T_CANCEL_INTENT, h, uint8(0));
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, lzNonce, message);
 
-        totalRefunded += amount;
+        _recordTerminal(user, amount);
         _removeOpen(idx);
     }
 
@@ -142,8 +157,23 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
         vm.warp(bound(warpSeed, opensAt, opensAt + 30 days));
         escrow.cancelExpired(h);
 
-        totalRefunded += amount;
+        _recordTerminal(user, amount);
         _removeOpen(idx);
+    }
+
+    /// @dev Withdraws any deferred credit for the user or one of the solvers.
+    function claim(uint256 whoSeed) external {
+        address recipient;
+        uint256 pick = bound(whoSeed, 0, solvers.length);
+        if (pick == 0) {
+            recipient = user;
+        } else {
+            recipient = solvers[pick - 1];
+        }
+        uint256 amount = escrow.claimable(address(token), recipient);
+        if (amount == 0) return;
+        escrow.claim(address(token), recipient);
+        totalClaimed += amount;
     }
 }
 
@@ -180,11 +210,21 @@ contract PerihelionEscrowInvariantTest is Test {
     }
 
     /// The escrow's held balance always equals what it pulled minus what it paid
-    /// out — the state machine neither creates nor destroys value.
+    /// out (immediately or via deferred claims) — the state machine neither
+    /// creates nor destroys value, even across deferred transfers.
     function invariant_conservationOfFunds() public view {
         assertEq(
             token.balanceOf(address(escrow)),
-            handler.totalLocked() - handler.totalReleased() - handler.totalRefunded()
+            handler.totalLocked() - handler.totalReleased() - handler.totalClaimed()
+        );
+    }
+
+    /// Deferred credits are still counted in `totalLocked` until claimed, so the
+    /// escrow balance must always cover the outstanding deferred amounts.
+    function invariant_deferredBackedByLocked() public view {
+        assertGe(
+            handler.totalLocked() - handler.totalReleased() - handler.totalClaimed(),
+            handler.totalDeferred() - handler.totalClaimed()
         );
     }
 

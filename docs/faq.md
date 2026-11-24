@@ -50,6 +50,26 @@ solver network. Perihelion adapts it for **cross-chain settlement into Stellar**
 using LayerZero for messaging and a Soroban settlement contract built around
 Stellar's storage and finality model.
 
+### Why did my fill fail because the recipient has no trustline?
+
+For classic Stellar assets (`CODE:ISSUER`, e.g. `USDC:GA5Z…`), the destination
+SAC `transfer` to a `G…` recipient requires that the account **exists** and holds
+an **authorised trustline** for that asset. If it doesn't, every solver's
+`fill_intent` will fail on-chain, and your funds stay locked until
+`deadline + confirmationGrace` before you can refund. `native` (XLM) needs no
+trustline, but the recipient account must still exist.
+
+Add the trustline before bridging — e.g. with Stellar Laboratory, or:
+
+```sh
+stellar tx new change-trust --source <RECIPIENT> --line "USDC:<ISSUER>"
+```
+
+The SDK's `buildIntent` and the reference solver's `evaluate` pre-check the
+recipient's trustline (via Horizon or Soroban `getLedgerEntries`) and reject the
+intent before any on-chain action, so you get a clear error instead of a stuck
+lock.
+
 ### Which chains and assets are supported?
 
 The target source chains are Ethereum, Base, and Arbitrum, settling into Stellar.

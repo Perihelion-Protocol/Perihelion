@@ -144,6 +144,11 @@ pub enum PerihelionError {
     /// the intent is rejected terminally instead of registering an unfillable
     /// intent (issue #1077).
     DestAssetSacNotDeployed = 169,
+    /// A rolling-window cap was configured with a positive cap but a zero
+    /// duration, which would silently disable enforcement. Mirrors the EVM
+    /// `InvalidDuration` revert; returned by `set_rolling_window_cap` when
+    /// `cap > 0 && duration == 0` (issue #1118).
+    InvalidDuration = 170,
 
     // --- Invariant / internal ---
     /// Arithmetic error that prior checks should have made unreachable.

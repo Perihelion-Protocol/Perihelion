@@ -430,6 +430,46 @@ test("evaluate: native check is skipped when the provider cannot report native b
   assert.equal(decision.fill, true);
 });
 
+// ---- #1119 recipient trustline tests ----
+
+test("evaluate: skips terminally when the recipient lacks a trustline for a classic asset", async () => {
+  const decision = await evaluate(intent(), config, {
+    ...fixedInventory(100_000_000n),
+    trustlineCheck: async () => ({ ok: false, reason: "missing trustline for USDC:GA5Z…" }),
+  });
+  assert.equal(decision.fill, false);
+  assert.equal(decision.terminal, true);
+  assert.match(decision.reason, /trustline/);
+});
+
+test("evaluate: skips terminally when the recipient account does not exist for native", async () => {
+  const decision = await evaluate(
+    intent({ destAsset: "native" }),
+    config,
+    {
+      ...fixedInventory(100_000_000n),
+      trustlineCheck: async () => ({ ok: false, reason: "recipient account does not exist" }),
+    },
+  );
+  assert.equal(decision.fill, false);
+  assert.equal(decision.terminal, true);
+  assert.match(decision.reason, /does not exist/);
+});
+
+test("evaluate: fills when the recipient holds the required trustline", async () => {
+  const decision = await evaluate(intent(), config, {
+    ...fixedInventory(100_000_000n),
+    trustlineCheck: async () => ({ ok: true }),
+  });
+  assert.equal(decision.fill, true);
+});
+
+test("evaluate: trustline check is skipped when no checker is wired", async () => {
+  // No trustlineCheck -> behaviour is unchanged from before #1119.
+  const decision = await evaluate(intent(), config, fixedInventory(100_000_000n));
+  assert.equal(decision.fill, true);
+});
+
 // ─── Issue #732: profit truncation and fractional basis point precision ───────
 
 test("evaluate: a corridor with sub-bps margin is reported as non-zero profit (#732)", async () => {

@@ -18,6 +18,7 @@
 import {
   Account,
   Address,
+  Asset,
   Contract,
   Keypair,
   Operation,
@@ -172,6 +173,248 @@ export function isStellarAsset(value: string): boolean {
   if (!/^[A-Za-z0-9]{1,12}$/.test(code)) return false;
   // Issuer must be a valid G... account strkey.
   return issuer.length === 56 && issuer[0] === "G" && isValidStrkey(issuer, 0x30);
+}
+
+// =============================================================================
+// Recipient Deliverability Checks (trustlines / account existence)
+// =============================================================================
+
+/**
+ * Minimal Horizon account resource shape used by {@link checkRecipientCanReceive}.
+ * Only the fields needed to determine account existence and trustline state are
+ * required, so lightweight test stubs and raw Horizon JSON both satisfy it.
+ */
+export interface HorizonAccountResource {
+  readonly account_id?: string;
+  readonly id?: string;
+  readonly sequence?: string;
+  readonly balances?: ReadonlyArray<{
+    readonly asset_type?: string;
+    readonly asset_code?: string;
+    readonly asset_issuer?: string;
+    readonly balance?: string;
+    readonly is_authorized?: boolean;
+    readonly is_authorized_to_maintain_liabilities?: boolean;
+    readonly limit?: string;
+  }>;
+}
+
+/**
+ * Minimal Horizon client interface required by {@link checkRecipientCanReceive}.
+ * Satisfied by `Horizon.Server` from `@stellar/stellar-sdk` as well as test stubs.
+ */
+export interface HorizonAccountClient {
+  loadAccount(accountId: string): Promise<HorizonAccountResource>;
+}
+
+/** Options for {@link checkRecipientCanReceive}. */
+export interface CheckRecipientCanReceiveOptions {
+  /** Recipient Stellar address (`G...` account or `C...` contract). */
+  readonly recipient: StellarAddress;
+  /**
+   * Destination asset identifier: `"native"`, `"<CODE>:<ISSUER>"` (classic
+   * asset), or a `C...` contract strkey (SEP-41 token).
+   */
+  readonly destAsset: StellarAsset;
+  /**
+   * Horizon client (or any object with `loadAccount`) used to inspect the
+   * recipient's account and trustlines. Required for `G...` recipients.
+   */
+  readonly horizon?: HorizonAccountClient;
+  /**
+   * Optional Horizon URL used to construct a `Horizon.Server` when `horizon`
+   * is omitted. Ignored when `horizon` is provided.
+   */
+  readonly horizonUrl?: string;
+  /** Allow HTTP `horizonUrl` connections. Defaults to `true` for `http://` URLs. */
+  readonly allowHttp?: boolean;
+}
+
+/** Result of {@link checkRecipientCanReceive}. */
+export interface RecipientDeliverabilityResult {
+  /** True when the recipient can receive `destAsset` (or the check was skipped). */
+  readonly canReceive: boolean;
+  /** True when the check could not be performed (e.g. no Horizon client, `C...` recipient). */
+  readonly skipped: boolean;
+  /** Human-readable explanation, suitable for surfacing to end users. */
+  readonly reason?: string;
+  /** True when the recipient account does not exist on Stellar. */
+  readonly accountMissing?: boolean;
+  /** True when the recipient account exists but lacks a trustline for the asset. */
+  readonly trustlineMissing?: boolean;
+  /** True when the trustline exists but is not authorised by the issuer. */
+  readonly trustlineUnauthorized?: boolean;
+}
+
+function parseClassicAsset(destAsset: string): { code: string; issuer: string } | undefined {
+  if (destAsset === "native") return undefined;
+  const colon = destAsset.indexOf(":");
+  if (colon === -1) return undefined;
+  return { code: destAsset.slice(0, colon), issuer: destAsset.slice(colon + 1) };
+}
+
+/**
+ * Check whether a Stellar recipient can actually receive `destAsset` before an
+ * intent is registered on the EVM side.
+ *
+ * For classic assets (`"<CODE>:<ISSUER>"`) the destination SAC `transfer`
+ * requires the recipient account to exist and to hold an authorised trustline
+ * for the asset. For `"native"` the account must simply exist. For `C...`
+ * recipients (contracts) and `C...` assets (SEP-41 tokens) no trustline is
+ * required, so the check is skipped.
+ *
+ * Never throws for a missing account/trustline: returns a structured result so
+ * callers can decide whether to warn or fail. Throws only on invalid input.
+ *
+ * @example
+ * ```ts
+ * const check = await checkRecipientCanReceive({
+ *   recipient: "G...",
+ *   destAsset: "USDC:GISSUER...",
+ *   horizonUrl: "https://horizon-testnet.stellar.org",
+ * });
+ * if (!check.canReceive) throw new Error(check.reason);
+ * ```
+ */
+export async function checkRecipientCanReceive(
+  options: CheckRecipientCanReceiveOptions,
+): Promise<RecipientDeliverabilityResult> {
+  if (!options || typeof options !== "object") {
+    throw new PerihelionValidationError("checkRecipientCanReceive options are required", "options");
+  }
+  const { recipient, destAsset } = options;
+  if (!isStellarAddress(recipient)) {
+    throw new PerihelionValidationError(
+      `Invalid recipient Stellar address: expected a valid G... or C... strkey, got "${String(recipient)}"`,
+      "recipient",
+    );
+  }
+  if (!isStellarAsset(destAsset)) {
+    throw new PerihelionValidationError(
+      `Invalid destAsset: expected "native", "<CODE>:<ISSUER_G...>", or a valid C... contract strkey, got "${String(destAsset)}"`,
+      "destAsset",
+    );
+  }
+
+  // Contract recipients and contract-native (SEP-41) assets need no trustline.
+  if (recipient[0] === "C" || destAsset[0] === "C") {
+    return {
+      canReceive: true,
+      skipped: true,
+      reason: "Trustline check not applicable to contract recipients or SEP-41 assets",
+    };
+  }
+
+  let horizon = options.horizon;
+  if (!horizon && typeof options.horizonUrl === "string" && options.horizonUrl.trim().length > 0) {
+    const url = options.horizonUrl.trim();
+    // Lazily import Horizon to avoid a hard dependency for callers that never use it.
+    const { Horizon } = await import("@stellar/stellar-sdk");
+    horizon = new Horizon.Server(url, {
+      allowHttp: options.allowHttp ?? url.startsWith("http://"),
+    }) as unknown as HorizonAccountClient;
+  }
+  if (!horizon || typeof horizon.loadAccount !== "function") {
+    return {
+      canReceive: true,
+      skipped: true,
+      reason: "No Horizon client provided; recipient deliverability not verified",
+    };
+  }
+
+  let account: HorizonAccountResource;
+  try {
+    account = await horizon.loadAccount(recipient);
+  } catch (err) {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    if (status === 404) {
+      return {
+        canReceive: false,
+        skipped: false,
+        accountMissing: true,
+        reason:
+          `Recipient account ${recipient} does not exist on Stellar. ` +
+          `Fund it (create the account) before bridging ${destAsset}.`,
+      };
+    }
+    return {
+      canReceive: true,
+      skipped: true,
+      reason: `Could not load recipient account ${recipient}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
+
+  if (destAsset === "native") {
+    return { canReceive: true, skipped: false };
+  }
+
+  const classic = parseClassicAsset(destAsset);
+  if (!classic) {
+    return { canReceive: true, skipped: true };
+  }
+
+  const balances = account.balances ?? [];
+  const trustline = balances.find(
+    (b) =>
+      b.asset_type !== "native" &&
+      b.asset_code === classic.code &&
+      b.asset_issuer === classic.issuer,
+  );
+
+  if (!trustline) {
+    return {
+      canReceive: false,
+      skipped: false,
+      trustlineMissing: true,
+      reason:
+        `Recipient ${recipient} has no trustline for ${destAsset}. ` +
+        `Create the trustline (change_trust) before bridging.`,
+    };
+  }
+
+  if (trustline.is_authorized === false) {
+    return {
+      canReceive: false,
+      skipped: false,
+      trustlineUnauthorized: true,
+      reason:
+        `Recipient ${recipient} holds a trustline for ${destAsset} that is not authorised ` +
+        `by the issuer. Ask the issuer to authorise it before bridging.`,
+    };
+  }
+
+  if (trustline.limit !== undefined && trustline.balance !== undefined) {
+    try {
+      const limit = BigInt(trustline.limit);
+      const balance = BigInt(trustline.balance);
+      if (limit !== 0n && balance >= limit) {
+        return {
+          canReceive: false,
+          skipped: false,
+          reason:
+            `Recipient ${recipient} trustline for ${destAsset} is at its limit ` +
+            `(${balance.toString()} / ${limit.toString()}).`,
+        };
+      }
+    } catch {
+      // Non-numeric limit/balance: ignore the capacity check.
+    }
+  }
+
+  return { canReceive: true, skipped: false };
+}
+
+/**
+ * Build the canonical Stellar `Asset` for a classic `"<CODE>:<ISSUER>"` or
+ * `"native"` identifier. Returns `undefined` for `C...` contract assets.
+ */
+export function toStellarAsset(destAsset: StellarAsset): Asset | undefined {
+  if (destAsset === "native") return Asset.native();
+  const classic = parseClassicAsset(destAsset);
+  if (!classic) return undefined;
+  return new Asset(classic.code, classic.issuer);
 }
 
 // =============================================================================
