@@ -4,7 +4,8 @@
 // for a table whose job is to say what is not implemented yet.
 //
 // A closed issue may still be referenced if the row annotates it, e.g.
-// "tracked in #5 (closed, superseded by #328)".
+// "tracked in #5 (closed, superseded by #328)" or
+// "tracked in #723 (superseded by #942)".
 //
 // Usage: scripts/check-status-links.mjs [README.md]
 //   GITHUB_TOKEN  optional; raises the API rate limit and is required for
@@ -76,7 +77,8 @@ for (const { number, row } of references) {
   if (seen.get(number) !== 'closed') continue;
 
   // An annotated reference is deliberate and allowed.
-  const annotated = new RegExp(`#${number}[^|]{0,80}?\\bclosed\\b`, 'i').test(row);
+  // Accept either "closed" or "superseded by" as valid annotations.
+  const annotated = new RegExp(`#${number}[^|]{0,80}?\\b(closed|superseded by)\\b`, 'i').test(row);
   if (!annotated) {
     failures.push(number);
   }
@@ -86,7 +88,7 @@ if (failures.length > 0) {
   for (const number of [...new Set(failures)]) {
     console.error(
       `::error file=${readmePath}::Implementation Status links closed issue #${number}. ` +
-        `Point at an open issue, or annotate it as "#${number} (closed, superseded by #N)".`
+        `Point at an open issue, or annotate it as "#${number} (closed, superseded by #N)" or "#${number} (superseded by #N)".`
     );
   }
   process.exit(1);

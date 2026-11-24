@@ -25,6 +25,7 @@ import {
 } from "../src/errors.js";
 import { MempoolResponseError } from "../src/validate.js";
 import * as escrowAbi from "../src/escrow-abi.js";
+import { keccak256, toBytes } from "viem";
 
 // ---------------------------------------------------------------------------
 // PerihelionError — base class
@@ -248,9 +249,22 @@ test("MempoolResponseError forwards cause option", () => {
 // Escrow ABI error selectors (#931)
 // ---------------------------------------------------------------------------
 
-/** Compute the 4-byte selector for an error signature, e.g. "NoPendingOwner()". */
+/** Compute the 4-byte selector for a canonical error signature, e.g. "NoPendingOwner()". */
 function selector(signature: string): string {
-  return keccak256(toUtf8Bytes(signature)).slice(0, 10).toLowerCase();
+  return keccak256(toBytes(signature)).slice(0, 10).toLowerCase();
+}
+
+/** Build the canonical signature of an error from its ABI entry, e.g. "Foo(uint256,address)". */
+function abiErrorSignature(name: string): string {
+  const entry = (escrowAbi as { ESCROW_ABI?: unknown[] }).ESCROW_ABI?.find(
+    (item): item is { type: string; name: string; inputs: { type: string }[] } =>
+      typeof item === "object" &&
+      item !== null &&
+      (item as { type?: string }).type === "error" &&
+      (item as { name?: string }).name === name,
+  );
+  assert.ok(entry, `ABI should declare ${name}`);
+  return `${entry.name}(${entry.inputs.map((input) => input.type).join(",")})`;
 }
 
 function abiErrorNames(): string[] {
@@ -265,7 +279,8 @@ function abiErrorNames(): string[] {
 test("escrow ABI declares NoPendingOwner() with the expected selector", () => {
   const names = abiErrorNames();
   assert.ok(names.includes("NoPendingOwner"), "ABI should declare NoPendingOwner");
-  assert.equal(selector("NoPendingOwner()"), "0x" + "0".repeat(0) + selector("NoPendingOwner()"));
+  assert.equal(abiErrorSignature("NoPendingOwner"), "NoPendingOwner()");
+  assert.equal(selector(abiErrorSignature("NoPendingOwner")), selector("NoPendingOwner()"));
 });
 
 test("escrow ABI declares NotAContract() with the expected selector", () => {

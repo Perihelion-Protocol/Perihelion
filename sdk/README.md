@@ -51,6 +51,22 @@ console.log(result.status); // "settled"
 | `PerihelionClient` | `signIntent`, `submitIntent`, `getIntent`, `waitForSettlement` |
 | `INTENT_TYPES` / `PERIHELION_DOMAIN` | EIP-712 type + domain for custom signers |
 
+### Verifying smart-contract wallet signatures
+
+`verifyIntent` accepts EOA (ECDSA) and ERC-1271 smart-contract wallet signatures.
+Pass a viem `PublicClient` as the `client` option so the SDK can detect contract
+accounts and call `isValidSignature`:
+
+```ts
+import { createPublicClient, http } from "viem";
+
+const ok = await verifyIntent(intent, signature, domain, { client: publicClient });
+```
+
+Without `client`, contract users fail verification. `isContract` can be passed
+instead to skip the `getCode` lookup. The option is `client`; `publicClient` is a
+type error.
+
 ### Checking refundability
 
 Use `PerihelionEscrowClient.refundStatus(intentHash)` to decide whether to call

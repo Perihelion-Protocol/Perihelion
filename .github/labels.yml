@@ -29,3 +29,6 @@
 - name: differential-fuzz
   color: "fbca04"
   description: Reported by the differential fuzzing workflow
+- name: verified-fixed
+  color: "0e8a16"
+  description: Fix verified by a maintainer — regression test passes and the issue is correctly closed
