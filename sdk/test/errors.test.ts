@@ -11,6 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { keccak256, toUtf8Bytes } from "ethers";
 
 import {
   PerihelionError,

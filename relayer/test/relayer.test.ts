@@ -1343,7 +1343,7 @@ test("a Stellar fill produces Released on the EVM escrow (#941)", async () => {
   });
 
   const watcher = new SorobanSourceWatcher({
-    fetchOutbound: soroban.fetchOutbound,
+    fetchOutbound: soroban.fetchOutbound.bind(soroban),
   });
   const delivery = new EvmDestinationDelivery({ client: escrow.client });
 
@@ -1379,7 +1379,7 @@ test("a Stellar-side cancellation produces Refunded on the EVM escrow (#941)", a
   });
 
   const watcher = new SorobanSourceWatcher({
-    fetchOutbound: soroban.fetchOutbound,
+    fetchOutbound: soroban.fetchOutbound.bind(soroban),
   });
   const delivery = new EvmDestinationDelivery({ client: escrow.client });
 
@@ -1427,7 +1427,7 @@ test("both directions run with separate checkpoints (#941)", async () => {
     },
   });
   const sorobanWatcher = new SorobanSourceWatcher({
-    fetchOutbound: soroban.fetchOutbound,
+    fetchOutbound: soroban.fetchOutbound.bind(soroban),
   });
   const evmDelivery = new EvmDestinationDelivery({ client: escrow.client });
 
