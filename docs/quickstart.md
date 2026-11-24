@@ -15,6 +15,50 @@ it to the mempool, and poll until it reaches a terminal state.
 
 ---
 
+## 0. Stellar destination requirements (read this first)
+
+Before you build an intent, make sure the **Stellar recipient can actually
+receive the destination asset**.  The Soroban settlement contract delivers
+funds with a classic Stellar Asset Contract `transfer` to the recipient's
+`G…` account, and that transfer fails — locking the user's funds until
+`deadline + confirmationGrace` — if the recipient is not set up for the asset.
+
+| `destAsset` | Requirement on the recipient `G…` account |
+|-------------|-------------------------------------------|
+| `CODE:ISSUER` (e.g. `USDC:GA5Z…`) | The account **must exist** and hold an **authorised trustline** for `CODE:ISSUER`. |
+| `native` | The account **must exist** (it must be funded with at least the base reserve). |
+
+A fresh, unfunded Stellar account has neither, so bridging USDC to a brand-new
+account will fail unless the account is created and its trustline is
+established first.
+
+**The SDK can pre-check this for you.**  `buildIntent` accepts an optional
+`checkTrustline` flag (and an optional `horizonUrl` / `rpcUrl` to query).  When
+enabled, `buildIntent` queries Horizon (or Soroban RPC `getLedgerEntries`) and
+throws a `PerihelionTrustlineError` before the intent is ever signed or
+submitted if the recipient does not exist or lacks an authorised trustline for
+the destination asset:
+
+```js
+const intent = buildIntent({
+  // …fields as in step 3…
+  destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  checkTrustline: true,
+  horizonUrl: "https://horizon.stellar.org",
+});
+// Throws PerihelionTrustlineError if the recipient cannot receive the asset.
+```
+
+**Solvers enforce this too.**  Before locking funds on the source chain, a
+solver checks the recipient's trustline via Soroban RPC `getLedgerEntries`.  If
+the trustline is missing (or the account does not exist for `native`), the
+solver **skips the intent terminally** — it will not fill it, so no LayerZero
+fee is spent on a lock leg that cannot settle.  This means an intent to a
+recipient without a trustline will never be filled, even if it is accepted by
+the mempool.  Always pre-check on the client side.
+
+---
+
 ## 1. Start the local mock mempool
 
 The `@perihelion/mempool` package ships an in-memory REST server that accepts
@@ -91,9 +135,15 @@ const client = new PerihelionClient({
 //
 // buildIntent validates every field and fills in a random nonce and an open
 // preferredSolver (zero address → any solver may fill).
+//
+// checkTrustline: true makes buildIntent query Horizon and throw a
+// PerihelionTrustlineError if the recipient does not exist or lacks an
+// authorised trustline for destAsset (see step 0).  Omit it (or set it to
+// false) to skip the network check.
 const intent = buildIntent({
   user:          account.address,
   // Real Stellar account strkey — 56-char G.../C... base32 address.
+  // This account must exist and hold a trustline for the destAsset below.
   destination:   "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
   sourceChainId: CHAIN_ID,
   sourceAsset:   "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC on Base
@@ -101,6 +151,8 @@ const intent = buildIntent({
   destAsset:     "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
   minDestAmount: "9900000",    // accept ≥ 0.99 USDC on Stellar (7 decimals)
   deadline:      Math.floor(Date.now() / 1000) + 600, // 10 minutes from now
+  checkTrustline: true,
+  horizonUrl:    "https://horizon.stellar.org",
 });
 
 console.log("Intent nonce:", intent.nonce);
@@ -156,6 +208,11 @@ Submitted:    0x7b3f...
 Status → pending
 Timed out (expected for mock): [Perihelion] waitForSettlement timed out for 0x7b3f... (last status: pending)
 ```
+
+> **Note on `checkTrustline`** — the trustline pre-check queries a live Horizon
+> endpoint, so it is skipped automatically when the mock mempool is used without
+> a `horizonUrl`.  In production, always pass `checkTrustline: true` so a
+> misconfigured destination is caught before the EVM lock.
 
 ---
 
@@ -219,6 +276,7 @@ console.log("Record:", record.status, record.intent.deadline);
 | [Architecture](./architecture.md) | Settlement flow and trust model |
 | [Technical Architecture](./TECHNICAL-ARCHITECTURE.md) | Full production spec |
 | [Running a Solver](./running-a-solver.md) | How to run a reference solver node |
+| [FAQ](./faq.md) | Common questions, including trustline troubleshooting |
 | [sdk/README.md](../sdk/README.md) | Full SDK API reference |
 | [mempool/README.md](../mempool/README.md) | Mock mempool server docs |
 

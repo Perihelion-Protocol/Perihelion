@@ -183,7 +183,8 @@ export type SkipCode =
   | "below_margin"
   | "implausible_profit"
   | "insufficient_inventory"
-  | "insufficient_native_balance";
+  | "insufficient_native_balance"
+  | "missing_trustline";
 
 export interface FillDecision {
   readonly fill: boolean;
@@ -252,6 +253,40 @@ export function escrowSourceNativeCost(
   return async (intent: Intent) => (await escrow.quoteFee(intent)) + lockGasBufferWei;
 }
 
+// ─── recipient trustline deps ────────────────────────────────────────────────
+
+/**
+ * Result of a recipient-readiness probe: whether the Stellar recipient can
+ * actually receive `destAsset` via the destination SAC `transfer`.
+ *
+ * For classic assets (`CODE:ISSUER`) the account must exist and hold an
+ * authorised trustline; for `native` the account must exist. Soroban contract
+ * tokens (`C…`) need no trustline and are always ready.
+ */
+export interface RecipientReadiness {
+  readonly ready: boolean;
+  /** Human-readable explanation when `ready` is false. */
+  readonly reason?: string;
+}
+
+/**
+ * Checks whether the intent's Stellar recipient can receive `destAsset`.
+ * See {@link RecipientReadiness}. Wire this to an RPC `getLedgerEntries`
+ * probe (the SDK ships a helper) so the solver never locks EVM funds for a
+ * fill that `deliver_intent` would reject.
+ */
+export type RecipientReadinessCheck = (intent: Intent) => Promise<RecipientReadiness>;
+
+/**
+ * Default readiness check used when no {@link RecipientReadinessCheck} is
+ * injected: assumes the recipient is ready. Operators should wire a real
+ * `getLedgerEntries`-backed probe in production; without it the trustline
+ * guard is a no-op.
+ */
+export const defaultRecipientReadinessCheck: RecipientReadinessCheck = async () => ({
+  ready: true,
+});
+
 // ─── evaluate ────────────────────────────────────────────────────────────────
 
 /**
@@ -292,7 +327,16 @@ export function isSolverEligible(
  * pricing overrides (`priceOracle`/`feeEstimator`/`decimalsLookup`), an
  * inventory provider (`availableBalance`), or an object satisfying both.
  */
-export type EvaluateDeps = PricingDeps & Partial<InventoryProvider> & NativeCostDeps;
+export type EvaluateDeps = PricingDeps &
+  Partial<InventoryProvider> &
+  NativeCostDeps & {
+    /**
+     * Probes whether the Stellar recipient can receive `destAsset` (exists and,
+     * for classic assets, holds an authorised trustline). Defaults to
+     * {@link defaultRecipientReadinessCheck}, which assumes readiness.
+     */
+    recipientReadiness?: RecipientReadinessCheck;
+  };
 
 /** Decide whether to fill an intent given current config and pricing. */
 export async function evaluate(
@@ -341,6 +385,22 @@ export async function evaluate(
   }
   if (!isSolverEligible(intent.preferredSolver, config.solverAddress)) {
     return { fill: false, code: "reserved", reason: "reserved for another solver", terminal: true };
+  }
+  // The destination SAC `transfer` to a `G…` recipient requires the account to
+  // exist and, for classic assets, to hold an authorised trustline. Neither
+  // the EVM escrow nor the Soroban registration checks this, so a fill would
+  // lock the user's funds until cancelExpired while the solver pays the
+  // LayerZero fee for nothing. Probe before any on-chain action and skip
+  // terminally: a missing trustline is a durable property of the recipient,
+  // not a transient condition.
+  const readiness = await (deps.recipientReadiness ?? defaultRecipientReadinessCheck)(intent);
+  if (!readiness.ready) {
+    return {
+      fill: false,
+      code: "missing_trustline",
+      reason: readiness.reason ?? `recipient cannot receive ${intent.destAsset}`,
+      terminal: true,
+    };
   }
 
   // ── pricing (transient failures → non-terminal skip so we retry later) ────

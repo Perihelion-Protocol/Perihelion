@@ -68,6 +68,27 @@ contract CrossValidateTest is Test {
         }
     }
 
+    /// @dev Cross-chain parity: both chains must reject a rolling-window cap
+    /// configuration where `cap > 0` and `duration == 0`. On EVM the setter
+    /// reverts with `InvalidDuration`; the Soroban `set_rolling_window_cap`
+    /// returns the matching `InvalidDuration` error (see the Soroban parity
+    /// tests). Accepting this configuration would silently disable the cap
+    /// while emitting an event that suggests it was set.
+    function testCrossValidate_RollingWindowCapZeroDuration() public {
+        // EVM: cap > 0 with duration == 0 must revert with InvalidDuration.
+        vm.prank(address(this));
+        vm.expectRevert(PerihelionEscrow.InvalidDuration.selector);
+        harness.setRollingWindowCap(1, 0);
+
+        // A nonzero duration with a nonzero cap is accepted (sanity check that
+        // the revert above is caused by the duration, not the cap).
+        harness.setRollingWindowCap(1, 1);
+
+        // cap == 0 with duration == 0 disables the cap and is allowed on both
+        // chains, so it must not revert.
+        harness.setRollingWindowCap(0, 0);
+    }
+
     /// @dev General corpus validation: read all .hex files in the generated
     /// corpus directory and attempt to decode. Log any unexpected results.
     function testCrossValidateCorpus() public {

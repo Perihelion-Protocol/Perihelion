@@ -1186,6 +1186,150 @@ test("validateIntent accepts a contract-only token as destAsset", () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// Issue #1119 — Classic-asset trustline pre-check
+//
+// A classic `CODE:ISSUER` fill requires the G... recipient to exist and hold an
+// authorised trustline for the asset; `native` requires the account to exist.
+// The SDK must surface this before any signing or on-chain action.
+// ---------------------------------------------------------------------------
+
+/** Minimal Horizon-like stub used by the trustline pre-check. */
+function stubHorizon(opts: {
+  account?: { balances: Array<{ asset_type: string; asset_code?: string; asset_issuer?: string }> } | null;
+  onRequest?: (url: string) => void;
+}) {
+  return {
+    loadAccount: async (id: string) => {
+      opts.onRequest?.(id);
+      if (opts.account === null || opts.account === undefined) {
+        const err = new Error("Account not found") as Error & { response?: { status: number } };
+        err.response = { status: 404 };
+        throw err;
+      }
+      return opts.account;
+    },
+  };
+}
+
+test("#1119 buildIntent rejects a classic asset when the recipient has no trustline", async () => {
+  const horizon = stubHorizon({
+    account: { balances: [] }, // account exists, but no trustline for USDC:issuer
+  });
+
+  await assert.rejects(
+    async () =>
+      buildIntent(sampleParams(), {
+        suppressWarning: true,
+        horizon: horizon as any,
+        checkTrustline: true,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof PerihelionValidationError);
+      assert.equal((err as PerihelionValidationError).field, "destination");
+      assert.match((err as Error).message, /trustline/i);
+      return true;
+    },
+  );
+});
+
+test("#1119 buildIntent rejects a classic asset when the recipient account does not exist", async () => {
+  const horizon = stubHorizon({ account: null });
+
+  await assert.rejects(
+    async () =>
+      buildIntent(sampleParams(), {
+        suppressWarning: true,
+        horizon: horizon as any,
+        checkTrustline: true,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof PerihelionValidationError);
+      assert.equal((err as PerihelionValidationError).field, "destination");
+      return true;
+    },
+  );
+});
+
+test("#1119 buildIntent rejects native when the recipient account does not exist", async () => {
+  const horizon = stubHorizon({ account: null });
+
+  await assert.rejects(
+    async () =>
+      buildIntent(
+        { ...sampleParams(), destAsset: "native" },
+        { suppressWarning: true, horizon: horizon as any, checkTrustline: true },
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof PerihelionValidationError);
+      assert.equal((err as PerihelionValidationError).field, "destination");
+      return true;
+    },
+  );
+});
+
+test("#1119 buildIntent accepts a classic asset when the recipient holds an authorised trustline", async () => {
+  const horizon = stubHorizon({
+    account: {
+      balances: [
+        {
+          asset_type: "credit_alphanum4",
+          asset_code: "USDC",
+          asset_issuer: VALID_DESTINATION,
+        },
+      ],
+    },
+  });
+
+  const intent = await buildIntent(sampleParams(), {
+    suppressWarning: true,
+    horizon: horizon as any,
+    checkTrustline: true,
+  });
+  assert.equal(intent.destAsset, VALID_DEST_ASSET);
+});
+
+test("#1119 buildIntent accepts native when the recipient account exists", async () => {
+  const horizon = stubHorizon({ account: { balances: [] } });
+
+  const intent = await buildIntent(
+    { ...sampleParams(), destAsset: "native" },
+    { suppressWarning: true, horizon: horizon as any, checkTrustline: true },
+  );
+  assert.equal(intent.destAsset, "native");
+});
+
+test("#1119 buildIntent does not contact Horizon when the trustline check is not requested", async () => {
+  let called = false;
+  const horizon = stubHorizon({
+    account: null,
+    onRequest: () => {
+      called = true;
+    },
+  });
+
+  // No checkTrustline: the pre-check must not run, so no Horizon request is made.
+  buildIntent(sampleParams(), { suppressWarning: true, horizon: horizon as any });
+  assert.equal(called, false, "Horizon must not be queried unless the check is requested");
+});
+
+test("#1119 validateIntent rejects a classic asset with no trustline before any signing", async () => {
+  const horizon = stubHorizon({ account: { balances: [] } });
+
+  await assert.rejects(
+    async () =>
+      validateIntent(sampleParams(), undefined, {
+        horizon: horizon as any,
+        checkTrustline: true,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof PerihelionValidationError);
+      assert.equal((err as PerihelionValidationError).field, "destination");
+      return true;
+    },
+  );
+});
+
 test("buildIntent never writes to the console when no onWarning is given (#980)", () => {
   const seen: unknown[] = [];
   const originalWarn = console.warn;

@@ -4909,6 +4909,95 @@ fn quote_and_dispatch_use_identical_non_empty_options() {
     assert!(quoted >= 0);
 }
 
+// --- Issue #1118: rolling-window cap rejects cap > 0 with duration == 0 ------
+
+/// `cap > 0 && duration == 0` would silently disable the cap (the rolling
+/// check is skipped when the window is zero), so the setter must reject it
+/// exactly like the EVM `InvalidDuration` path, leaving state untouched.
+#[test]
+fn set_rolling_window_cap_rejects_positive_cap_with_zero_duration() {
+    let s = setup();
+    // Establish a valid, non-default configuration first so we can prove the
+    // rejected call does not mutate it.
+    s.client.set_rolling_window_cap(&1_000i128, &60u64);
+    assert_eq!(s.client.get_rolling_window_cap(), 1_000i128);
+    assert_eq!(s.client.get_rolling_window_duration(), 60u64);
+
+    // Clear the event buffer so only the rejected call's (absent) events show.
+    let _ = s.env.events().all();
+
+    assert_eq!(
+        s.client.try_set_rolling_window_cap(&5_000i128, &0u64),
+        Err(Ok(PerihelionError::InvalidDuration))
+    );
+
+    // Stored configuration is unchanged.
+    assert_eq!(s.client.get_rolling_window_cap(), 1_000i128);
+    assert_eq!(s.client.get_rolling_window_duration(), 60u64);
+
+    // No `rolling_window_cap_set` event was emitted.
+    let events = s.env.events().all();
+    let expected = Symbol::new(&s.env, "rolling_window_cap_set");
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|topic| {
+            Symbol::try_from_val(&s.env, &topic)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
+    });
+    assert!(
+        !found,
+        "a rejected set_rolling_window_cap must not emit rolling_window_cap_set"
+    );
+}
+
+/// A zero cap disables the rolling check and is valid with any duration.
+#[test]
+fn set_rolling_window_cap_accepts_zero_cap_with_any_duration() {
+    let s = setup();
+
+    s.client.set_rolling_window_cap(&0i128, &0u64);
+    assert_eq!(s.client.get_rolling_window_cap(), 0i128);
+    assert_eq!(s.client.get_rolling_window_duration(), 0u64);
+    assert_event_with_symbol(&s.env, &s.env.events().all(), "rolling_window_cap_set", 2);
+
+    s.client.set_rolling_window_cap(&0i128, &3_600u64);
+    assert_eq!(s.client.get_rolling_window_cap(), 0i128);
+    assert_eq!(s.client.get_rolling_window_duration(), 3_600u64);
+    assert_event_with_symbol(&s.env, &s.env.events().all(), "rolling_window_cap_set", 2);
+}
+
+/// A positive cap with a positive duration is the normal configuration and
+/// must be stored and announced with the exact values supplied.
+#[test]
+fn set_rolling_window_cap_accepts_positive_cap_with_positive_duration() {
+    let s = setup();
+
+    s.client.set_rolling_window_cap(&250_000i128, &900u64);
+    assert_eq!(s.client.get_rolling_window_cap(), 250_000i128);
+    assert_eq!(s.client.get_rolling_window_duration(), 900u64);
+
+    let events = s.env.events().all();
+    let expected = Symbol::new(&s.env, "rolling_window_cap_set");
+    let mut found = false;
+    for (_, topics, data) in events.iter() {
+        let is_cap_set = topics.iter().any(|topic| {
+            Symbol::try_from_val(&s.env, &topic)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        });
+        if !is_cap_set {
+            continue;
+        }
+        let tuple: (u64, i128) = <(u64, i128)>::try_from_val(&s.env, &data)
+            .expect("rolling_window_cap_set payload must be (duration, cap)");
+        assert_eq!(tuple.0, 900u64);
+        assert_eq!(tuple.1, 250_000i128);
+        found = true;
+    }
+    assert!(found, "rolling_window_cap_set event not emitted");
+}
+
 #[test]
 fn set_enforced_options_overrides_default_options() {
     let s = setup();

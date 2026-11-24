@@ -285,6 +285,63 @@ contract ReleaseFalseReturningERC20 is IERC20 {
     }
 }
 
+/// @dev USDC/USDT-style token with an issuer-controlled blocklist. Transfers to or
+///      from a blocklisted address revert, mimicking the real tokens' behaviour.
+contract BlocklistERC20 is IERC20 {
+    // Optional EIP-20 metadata (IERC20 declares these; mocks don't track supply).
+    function name() external pure returns (string memory) {
+        return "Mock";
+    }
+
+    function symbol() external pure returns (string memory) {
+        return "MOCK";
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => bool) public blocked;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function setBlocked(address who, bool isBlocked) external {
+        blocked[who] = isBlocked;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function _check(address from, address to) internal view {
+        require(!blocked[from] && !blocked[to], "blocklisted");
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        _check(msg.sender, to);
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        _check(from, to);
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
 /// @dev Minimal ERC-1271 smart-contract wallet for tests. Returns the magic
 ///      value when `valid` is true, otherwise an arbitrary non-magic value.
 contract MockERC1271Wallet {
@@ -413,6 +470,10 @@ contract PerihelionEscrowTest is Test {
     event OwnershipTransferCancelled(address indexed previousOwner);
     event EnforcedOptionsSet(bytes options);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
+    event TransferDeferred(
+        bytes32 indexed intentHash, address indexed token, address indexed recipient, uint256 amount
+    );
+    event Claimed(address indexed token, address indexed to, uint256 amount);
 
     function setUp() public {
         endpoint = new MockEndpoint();
@@ -2327,5 +2388,119 @@ contract PerihelionEscrowTest is Test {
         vm.prank(address(0xDEAD));
         vm.expectRevert(PerihelionEscrow.NotOwner.selector);
         escrow.skim(address(token), address(0xDEAD), 1);
+    }
+
+    // --- Issue #1120: blocklisted recipients fall back to pull payment --------
+
+    /// @dev Locks `_intent()` against a blocklisting token and returns the hash.
+    function _lockBlocklist(BlocklistERC20 blk) internal returns (bytes32 h) {
+        _allowAsset(address(blk));
+        blk.mint(user, 1_000_000);
+        vm.prank(user);
+        blk.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(blk);
+        bytes memory sig = _sign(intent);
+        h = escrow.hashIntent(intent);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    /// A blocklisted solver must not brick FillConfirmed: the release finalises,
+    /// the amount is credited to the solver, and totalLocked drops to zero.
+    function test_BlocklistedSolver_ReleaseDefersAndIsClaimable() public {
+        BlocklistERC20 blk = new BlocklistERC20();
+        bytes32 h = _lockBlocklist(blk);
+        assertEq(escrow.totalLocked(address(blk)), 100_000);
+
+        blk.setBlocked(solver, true);
+
+        vm.expectEmit(true, true, true, true);
+        emit TransferDeferred(h, address(blk), solver, 100_000);
+        _confirm(h, solver, 1);
+
+        // Lock is finalised and the invariant holds across the deferral.
+        (,,,,,, bool released,) = escrow.locks(h);
+        assertTrue(released);
+        assertEq(escrow.totalLocked(address(blk)), 0);
+        assertEq(escrow.claimable(address(blk), solver), 100_000);
+        assertEq(blk.balanceOf(solver), 0);
+
+        // Still blocked: the claim reverts and nothing is lost.
+        vm.prank(solver);
+        vm.expectRevert();
+        escrow.claim(address(blk), solver);
+
+        // Once unblocked, the solver pulls the funds — to a different address.
+        blk.setBlocked(solver, false);
+        address fresh = address(0xF00D);
+        vm.expectEmit(true, true, false, true);
+        emit Claimed(address(blk), fresh, 100_000);
+        vm.prank(solver);
+        escrow.claim(address(blk), fresh);
+
+        assertEq(blk.balanceOf(fresh), 100_000);
+        assertEq(escrow.claimable(address(blk), solver), 0);
+        assertEq(escrow.totalLocked(address(blk)), 0);
+    }
+
+    /// A blocklisted user must not brick CancelIntent: the refund finalises and
+    /// the amount becomes claimable.
+    function test_BlocklistedUser_CancelIntentDefersAndIsClaimable() public {
+        BlocklistERC20 blk = new BlocklistERC20();
+        bytes32 h = _lockBlocklist(blk);
+
+        blk.setBlocked(user, true);
+
+        vm.expectEmit(true, true, true, true);
+        emit TransferDeferred(h, address(blk), user, 100_000);
+        _cancel(h, 1);
+
+        (,,,,,,, bool refunded) = escrow.locks(h);
+        assertTrue(refunded);
+        assertEq(escrow.totalLocked(address(blk)), 0);
+        assertEq(escrow.claimable(address(blk), user), 100_000);
+
+        blk.setBlocked(user, false);
+        address fresh = address(0xF00D);
+        vm.prank(user);
+        escrow.claim(address(blk), fresh);
+        assertEq(blk.balanceOf(fresh), 100_000);
+        assertEq(escrow.claimable(address(blk), user), 0);
+    }
+
+    /// A blocklisted user must not brick cancelExpired: the refund finalises and
+    /// the amount becomes claimable.
+    function test_BlocklistedUser_CancelExpiredDefersAndIsClaimable() public {
+        BlocklistERC20 blk = new BlocklistERC20();
+        bytes32 h = _lockBlocklist(blk);
+        PerihelionEscrow.Intent memory intent = _intent();
+
+        blk.setBlocked(user, true);
+
+        vm.warp(intent.deadline + escrow.confirmationGrace());
+        vm.expectEmit(true, true, true, true);
+        emit TransferDeferred(h, address(blk), user, 100_000);
+        escrow.cancelExpired(h);
+
+        (,,,,,,, bool refunded) = escrow.locks(h);
+        assertTrue(refunded);
+        assertEq(escrow.totalLocked(address(blk)), 0);
+        assertEq(escrow.claimable(address(blk), user), 100_000);
+
+        blk.setBlocked(user, false);
+        address fresh = address(0xF00D);
+        vm.prank(user);
+        escrow.claim(address(blk), fresh);
+        assertEq(blk.balanceOf(fresh), 100_000);
+        assertEq(escrow.claimable(address(blk), user), 0);
+    }
+
+    /// claim() with nothing credited reverts.
+    function test_RevertWhen_ClaimNothingOwed() public {
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.NothingToClaim.selector);
+        escrow.claim(address(token), solver);
     }
 }

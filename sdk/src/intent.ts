@@ -271,8 +271,96 @@ export function validateAmount(value: string, field: string, max = I128_MAX): vo
   }
 }
 
+/**
+ * Result of a destination trustline pre-check.
+ *
+ * Classic Stellar assets (`CODE:ISSUER`) can only be received by an account that
+ * exists and holds an authorised trustline for the asset; `native` (XLM) only
+ * requires the account to exist. Soroban token contracts (`C...`) need no check.
+ */
+export interface TrustlineCheckResult {
+  /** True when the destination can receive `destAsset` without further setup. */
+  ok: boolean;
+  /** Human-readable explanation when `ok` is false. */
+  reason?: string;
+}
+
+/**
+ * Callback used to pre-check that a destination can receive `destAsset`.
+ *
+ * Supply it via {@link BuildOptions.checkTrustline} (or {@link BuildOptions.horizon})
+ * to make {@link buildIntent} fail fast — before any EVM lock — when the recipient
+ * lacks a trustline for a classic `CODE:ISSUER` asset, or does not exist for `native`.
+ * The check is opt-in: when neither option is provided, no network call is made.
+ */
+export type TrustlineCheck = (destination: string, destAsset: string) => Promise<TrustlineCheckResult>;
+
+/**
+ * Minimal Horizon account shape used by the built-in trustline check.
+ * Only the fields the check reads are typed.
+ */
+export interface HorizonAccountLike {
+  account_id?: string;
+  balances?: Array<{ asset_type?: string; asset_code?: string; asset_issuer?: string }>;
+}
+
+/**
+ * Minimal Horizon client interface accepted by {@link BuildOptions.horizon}.
+ * A real `StellarSdk.Horizon.Server` satisfies this shape.
+ */
+export interface HorizonClientLike {
+  loadAccount(accountId: string): Promise<HorizonAccountLike>;
+}
+
+/**
+ * Build the default trustline check backed by a Horizon client.
+ *
+ * - `native`: the account must exist (Horizon `loadAccount` must succeed).
+ * - `CODE:ISSUER`: the account must exist and hold a trustline for the asset.
+ * - `C...` contract strkeys: always OK (no trustline required).
+ *
+ * A 404 from Horizon (thrown by `loadAccount`) is reported as "account does not exist".
+ */
+export function horizonTrustlineCheck(horizon: HorizonClientLike): TrustlineCheck {
+  return async (destination: string, destAsset: string): Promise<TrustlineCheckResult> => {
+    if (destAsset.startsWith("C")) return { ok: true };
+    let account: HorizonAccountLike;
+    try {
+      account = await horizon.loadAccount(destination);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        reason:
+          `destination account ${destination} does not exist on Stellar ` +
+          `(Horizon error: ${message}); it must be funded before receiving ${destAsset}`,
+      };
+    }
+    if (destAsset === "native") return { ok: true };
+    const sep = destAsset.indexOf(":");
+    const code = destAsset.slice(0, sep);
+    const issuer = destAsset.slice(sep + 1);
+    const hasTrustline = (account.balances ?? []).some(
+      (b) =>
+        b.asset_type !== "native" &&
+        b.asset_code === code &&
+        b.asset_issuer === issuer,
+    );
+    if (!hasTrustline) {
+      return {
+        ok: false,
+        reason:
+          `destination account ${destination} has no trustline for ${destAsset}; ` +
+          `the recipient must add a trustline for this asset before the fill can succeed`,
+      };
+    }
+    return { ok: true };
+  };
+}
+
 /** Options for {@link buildIntent}. */
 export interface BuildOptions {
+=======
   /**
    * Minimum notional below which a warning is emitted, denominated in a fixed
    * 6-decimal basis (1_000_000 = $1 USD-equivalent) — the same basis as
@@ -297,6 +385,19 @@ export interface BuildOptions {
    * harness) decides where the warning goes.
    */
   onWarning?: (message: string) => void;
+  /**
+   * Opt-in destination trustline pre-check. When provided, {@link buildIntent}
+   * awaits it and throws {@link IntentValidationError} if the recipient cannot
+   * receive `destAsset` (missing account for `native`, or missing trustline for
+   * a classic `CODE:ISSUER` asset). See {@link TrustlineCheck}.
+   */
+  checkTrustline?: TrustlineCheck;
+  /**
+   * Convenience alternative to {@link BuildOptions.checkTrustline}: a Horizon
+   * client used to build the default trustline check via
+   * {@link horizonTrustlineCheck}. Ignored when `checkTrustline` is set.
+   */
+  horizon?: HorizonClientLike;
 }
 
 /**
@@ -317,16 +418,37 @@ export interface BuildOptions {
  *   `vMin`'s 6-decimal basis (matching {@link DEFAULT_V_MIN}'s own assumption),
  *   and the warning includes a note to that effect.
  *
+ * **Destination trustline pre-check (opt-in):**
+ * - When `options.checkTrustline` (or `options.horizon`) is supplied, the
+ *   destination is checked before returning. A classic `CODE:ISSUER` asset
+ *   requires the recipient to exist and hold a trustline for it; `native`
+ *   requires the recipient to exist. Failures throw {@link IntentValidationError}
+ *   so the caller never locks funds against an intent no solver can fill.
+ * - When neither option is supplied, no network call is made and behaviour is
+ *   unchanged.
+ *
  * @param params  Intent parameters (user, destination, amounts, etc.)
  * @param options Build options: `vMin` (minimum notional, see {@link BuildOptions.vMin}),
  *                `sourceDecimals` (asset precision, see {@link BuildOptions.sourceDecimals}),
- *                `suppressWarning` (skip the V_min check), and `onWarning` (receives the
- *                V_min warning; no-op when omitted)
+ *                `suppressWarning` (skip the V_min check), `onWarning` (receives the
+ *                V_min warning; no-op when omitted), and `checkTrustline`/`horizon`
+ *                (opt-in destination trustline pre-check)
  * @throws {@link PerihelionValidationError} if any field is malformed
  * @returns A fully-formed Intent with nonce and preferredSolver filled in
  */
-export function buildIntent(params: IntentParams, options?: BuildOptions): Intent {
+export async function buildIntent(params: IntentParams, options?: BuildOptions): Promise<Intent> {
   validateIntent(params);
+
+  const trustlineCheck = options?.checkTrustline ?? (options?.horizon ? horizonTrustlineCheck(options.horizon) : undefined);
+  if (trustlineCheck) {
+    const result = await trustlineCheck(params.destination, params.destAsset);
+    if (!result.ok) {
+      throw new IntentValidationError(
+        "destination",
+        result.reason ?? `destination cannot receive ${params.destAsset}`,
+      );
+    }
+  }
 
   const vMin = options?.vMin ?? DEFAULT_V_MIN;
   const suppressWarning = options?.suppressWarning ?? false;
