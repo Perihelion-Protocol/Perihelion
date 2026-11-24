@@ -458,6 +458,12 @@ export interface VerifyIntentOptions {
    * (or has cached) whether the user account is a contract.
    */
   isContract?: boolean;
+  /**
+   * Not a valid option. The client is passed as {@link VerifyIntentOptions.client}.
+   * Declared as `never` so that `{ publicClient }` is a compile-time error
+   * instead of being silently ignored (which would skip ERC-1271 verification).
+   */
+  publicClient?: never;
 }
 
 /**
