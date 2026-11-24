@@ -247,6 +247,11 @@ The closing PR states which of the three it satisfies, and closes the issue with
 keeps a diff attached to every closure, so a later reader can check the claim
 instead of trusting it.
 
+A PR that closes a previously-reported defect must also include or reference a
+regression test — a test that would fail on the old (broken) behaviour and pass
+on the fix. The PR template prompts for this. Once a maintainer has verified the
+regression test and the fix, the issue may be labelled `verified-fixed`.
+
 ### Negative tests for CI gates
 
 Every gating check gets a companion case proving it gates, checked in next to
