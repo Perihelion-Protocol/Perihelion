@@ -429,6 +429,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error GraceTooShort();
     error FeeTooLow();
     error ZeroAddress();
+    /// @dev `lock` was called before the Stellar peer was configured via {setPeer}.
+    ///      Distinct from {ZeroAddress}: the caller's arguments are fine, the escrow
+    ///      is simply not wired for settlement yet.
+    error PeerNotSet();
     error StringFieldEmpty();
     /// @dev `destination` is not a valid 56-char G.../C... strkey (#1052).
     error MalformedDestination();
@@ -781,7 +785,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      Exactly the quoted fee is forwarded to the endpoint; any excess
     ///      (`msg.value - quoted`) is refunded to `msg.sender` by this contract.
     ///      Callers should use {quoteFee} to minimise over-payment.
-    ///      Reverts with {ZeroAddress} while `stellarPeer` is unset, so no lock can
+    ///      Reverts with {PeerNotSet} while `stellarPeer` is unset, so no lock can
     ///      be created whose FillInstruction would go nowhere.
     ///      The user must have approved this contract for `sourceAmount` of `sourceAsset`.
     /// @param intent The user's signed intent specifying bridge parameters.
@@ -794,7 +798,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     {
         // Refuse to lock before a peer is configured: the FillInstruction would be
         // dispatched to the zero receiver and no FillConfirmed could ever arrive.
-        if (stellarPeer == bytes32(0)) revert ZeroAddress();
+        if (stellarPeer == bytes32(0)) revert PeerNotSet();
         // `lock` is split into narrowly-scoped helpers so no single frame holds
         // enough live locals to exceed the legacy codegen's 16-slot stack limit
         // (#857). Order of checks, effects and interactions is unchanged.

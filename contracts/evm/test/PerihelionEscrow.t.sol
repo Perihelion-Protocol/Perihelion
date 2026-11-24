@@ -1173,12 +1173,19 @@ contract PerihelionEscrowTest is Test {
         uint256 escrowBefore = token.balanceOf(address(fresh));
 
         vm.prank(solver);
-        vm.expectRevert(PerihelionEscrow.ZeroAddress.selector);
+        vm.expectRevert(PerihelionEscrow.PeerNotSet.selector);
         fresh.lock{ value: 0.01 ether }(intent, sig);
 
         // Reverts before pulling funds.
         assertEq(token.balanceOf(user), userBefore);
         assertEq(token.balanceOf(address(fresh)), escrowBefore);
+    }
+
+    /// @notice Issue #1121: an unset Stellar peer surfaces a dedicated `PeerNotSet`
+    ///         error, distinct from `ZeroAddress`, so callers can tell a missing
+    ///         deployment wiring apart from a bad argument.
+    function test_PeerNotSetSelectorIsDistinctFromZeroAddress() public pure {
+        assertTrue(PerihelionEscrow.PeerNotSet.selector != PerihelionEscrow.ZeroAddress.selector);
     }
 
     function test_SetConfirmationGrace() public {

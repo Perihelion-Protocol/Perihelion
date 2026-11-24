@@ -1883,6 +1883,11 @@ export const ESCROW_ABI = [
   },
   {
     "type": "error",
+    "name": "PeerNotSet",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "PauseNotGuardianInitiated",
     "inputs": []
   },
