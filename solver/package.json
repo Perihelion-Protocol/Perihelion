@@ -40,7 +40,7 @@
     "@perihelion/node-common": "*",
     "@perihelion/sdk": "*",
     "@stellar/stellar-sdk": "^13.0.0",
-    "viem": "^2.55.8"
+    "viem": "^2.58.4"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
